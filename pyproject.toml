@@ -1,0 +1,51 @@
+[project]
+name = "diffusion-trainer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11.10"
+dependencies = [
+    "accelerate>=1.1.1",
+    "diffusers>=0.31.0",
+    "einops>=0.8.0",
+    "opencv-python>=4.10.0.84",
+    "pillow>=11.0.0",
+    "rich>=13.9.4",
+    "torch>=2.5.1",
+    "torchvision>=0.20.1",
+    "transformers>=4.46.3",
+    "wandb>=0.18.7",
+    "wdtagger>=0.10.2",
+]
+
+
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+name = "default"
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+
+[tool.pyright]
+
+
+[tool.black]
+line-length = 140
+
+[tool.ruff]
+line-length = 140
+select = ["ALL"]
+
+ignore = ["PGH", "RUF003", "BLE001", "ERA001", "FIX002", "TD002", "TD003", "D"]
+
+[dependency-groups]
+dev = ["ruff>=0.8.0"]
