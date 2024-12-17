@@ -15,7 +15,7 @@ from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from PIL import Image
 from torchvision import transforms
 
-from diffusion_trainer.dataset.utils import glob_images_pathlib, glob_npz_files
+from diffusion_trainer.dataset.utils import glob_images_path, glob_npz_path
 from diffusion_trainer.shared import get_progress, logger
 
 
@@ -348,7 +348,7 @@ class LatentsGenerateProcessor:
                 metadata = {}
         else:
             metadata = {}
-        npz_path_list = glob_npz_files(self.target_path, recursive=True)
+        npz_path_list = glob_npz_path(self.target_path, recursive=True)
 
         for path in npz_path_list:
             relative_path = path.relative_to(self.target_path).with_suffix("").as_posix()
@@ -363,8 +363,8 @@ class LatentsGenerateProcessor:
         self._setup_threads()
         self._start_threads()
 
-        image_path_list = glob_images_pathlib(self.ds_path, recursive=True)
-        total_processes = len(image_path_list)
+        image_path_list = glob_images_path(self.ds_path, recursive=True)
+        total_processes = len(list(image_path_list))
 
         with get_progress() as progress:
             task = progress.add_task("Generating Latents...", total=total_processes)

@@ -1,6 +1,10 @@
 """Utility functions for dataset module."""
 
+import os
+import re
+from collections.abc import Generator
 from pathlib import Path
+from re import Pattern
 
 
 def get_meta_key_from_path(path: Path, ds_path: Path) -> str:
@@ -9,52 +13,60 @@ def get_meta_key_from_path(path: Path, ds_path: Path) -> str:
 
 
 IMAGE_EXTENSIONS = [
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".webp",
-    ".bmp",
-    ".PNG",
-    ".JPG",
-    ".JPEG",
-    ".WEBP",
-    ".BMP",
+    "jpg",
+    "jpeg",
+    "png",
+    "gif",
+    "bmp",
+    "tiff",
+    "webp",
+    "avif",
 ]
 
-NPZ_EXTENSIONS = [".npz"]
+NPZ_EXTENSIONS = ["npz"]
 
 
-def glob_files(
-    dir_path: str | Path,
-    extensions: list[str],
+def regex_files(
+    dir_path: Path | str,
+    pattern: Pattern[str],
     *,
-    recursive: bool = False,
-    ignore_hidden: bool = True,
-) -> list[Path]:
-    """Glob files with given extensions in a directory."""
-    dir_path = Path(dir_path)
-    paths = set()
-
-    def is_hidden(p: Path) -> bool:
-        """Check if a path is hidden."""
-        return any(part.startswith(".") for part in p.parts)
-
-    glob_func = dir_path.rglob if recursive else dir_path.glob
-
-    for ext in extensions:
-        for path in glob_func(f"*{ext}"):
-            if (ignore_hidden and is_hidden(path)) or path.is_dir():
-                continue
-            paths.add(path)
-
-    return sorted(paths)
+    recursive: bool = True,
+) -> Generator[Path, None, None]:
+    """Regex files in a directory."""
+    if recursive:
+        return regex_files_recursive(dir_path, pattern)
+    return regex_files_flat(dir_path, pattern)
 
 
-def glob_images_pathlib(dir_path: Path, *, recursive: bool = False, ignore_hidden: bool = True) -> list[Path]:
+def regex_files_flat(dir_path: Path | str, pattern: Pattern[str]) -> Generator[Path, None, None]:
+    for file in os.listdir(dir_path):
+        path = Path(file)
+        if pattern.match(path.as_posix()):
+            yield path
+
+
+def regex_files_recursive(dir_path: Path | str, pattern: Pattern[str]) -> Generator[Path, None, None]:
+    for root, _, files in os.walk(dir_path):
+        for file in files:
+            path = (Path(root) / file).relative_to(dir_path)
+            if pattern.match(path.as_posix()):
+                yield path
+
+
+def compile_pattern(extensions: list[str], *, ignore_hidden: bool) -> re.Pattern:
+    # Create a string that matches any of the given file extensions.
+    ext_pattern = "|".join(re.escape(ext) for ext in extensions)
+    pattern = f"^(?!\\.).*\\.({ext_pattern})$" if ignore_hidden else f".*\\.({ext_pattern})$"
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def glob_images_path(dir_path: Path | str, *, ignore_hidden: bool = True, recursive: bool = True) -> Generator[Path, None, None]:
     """Glob image files in a directory."""
-    return glob_files(dir_path, IMAGE_EXTENSIONS, recursive=recursive, ignore_hidden=ignore_hidden)
+    pattern = compile_pattern(IMAGE_EXTENSIONS, ignore_hidden=ignore_hidden)
+    return regex_files(dir_path, pattern, recursive=recursive)
 
 
-def glob_npz_files(dir_path: Path, *, recursive: bool = False, ignore_hidden: bool = True) -> list:
+def glob_npz_path(dir_path: Path | str, *, ignore_hidden: bool = True, recursive: bool = True) -> Generator[Path, None, None]:
     """Glob npz files in a directory."""
-    return glob_files(dir_path, NPZ_EXTENSIONS, recursive=recursive, ignore_hidden=ignore_hidden)
+    pattern = compile_pattern(NPZ_EXTENSIONS, ignore_hidden=ignore_hidden)
+    return regex_files(dir_path, pattern, recursive=recursive)

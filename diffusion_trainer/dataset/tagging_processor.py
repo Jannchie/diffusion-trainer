@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 from wdtagger import Tagger
 
-from diffusion_trainer.dataset.utils import get_meta_key_from_path, glob_images_pathlib
+from diffusion_trainer.dataset.utils import get_meta_key_from_path, glob_images_path
 from diffusion_trainer.shared import get_progress, logger
 
 
@@ -93,7 +93,16 @@ def worker(args: WorkerArgs) -> None:
 class TaggingProcessor:
     """Process images using the WD Tagger and merge the tags with existing metadata."""
 
-    def __init__(self, meta_path: str, ds_path: str, num_workers: int, *, skip_existing: bool) -> None:
+    def __init__(
+        self,
+        meta_path: str,
+        ds_path: str,
+        num_workers: int,
+        *,
+        skip_existing: bool,
+        ignore_hidden: bool = True,
+        recursive: bool = True,
+    ) -> None:
         """Initialize."""
         self.meta_path = Path(meta_path)
         self.ds_path = Path(ds_path)
@@ -101,7 +110,7 @@ class TaggingProcessor:
         self.skip_existing = skip_existing
         self.batch_size = 4
 
-        self.image_paths = glob_images_pathlib(self.ds_path, recursive=True)
+        self.image_paths = list(glob_images_path(self.ds_path, ignore_hidden=ignore_hidden, recursive=recursive))
         self.metadata = json.load(self.meta_path.open(encoding="utf-8"))
 
         self.task_queue = Queue()

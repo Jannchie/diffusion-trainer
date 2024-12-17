@@ -15,6 +15,7 @@ PATTERN_HAIR_CUT = re.compile(r", (bob|hime) cut, ")
 PATTERN_HAIR = re.compile(r", ([\w\-]+) hair, ")
 PATTERN_WORD = re.compile(r", ([\w\-]+|hair ornament), ")
 
+
 PATTERNS_REMOVE_IN_MULTI = [
     PATTERN_HAIR_LENGTH,
     PATTERN_HAIR_CUT,
