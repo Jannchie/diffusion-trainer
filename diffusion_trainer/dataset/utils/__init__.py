@@ -42,7 +42,8 @@ def regex_files_flat(dir_path: Path | str, pattern: Pattern[str]) -> Generator[P
     for file in os.listdir(dir_path):
         path = Path(file)
         if pattern.match(path.as_posix()):
-            yield path
+            abs_path = Path(dir_path) / file
+            yield abs_path
 
 
 def regex_files_recursive(dir_path: Path | str, pattern: Pattern[str]) -> Generator[Path, None, None]:
@@ -50,7 +51,8 @@ def regex_files_recursive(dir_path: Path | str, pattern: Pattern[str]) -> Genera
         for file in files:
             path = (Path(root) / file).relative_to(dir_path)
             if pattern.match(path.as_posix()):
-                yield path
+                abs_path = Path(root) / file
+                yield abs_path
 
 
 def compile_pattern(extensions: list[str], *, ignore_hidden: bool) -> re.Pattern:

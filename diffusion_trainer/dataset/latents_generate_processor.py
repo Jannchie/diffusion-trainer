@@ -363,8 +363,8 @@ class LatentsGenerateProcessor:
         self._setup_threads()
         self._start_threads()
 
-        image_path_list = retrieve_image_paths(self.ds_path, recursive=True)
-        total_processes = len(list(image_path_list))
+        image_path_list = list(retrieve_image_paths(self.ds_path, recursive=True))
+        total_processes = len(image_path_list)
 
         with get_progress() as progress:
             task = progress.add_task("Generating Latents...", total=total_processes)
