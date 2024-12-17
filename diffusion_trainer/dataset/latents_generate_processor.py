@@ -182,8 +182,14 @@ class SimpleLatentsProcessor:
 class LatentsGenerateProcessor:
     """ImageProcessingPipeline class to process images and save the latent vectors."""
 
-    def __init__(
-        self, vae_path: str, ds_path: str, target_path: str, dtype: torch.dtype = torch.float32, num_reader: int = 4, num_writer: int = 4
+    def __init__(  # noqa: PLR0913
+        self,
+        vae_path: str,
+        ds_path: str,
+        target_path: str,
+        dtype: torch.dtype = torch.float32,
+        num_reader: int = 4,
+        num_writer: int = 4,
     ) -> None:
         """Initialize the ImageProcessingPipeline class."""
         self.ds_path = Path(ds_path)
