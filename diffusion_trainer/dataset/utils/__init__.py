@@ -60,13 +60,13 @@ def compile_pattern(extensions: list[str], *, ignore_hidden: bool) -> re.Pattern
     return re.compile(pattern, re.IGNORECASE)
 
 
-def glob_images_path(dir_path: Path | str, *, ignore_hidden: bool = True, recursive: bool = True) -> Generator[Path, None, None]:
+def retrieve_image_paths(dir_path: Path | str, *, ignore_hidden: bool = True, recursive: bool = True) -> Generator[Path, None, None]:
     """Glob image files in a directory."""
     pattern = compile_pattern(IMAGE_EXTENSIONS, ignore_hidden=ignore_hidden)
     return regex_files(dir_path, pattern, recursive=recursive)
 
 
-def glob_npz_path(dir_path: Path | str, *, ignore_hidden: bool = True, recursive: bool = True) -> Generator[Path, None, None]:
+def retrieve_npz_path(dir_path: Path | str, *, ignore_hidden: bool = True, recursive: bool = True) -> Generator[Path, None, None]:
     """Glob npz files in a directory."""
     pattern = compile_pattern(NPZ_EXTENSIONS, ignore_hidden=ignore_hidden)
     return regex_files(dir_path, pattern, recursive=recursive)
