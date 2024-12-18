@@ -93,7 +93,7 @@ def worker(args: WorkerArgs) -> None:
 class TaggingProcessor:
     """Process images using the WD Tagger and merge the tags with existing metadata."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         meta_path: str,
         ds_path: str,

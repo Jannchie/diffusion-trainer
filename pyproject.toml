@@ -9,6 +9,7 @@ dependencies = [
     "diffusers>=0.31.0",
     "einops>=0.8.0",
     "opencv-python>=4.10.0.84",
+    "pillow-avif-plugin>=1.4.6",
     "pillow>=11.0.0",
     "rich>=13.9.4",
     "torch>=2.5.1",

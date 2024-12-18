@@ -3,6 +3,7 @@
 import argparse
 import json
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
@@ -238,6 +239,7 @@ class LatentsGenerateProcessor:
                         continue
                 except Exception as e:
                     # 读取失败，重新处理
+                    logger.error(f"Failed to load {npz_save_path}, reprocessing...")
                     logger.exception(e)
             try:
                 image_np = SimpleLatentsProcessor.load_image(image_path.as_posix())
@@ -300,6 +302,7 @@ class LatentsGenerateProcessor:
             threading.Thread(
                 target=self.read_image,
                 args=(),
+                daemon=True,
             )
             for _ in range(self.num_reader)
         ]
@@ -308,6 +311,7 @@ class LatentsGenerateProcessor:
             threading.Thread(
                 target=self.process_image,
                 args=(processor,),
+                daemon=True,
             )
             for processor in self.processor_list
         ]
@@ -316,6 +320,7 @@ class LatentsGenerateProcessor:
             threading.Thread(
                 target=self.write_npz,
                 args=(),
+                daemon=True,
             )
             for _ in range(self.num_writer)
         ]
@@ -363,8 +368,12 @@ class LatentsGenerateProcessor:
         self._setup_threads()
         self._start_threads()
 
+        logger.info("Retrieving image paths...")
+        t = time.time()
         image_path_list = list(retrieve_image_paths(self.ds_path, recursive=True))
         total_processes = len(image_path_list)
+        t = time.time() - t
+        logger.info(f"Finded {total_processes} images. Used time: {t:.4f} seconds.")
 
         with get_progress() as progress:
             task = progress.add_task("Generating Latents...", total=total_processes)
