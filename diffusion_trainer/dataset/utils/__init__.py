@@ -7,7 +7,7 @@ from pathlib import Path
 
 def get_meta_key_from_path(path: Path, ds_path: Path) -> str:
     """Get the metadata key from a path."""
-    return path.relative_to(ds_path).with_suffix("").as_posix()
+    return path.relative_to(ds_path.resolve()).with_suffix("").as_posix()
 
 
 IMAGE_EXTENSIONS = (
@@ -31,7 +31,7 @@ def is_hidden_file(file: Path) -> bool:
 
 def retrieve_image_paths(dir_path: Path | str, *, ignore_hidden: bool = True, recursive: bool = True) -> Generator[Path, None, None]:
     """Glob image files in a directory."""
-    dir_path = Path(dir_path)
+    dir_path = Path(dir_path).resolve()
     if recursive:
         for root, _, files in os.walk(dir_path):
             for file in files:
@@ -51,7 +51,7 @@ def retrieve_image_paths(dir_path: Path | str, *, ignore_hidden: bool = True, re
 
 def retrieve_npz_path(dir_path: Path | str, *, ignore_hidden: bool = True, recursive: bool = True) -> Generator[Path, None, None]:
     """Glob npz files in a directory."""
-    dir_path = Path(dir_path)
+    dir_path = Path(dir_path).resolve()
     if recursive:
         for root, _, files in os.walk(dir_path):
             for file in files:

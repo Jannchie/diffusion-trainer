@@ -40,43 +40,51 @@ class WorkerArgs:
 
 def worker(args: WorkerArgs) -> None:
     """Worker function to process images using Tagger."""
-    tagger = Tagger(
-        model_repo="SmilingWolf/wd-vit-large-tagger-v3",
-        slient=True,
-    )
+    tagger = Tagger()
 
     task_queue = args.task_queue
     result_queue = args.result_queue
     metadata = args.metadata
     ds_path_str = args.ds_path_str
     lock = args.lock
-
+    ds_path = Path(ds_path_str)
     while True:
         batch_files = task_queue.get()
         if batch_files is None:
             break  # terminate signal received
 
         len_before = len(batch_files)
-        batch_files = [f for f in batch_files if not Path(f).with_suffix(".txt").exists()]
+
         if args.skip_existing:
-            meta_keys = [get_meta_key_from_path(image_path, ds_path=Path(ds_path_str)) for image_path in batch_files]
-            batch_files = [f for f, key in zip(batch_files, meta_keys, strict=False) if metadata.get(key) is None]
+            meta_keys = [get_meta_key_from_path(image_path, ds_path=ds_path) for image_path in batch_files]
+            batch_files = [f for f, key in zip(batch_files, meta_keys, strict=False) if metadata.get(key, {}).get("tags") is None]
 
-        results = []
-        if batch_files:
-            try:
-                images: list[Image.Image] = [Image.open(image_path) for image_path in batch_files]
-                results = tagger.tag(images, general_threshold=0.35, character_threshold=0.9)  # type: ignore
-            except Exception as e:
-                logger.exception(e)
+        def filter_valid_files(paths: list[Path], images: list[Image.Image]) -> tuple[list[Path], list[Image.Image]]:
+            result_path, result_image = [], []
+            for path, image in zip(paths, images):
+                try:
+                    image.load()
+                    result_path.append(path)
+                    result_image.append(image)
+                except Exception as e:
+                    print(f"Error loading image {path}.")
+            return result_path, result_image
+
+        if not batch_files:
+            continue
+        try:
+            images: list[Image.Image] = [Image.open(image_path) for image_path in batch_files]
+            (valid_batch_files, valid_images) = filter_valid_files(batch_files, images)
+            if not valid_batch_files:
                 continue
+            results = tagger.tag(valid_images, general_threshold=0.35, character_threshold=0.9)  # type: ignore
+        except Exception as e:
+            logger.exception(e)
+            continue
 
-            # If result is not iterable, make it iterable
-            if not isinstance(results, list):
-                results = [results]
-
-            for image_path, result in zip(batch_files, results, strict=False):
-                with lock:
+        for image_path, result in zip(valid_batch_files, results, strict=False):
+            with lock:
+                try:
                     meta_key = get_meta_key_from_path(image_path, ds_path=Path(ds_path_str))
                     before_tags = metadata[meta_key].get("tags", "").split(", ")
                     more_tags = result.general_tags_string.split(", ")
@@ -84,7 +92,8 @@ def worker(args: WorkerArgs) -> None:
                     final_tags = before_tags + more_tags_not_in_before
                     final_tags_str = ", ".join(final_tags)
                     metadata[meta_key]["tags"] = final_tags_str
-
+                except Exception as e:
+                    logger.exception('Error processing metadata "%s"', image_path)
         result_queue.put(len_before)
 
     result_queue.put(None)
@@ -98,6 +107,7 @@ class TaggingProcessor:
         meta_path: str,
         ds_path: str,
         num_workers: int,
+        batch_size: int = 16,
         *,
         skip_existing: bool,
         ignore_hidden: bool = True,
@@ -108,9 +118,10 @@ class TaggingProcessor:
         self.ds_path = Path(ds_path)
         self.num_workers = num_workers
         self.skip_existing = skip_existing
-        self.batch_size = 4
+        self.batch_size = batch_size
 
         self.image_paths = list(retrieve_image_paths(self.ds_path, ignore_hidden=ignore_hidden, recursive=recursive))
+        logger.info(f"Found {len(self.image_paths)} images in {self.ds_path}")
         self.metadata = json.load(self.meta_path.open(encoding="utf-8"))
 
         self.task_queue = Queue()
@@ -132,7 +143,7 @@ class TaggingProcessor:
 
         self._process_results(workers)
 
-        # Optionally save the updated metadata back to the file
+        # Save the updated metadata back to the file
         with self.meta_path.open("w", encoding="utf-8") as meta_file:
             json.dump(self.metadata, meta_file, indent=2)
 
