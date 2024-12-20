@@ -43,7 +43,19 @@ torchvision = { index = "pytorch" }
 line-length = 140
 select = ["ALL"]
 
-ignore = ["PGH", "RUF003", "BLE001", "ERA001", "FIX002", "TD002", "TD003", "D"]
+ignore = [
+    "PGH",
+    "RUF003",
+    "BLE001",
+    "ERA001",
+    "FIX002",
+    "TD002",
+    "TD003",
+    "D",
+    "PLR2004", # Allow Magic Numbers
+    "INP001",  # Allow without __init__.py
+    "N812",    # Allow aliased to non-lowercase names (e.g. `import torch.nn.functional as F`)
+]
 
 [dependency-groups]
 dev = ["ruff>=0.8.0"]

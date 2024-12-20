@@ -3,3 +3,5 @@
 .logs
 *.egg-info
 __pycache__
+
+diffusers_sdxl_trainer.py
