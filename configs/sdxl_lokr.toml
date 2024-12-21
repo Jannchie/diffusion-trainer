@@ -1,0 +1,54 @@
+seed = 47
+
+model_path = "E:/webui_forge_cu121_torch21/webui/models/Stable-diffusion/creative-xl-0.9-b2.safetensors"
+save_dir = "./out"
+
+dataset_meta_path = "E:/dataset-demo/meta.json"
+
+# if dataset_path is not set, it will use the dataset_meta_path folder.
+# dataset_path = "E:/dataset-demo"
+
+model_name = "creativexl-test"
+
+mode = 'lokr'
+
+n_epochs = 10
+batch_size = 1
+gradient_accumulation_steps = 32
+
+save_every_n_epochs = 1
+save_every_n_steps = 1000
+
+preview_every_n_epochs = 1
+preview_every_n_steps = 100
+
+
+weight_dtype = "fp16"
+save_dtype = "fp16"
+
+unet_lr = 1e-5
+
+text_encoder_1_lr = 1e-6
+text_encoder_2_lr = 1e-6
+
+
+lora_rank = 4
+lora_alpha = 1
+lokr_factor = 16
+
+noise_offset = 0.0
+
+snr_gamma = 5.0
+
+max_grad_norm = 1.0
+
+timestep_bias_strategy = "none"
+timestep_bias_portion = 0.25
+timestep_bias_begin = 0
+timestep_bias_end = 100
+
+use_ema = false
+
+gradient_checkpointing = true
+
+log_with = "none"

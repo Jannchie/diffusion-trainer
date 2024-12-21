@@ -4,17 +4,21 @@ import logging
 
 from rich.logging import RichHandler
 
-from diffusion_trainer.dataset.dataset import DiffusionDataset
-from diffusion_trainer.finetune.sdxl import SDXLTuner
+logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
-logging.basicConfig(level=logging.DEBUG, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
 if __name__ == "__main__":
-    model_path = R"E:/webui_forge_cu121_torch21/webui/models/Stable-diffusion/creative-xl-0.9-b2.safetensors"
+    import tomllib
+    from pathlib import Path
 
-    dataset = DiffusionDataset.from_metadata(R"E:\dataset-demo\meta.json")
-    tuner = SDXLTuner(
-        model_path=model_path,
-        dataset=dataset,
-    )
-    tuner()
+    from diffusion_trainer.dataset.dataset import DiffusionDataset
+    from diffusion_trainer.finetune.sdxl import SDXLConfig, SDXLTuner
+
+    config_path = Path("configs/sdxl_lokr.toml")
+    sdxl_config_dict = tomllib.load(config_path.open("rb"))
+    sdxl_config = SDXLConfig(**sdxl_config_dict)
+
+    dataset = DiffusionDataset.from_metadata(sdxl_config.dataset_meta_path)
+
+    tuner = SDXLTuner(config=sdxl_config)
+    tuner(dataset=dataset)

@@ -1,10 +1,12 @@
 """Fintunner for Stable Diffusion XL model."""
 
+import gc
+import math
 import os
 import random
 import secrets
-from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
+from dataclasses import dataclass, field
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
@@ -12,15 +14,20 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
+from accelerate import Accelerator
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
+from diffusers.optimization import get_scheduler
+from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel, cast_training_params, compute_snr
-from diffusers.utils.state_dict_utils import convert_state_dict_to_diffusers
+from diffusers.utils.state_dict_utils import StateDictType, convert_state_dict_to_diffusers
+from diffusers.utils.torch_utils import is_compiled_module
 from peft.tuners.loha.config import LoHaConfig
 from peft.tuners.lokr.config import LoKrConfig
 from peft.tuners.lora.config import LoraConfig
 from peft.utils.save_and_load import get_peft_model_state_dict
+from rich.progress import Progress
 from torch.utils.data import DataLoader
 
 from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset
@@ -30,6 +37,72 @@ from diffusion_trainer.shared import get_progress
 logger = getLogger("diffusion_trainer.finetune.sdxl")
 
 
+def format_size(num: int) -> str:
+    if num >= 1_000_000_000:
+        return f"{num / 1_000_000_000:.1f} B"
+    if num >= 1_000_000:
+        return f"{num / 1_000_000:.1f} M"
+    if num >= 1_000:
+        return f"{num / 1_000:.1f} K"
+    return str(num)
+
+
+def unwrap_model(accelerator: Accelerator, model: torch.nn.Module) -> torch.nn.Module:
+    model = accelerator.unwrap_model(model)
+    return model._orig_mod if is_compiled_module(model) else model  # noqa: SLF001
+
+
+@dataclass
+class SampleOptions:
+    prompt: str
+    negative_prompt: str
+    steps: int
+    seed: int
+
+
+@dataclass
+class SDXLConfig:
+    model_path: str = field(metadata={"help": "Path to the model."})
+    dataset_meta_path: str = field(metadata={"help": "Path to the dataset metadata."})
+
+    dataset_path: str | None = field(default=None, metadata={"help": "Path to the dataset."})
+    seed: int = field(default_factory=lambda: secrets.randbelow(1_000_000_000), metadata={"help": "Seed for reproducibility."})
+    model_name: str = field(default="my_model", metadata={"help": "Model name."})
+    save_dir: str = field(default="out", metadata={"help": "Directory to save the model."})
+    save_dtype: str = field(default="fp16", metadata={"help": "Save dtype."})
+    weight_dtype: str = field(default="fp16", metadata={"help": "Weight dtype."})
+    mixed_precision: Literal["float16", "bfloat16", "fp16", "bf16"] = field(default="fp16", metadata={"help": "Mixed precision."})
+    prediction_type: Literal["epsilon", "v_prediction", "sample"] | None = field(default=None, metadata={"help": "Prediction type."})
+    n_epochs: int = field(default=10, metadata={"help": "Number of epochs."})
+    batch_size: int = field(default=8, metadata={"help": "Batch size."})
+    gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps."})
+    unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
+    text_encoder_1_lr: float = field(default=1e-6, metadata={"help": "Text encoder 1 learning rate."})
+    text_encoder_2_lr: float = field(default=1e-6, metadata={"help": "Text encoder 2 learning rate."})
+    mode: Literal["full-finetune", "lora", "lokr", "loha"] = field(default="lokr", metadata={"help": "Mode."})
+    lora_rank: int = field(default=4, metadata={"help": "Lora rank."})
+    lora_alpha: int = field(default=1, metadata={"help": "Lora alpha."})
+    lokr_factor: int = field(default=16, metadata={"help": "LoKr factor."})
+    noise_offset: float = field(default=0.0, metadata={"help": "Noise offset."})
+    gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
+    timestep_bias_strategy: Literal["none", "earlier", "later", "range"] = field(
+        default="none",
+        metadata={"help": "Timestep bias strategy."},
+    )
+    timestep_bias_multiplier: float = field(default=1.0, metadata={"help": "Timestep bias multiplier."})
+    timestep_bias_portion: float = field(default=0.25, metadata={"help": "Timestep bias portion."})
+    timestep_bias_begin: int = field(default=0, metadata={"help": "Timestep bias begin."})
+    timestep_bias_end: int = field(default=1000, metadata={"help": "Timestep bias end."})
+    snr_gamma: float = field(default=5.0, metadata={"help": "SNR gamma."})
+    max_grad_norm: float = field(default=1.0, metadata={"help": "Max gradient norm."})
+    use_ema: bool = field(default=False, metadata={"help": "Use EMA."})
+    save_every_n_steps: int = field(default=0, metadata={"help": "Save every n steps."})
+    save_every_n_epochs: int = field(default=1, metadata={"help": "Save every n epochs."})
+    preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
+    preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
+    log_with: Literal["wandb", "tensorboard", "none"] = field(default="none", metadata={"help": "Logger."})
+
+
 @dataclass
 class SDXLBatch:
     img_latents: torch.Tensor
@@ -37,6 +110,20 @@ class SDXLBatch:
     prompt_embeds_2: torch.Tensor
     prompt_embeds_pooled_2: torch.Tensor
     time_ids: torch.Tensor
+
+
+class DummyProgressBar:
+    def __init__(self, total: int) -> None:
+        pass
+
+    def __enter__(self) -> "DummyProgressBar":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        pass
+
+    def update(self) -> None:
+        pass
 
 
 def load_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXLPipeline:
@@ -50,83 +137,111 @@ def load_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXL
             pipe = StableDiffusionXLPipeline.from_single_file(path, torch_dtype=dtype)
     logger.info("Models loaded successfully.")
     if isinstance(pipe, StableDiffusionXLPipeline):
+        pipe.progress_bar = DummyProgressBar  # type: ignore
         return pipe
     msg = "Failed to load models."
+    raise ValueError(msg)
+
+
+def str_to_dtype(dtype: str) -> torch.dtype:
+    if dtype in ("float16", "half", "fp16"):
+        return torch.float16
+    if dtype == ("float32", "float", "fp32"):
+        return torch.float32
+    if dtype == ("float64", "double", "fp64"):
+        return torch.float64
+    if dtype == ("bfloat16", "bf16"):
+        return torch.bfloat16
+    msg = f"Unknown dtype {dtype}"
     raise ValueError(msg)
 
 
 class SDXLTuner:
     """Finetune Stable Diffusion XL model."""
 
-    def __init__(self, *, model_path: str, dataset: DiffusionDataset, seed: None | int = None) -> None:
+    @staticmethod
+    def from_config(config: dict) -> "SDXLTuner":
+        """Create a new instance from a configuration dictionary."""
+        return SDXLTuner(**config)
+
+    def __init__(self, *, config: SDXLConfig) -> None:
         """Initialize."""
-        self.model_path = Path(model_path)
-        self.seed = seed if seed is not None else secrets.randbelow(1_000_000_000)
+        self.config = config
+        self.model_path = Path(config.model_path)
 
-        self.accelerator = prepare_accelerator()
-        self.device = self.accelerator.device
+        self.model_name = config.model_name
+        self.save_dir = config.save_dir
 
-        self.save_dtype = torch.float16
-        self.weight_dtype = torch.float16
+        self.save_path = Path(self.save_dir) / self.model_name
 
-        self.pipeline = load_pipeline(self.model_path, self.weight_dtype)
+        self.seed = config.seed if config.seed is not None else secrets.randbelow(1_000_000_000)
 
-        # TODO: ignore the warning about triton
-        self.prediction_type = None
+        self.save_dtype = str_to_dtype(config.save_dtype)
+        self.weight_dtype = str_to_dtype(config.weight_dtype)
 
-        self.n_epochs = 1
-        self.batch_size = 1
-        self.gradient_accumulation_steps = 1
+        self.prediction_type = config.prediction_type
 
-        self.unet_lr = 1e-5
-        self.text_encoder_1_lr = 1e-6
-        self.text_encoder_2_lr = 1e-6
+        self.n_epochs = config.n_epochs
+        self.batch_size = config.batch_size
+        self.gradient_accumulation_steps = config.gradient_accumulation_steps
 
-        self.mode: Literal["full-finetune", "lora", "lokr", "loha"] = "lokr"
+        self.unet_lr = config.unet_lr
+        self.text_encoder_1_lr = config.text_encoder_1_lr
+        self.text_encoder_2_lr = config.text_encoder_2_lr
 
-        self.lora_rank = 4
-        self.lora_alpha = 1
+        self.mode: Literal["full-finetune", "lora", "lokr", "loha"] = config.mode
 
-        self.lokr_factor = 16  # For LoKr
+        self.lora_rank = config.lora_rank
+        self.lora_alpha = config.lora_alpha
 
-        self.noise_offset = 0.0
+        self.lokr_factor = config.lokr_factor
+
+        self.noise_offset = config.noise_offset
 
         # reduce memory usage by checkpointing the gradients
-        self.gradient_checkpointing = True
-
-        self.init_model_modules()
-        self.init_gradient_checkpointing()
-
-        self.dataset = dataset
+        self.gradient_checkpointing = config.gradient_checkpointing
 
         # The timestep bias strategy, which may help direct the model toward learning low or high frequency details.
         # The default value is 'none', which means no bias is applied.
         # The value of 'later' will increase the frequency of the model's final training timesteps.
-        self.timestep_bias_strategy: Literal["none", "earlier", "later", "range"] = "none"
+        self.timestep_bias_strategy = config.timestep_bias_strategy
         # The multiplier for the bias. Defaults to 1.0, which means no bias is applied.
         # A value of 2.0 will double the weight of the bias, and a value of 0.5 will halve it.
-        self.timestep_bias_multiplier = 1.0
+        self.timestep_bias_multiplier = config.timestep_bias_multiplier
         # The portion of timesteps to bias. Defaults to 0.25, which 25% of timesteps will be biased.
         # A value of 0.5 will bias one half of the timesteps. The value provided for `--timestep_bias_strategy` determines
         # whether the biased portions are in the earlier or later timesteps.
-        self.timestep_bias_portion = 0.25
+        self.timestep_bias_portion = config.timestep_bias_portion
         # When using `--timestep_bias_strategy=range`, the beginning (inclusive) timestep to bias.
         # Defaults to zero, which equates to having no specific bias.
-        self.timestep_bias_begin = 0
+        self.timestep_bias_begin = config.timestep_bias_begin
         # When using `--timestep_bias_strategy=range`, the final timestep (inclusive) to bias.
         # Defaults to 1000, which is the number of timesteps that Stable Diffusion is trained on.
-        self.timestep_bias_end = 1000
+        self.timestep_bias_end = config.timestep_bias_end
 
         # SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0.
         # More details here: https://arxiv.org/abs/2303.09556.
-        self.snr_gamma = 5.0
+        self.snr_gamma = config.snr_gamma
 
         # Max gradient norm.
-        self.max_grad_norm = 1.0
+        self.max_grad_norm = config.max_grad_norm
 
-        self.use_ema = False
+        self.use_ema = config.use_ema
 
+        self.save_every_n_epochs = config.save_every_n_epochs
+        self.save_every_n_steps = config.save_every_n_steps
+
+        self.mixed_precision = str_to_dtype(config.mixed_precision)
+
+        self.pipeline = load_pipeline(self.model_path, self.weight_dtype)
+        self.accelerator = prepare_accelerator(self.gradient_accumulation_steps, self.mixed_precision, self.config.log_with)
+        self.device = self.accelerator.device
+        self.init_model_modules()
+        self.init_gradient_checkpointing()
         self.init_ema()
+
+        for key, value in config.__dict__.items():
+            logger.info("%s: %s", key, value)
 
     def init_ema(self) -> None:
         # Create EMA for the unet.
@@ -270,9 +385,9 @@ class SDXLTuner:
                 self.text_encoder_1.add_adapter(text_loha_config)
                 self.text_encoder_2.add_adapter(text_loha_config)
 
-    def train(self) -> None:
-        sampler = BucketBasedBatchSampler(self.dataset, self.batch_size)
-        data_loader = DataLoader(self.dataset, batch_sampler=sampler, num_workers=0, collate_fn=self.dataset.collate_fn)
+    def train(self, dataset: DiffusionDataset) -> None:
+        sampler = BucketBasedBatchSampler(dataset, self.batch_size)
+        data_loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0, collate_fn=dataset.collate_fn)
         n_epochs = self.n_epochs
         progress = get_progress()
 
@@ -282,17 +397,20 @@ class SDXLTuner:
         trainable_parameters = self.get_trainable_parameters()
         cast_training_params([self.unet, self.text_encoder_1, self.text_encoder_2])
 
-        optimizer = torch.optim.Adafactor(trainable_parameters, lr=self.unet_lr)
+        self.noise_scheduler: DDPMScheduler = DDPMScheduler.from_config(self.pipeline.scheduler.config)  # type: ignore
 
-        self.noise_scheduler = DDPMScheduler(
-            beta_start=0.00085,
-            beta_end=0.012,
-            beta_schedule="scaled_linear",
-            num_train_timesteps=1000,
-            clip_sample=False,
+        optimizer = self.initialize_optimizer(trainable_parameters)
+
+        num_update_steps_per_epoch = math.ceil(len(data_loader) / self.gradient_accumulation_steps)
+        n_total_steps = n_epochs * num_update_steps_per_epoch
+
+        lr_scheduler = get_scheduler(
+            "cosine_with_restarts",
+            optimizer=optimizer,
+            num_warmup_steps=100,  # 此处应该是经过 accmulate 之后的 steps
+            num_training_steps=n_total_steps,
+            num_cycles=2,
         )
-
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
 
         optimizer = self.accelerator.prepare(optimizer)
         lr_scheduler = self.accelerator.prepare(lr_scheduler)
@@ -302,12 +420,16 @@ class SDXLTuner:
 
         self.log_training_parameters(trainable_parameters)
 
-        total_task = progress.add_task("Total Progress", total=n_epochs * len(data_loader))
+        if self.accelerator.is_main_process:
+            self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
+
+        total_task = progress.add_task("Total Progress", total=n_total_steps)
         global_step = 0
         with progress:
             for epoch in range(n_epochs):
                 self.train_loss = 0.0
-                for _step, batch in enumerate(progress.track(data_loader, description=f"Epoch {epoch+1}")):
+                current_epoch_task = progress.add_task(f"Epoch {epoch+1}", total=num_update_steps_per_epoch)
+                for _step, batch in enumerate(data_loader):
                     with self.accelerator.accumulate(self.pipeline.unet):
                         if not isinstance(batch, DiffusionBatch):
                             msg = f"Expected DiffusionBatch, got something else. Got: {type(batch)}"
@@ -318,63 +440,146 @@ class SDXLTuner:
                         optimizer.step()
                         lr_scheduler.step()
                         optimizer.zero_grad()
-                        progress.update(total_task, advance=1)
 
+                    current_lr = lr_scheduler.get_last_lr()[0]
                     if self.accelerator.sync_gradients:
                         if self.ema_unet:
                             self.ema_unet.step(self.unet.parameters())
 
                         global_step += 1
-                        self.accelerator.log({"train_loss": self.train_loss}, step=global_step)
+                        self.accelerator.log({"train_loss": self.train_loss, "lr": current_lr}, step=global_step)
                         self.train_loss = 0.0
 
-                    progress.update(total_task, description=f"LR: {lr_scheduler.get_last_lr()[0]:.2e} - Loss: {loss:.2f}")
-            # end of epoch
-            self.accelerator.wait_for_everyone()
-            if self.accelerator.is_main_process:
-                if self.mode in ("lora", "lokr", "loha"):
-                    self.save_lora_model()
+                        progress.update(total_task, advance=1, description=f"Global Step: {global_step} - Epoch: {epoch+1}")
+                        progress.update(current_epoch_task, advance=1, description=f"LR: {current_lr:.2e} - Loss: {loss:.2f}")
+
+                        if self.save_every_n_steps and global_step % self.save_every_n_steps == 0 and global_step != 0:
+                            self.saving_model(f"{self.model_name}-step{global_step}")
+                        if self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0:
+                            self.generate_preview(progress, f"{self.model_name}-step{global_step}")
+                if self.save_every_n_epochs and epoch % self.save_every_n_epochs == 0 and epoch != 0:
+                    self.saving_model(f"{self.model_name}-ep{epoch+1}")
+                if self.config.preview_every_n_epochs and epoch % self.config.preview_every_n_epochs == 0 and epoch != 0:
+                    self.generate_preview(progress, f"{self.model_name}-ep{epoch+1}")
+                progress.remove_task(current_epoch_task)
+            self.saving_model(f"{self.model_name}")
+
+    @torch.no_grad()
+    def generate_preview(self, progress: Progress, filename: str) -> None:
+        def callback_on_step_end(_pipe: StableDiffusionXLPipelineOutput, _step: int, _timestep: int, _kwargs: dict) -> dict:
+            progress.update(task, advance=1)
+            return {}
+
+        self.accelerator.wait_for_everyone()
+        sample_options = [
+            SampleOptions(
+                prompt="A anime style girl with short hair, simple background, smiling, white hair, red eyes, maid clothes.",
+                negative_prompt="worst quality, bad quality, blurry, low resolution",
+                steps=25,
+                seed=47,
+            ),
+        ]
+        if self.accelerator.is_main_process:
+            for i, sample_option in enumerate(sample_options):
+                autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
+                generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
+                logger.info("Generating training preview....")
+                task = progress.add_task("Generating Preview", total=sample_option.steps)
+
+                with autocast_ctx:
+                    self.pipeline.to(self.accelerator.device)
+                    result = self.pipeline(
+                        prompt=sample_option.prompt,
+                        negative_prompt=sample_option.negative_prompt,
+                        num_inference_steps=sample_option.steps,
+                        generator=generator,
+                        callback_on_step_end=callback_on_step_end,  # type: ignore
+                    )
+
+                progress.remove_task(task)
+                path = (Path(self.save_path) / "previews" / f"{filename}-{i}").with_suffix(".png")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if isinstance(result, StableDiffusionXLPipelineOutput):
+                    result.images[0].save(path)
+                    if self.config.log_with == "wandb":
+                        import wandb
+
+                        self.accelerator.log(
+                            {
+                                f"preview_{i}": [wandb.Image(path, caption=f"{sample_option.prompt}")],
+                            },
+                        )
                 else:
-                    self.save_full_finetune_model()
+                    msg = f"Expected StableDiffusionXLPipelineOutput, got {type(result)}"
+                    raise TypeError(msg)
+        gc.collect()
+        torch.cuda.empty_cache()
 
-    def save_lora_model(self) -> None:
-        unet = self.accelerator.unwrap_model(self.unet)
-        unet_lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet))
+    def initialize_optimizer(self, trainable_parameters: list[dict]) -> torch.optim.Optimizer:
+        optimizer_name = "adamW8bit"
+        if optimizer_name == "adamW8bit":
+            import bitsandbytes as bnb
 
+            optimizer = bnb.optim.AdamW8bit(
+                trainable_parameters,
+                lr=self.unet_lr,
+                betas=(0.9, 0.999),
+                weight_decay=1e-2,
+                eps=1e-8,
+            )
+        else:
+            optimizer = torch.optim.Adafactor(trainable_parameters, lr=self.unet_lr)
+        return optimizer
+
+    def saving_model(self, filename: str) -> None:
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            if self.mode in ("lora", "lokr", "loha"):
+                self.save_lora_model(filename)
+            else:
+                self.save_full_finetune_model(filename)
+
+    def save_lora_model(self, filename: str) -> None:
+        unet = unwrap_model(self.accelerator, self.unet)
+        unet_lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet), StateDictType.PEFT)
         if self.text_encoder_1_lr:
-            text_encoder_1 = self.accelerator.unwrap_model(self.text_encoder_1)
-            text_encoder_2 = self.accelerator.unwrap_model(self.text_encoder_2)
+            text_encoder_1 = unwrap_model(self.accelerator, self.text_encoder_1)
+            text_encoder_2 = unwrap_model(self.accelerator, self.text_encoder_2)
 
-            text_encoder_lora_layers: dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(text_encoder_1))
-            text_encoder_2_lora_layers: dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(text_encoder_2))
+            text_encoder_lora_layers: dict = convert_state_dict_to_diffusers(
+                get_peft_model_state_dict(text_encoder_1),
+                StateDictType.PEFT,
+            )
+            text_encoder_2_lora_layers: dict = convert_state_dict_to_diffusers(
+                get_peft_model_state_dict(text_encoder_2),
+                StateDictType.PEFT,
+            )
         else:
             text_encoder_lora_layers = None  # type: ignore
             text_encoder_2_lora_layers = None  # type: ignore
 
         StableDiffusionXLPipeline.save_lora_weights(
-            save_directory="out",
+            save_directory=self.save_path,
+            weight_name=filename + ".safetensors",
             unet_lora_layers=unet_lora_state_dict,
             text_encoder_lora_layers=text_encoder_lora_layers,
             text_encoder_2_lora_layers=text_encoder_2_lora_layers,
         )
 
-    def save_full_finetune_model(self) -> None:
+    def save_full_finetune_model(self, filename: str) -> None:
         msg = "Full finetune model saving is not implemented yet."
         raise NotImplementedError(msg)
 
     def log_training_parameters(self, trainable_parameters: list[dict]) -> None:
         n_params = self.get_n_params(trainable_parameters)
-        logger.info("Number of trainable parameters: %s (%sB)", f"{n_params:,}", f"{n_params * 4 / 1024 / 1024 / 1024:.2f}")
+        logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
         logger.info("Number of epochs: %s", self.n_epochs)
-        logger.info("Batch size: %s", self.batch_size)
-        logger.info("Gradient accumulation steps: %s", self.gradient_accumulation_steps)
-        logger.info("Gradient checkpointing: %s", self.gradient_checkpointing)
-        logger.info("Noise offset: %s", self.noise_offset)
-        logger.info("SNR gamma: %s", self.snr_gamma)
-        logger.info("Max gradient norm: %s", self.max_grad_norm)
+        num_processes = self.accelerator.num_processes
         logger.info("Unet: %s %s", self.unet.device, self.unet.dtype)
         logger.info("Text Encoder 1: %s %s", self.text_encoder_1.device, self.text_encoder_1.dtype)
         logger.info("Text Encoder 2: %s %s", self.text_encoder_2.device, self.text_encoder_2.dtype)
+        effective_batch_size = self.batch_size * num_processes * self.gradient_accumulation_steps
+        logger.info("Effective batch size: %s", effective_batch_size)
         logger.info("Starting training.")
 
     def update_training_flags(self) -> None:
@@ -647,6 +852,6 @@ class SDXLTuner:
             timesteps = torch.multinomial(weights, batch_size, replacement=True).long()
         return timesteps  # type: ignore
 
-    def __call__(self) -> None:
+    def __call__(self, *, dataset: DiffusionDataset) -> None:
         """Run the finetuning process."""
-        self.train()
+        self.train(dataset)

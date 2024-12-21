@@ -5,6 +5,7 @@ import os
 import time
 from logging import getLogger
 from pathlib import Path
+from typing import Literal
 
 import torch
 import wandb
@@ -16,13 +17,18 @@ logger = getLogger("diffusion_trainer")
 
 def prepare_logger(log_with: str, logging_dir: Path) -> None:
     """Prepare logger for the training."""
-    logging_dir = logging_dir / f"finetune_{time.strftime('%Y%m%d%H%M%S', time.localtime())}"
-    logging_dir.mkdir(parents=True, exist_ok=True)
     if log_with == "wandb":
+        # logging_dir = logging_dir / f"finetune_{time.strftime('%Y%m%d%H%M%S', time.localtime())}"
+        # logging_dir.mkdir(parents=True, exist_ok=True)
         os.environ["WANDB_DIR"] = logging_dir.as_posix()
         wandb_api_key = os.getenv("WANDB_API_KEY")
         if wandb_api_key is not None:
             wandb.login(key=wandb_api_key)
+    elif log_with == "tensorboard":
+        msg = "Tensorboard logging is not implemented yet."
+        raise NotImplementedError(msg)
+    elif log_with == "none":
+        pass
 
 
 def prepare_deepspeed_plugin() -> None | DeepSpeedPlugin:
@@ -49,9 +55,12 @@ def prepare_ddp_kwargs(
     return list(filter(lambda x: x is not None, kwargs_handlers))
 
 
-def prepare_accelerator(dtype: torch.dtype = torch.float16) -> Accelerator:
+def prepare_accelerator(
+    gradient_accumulation_steps: int,
+    dtype: torch.dtype = torch.float16,
+    log_with: Literal["wandb", "tensorboard", "none"] = "none",
+) -> Accelerator:
     """Prepare training tools, such as logger, accelerator, deepspeed, etc."""
-    log_with = "wandb"
     logging_dir = Path("./.logs")
     prepare_logger(log_with=log_with, logging_dir=logging_dir)
 
@@ -67,7 +76,6 @@ def prepare_accelerator(dtype: torch.dtype = torch.float16) -> Accelerator:
         msg = f"Unsupported dtype: {dtype}"
         raise ValueError(msg)
 
-    gradient_accumulation_steps = 3
     dynamo_backend = None
     torch_compile = False
 
@@ -79,7 +87,7 @@ def prepare_accelerator(dtype: torch.dtype = torch.float16) -> Accelerator:
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
-        log_with=log_with,
+        log_with=log_with if log_with != "none" else None,
         project_dir=logging_dir,
         kwargs_handlers=ddp_kwargs,
         dynamo_backend=dynamo_backend,
