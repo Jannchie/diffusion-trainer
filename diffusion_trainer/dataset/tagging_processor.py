@@ -38,7 +38,7 @@ class WorkerArgs:
     skip_existing: bool
 
 
-def worker(args: WorkerArgs) -> None:
+def worker(args: WorkerArgs) -> None:  # noqa: C901
     """Worker function to process images using Tagger."""
     tagger = Tagger()
 
@@ -61,13 +61,13 @@ def worker(args: WorkerArgs) -> None:
 
         def filter_valid_files(paths: list[Path], images: list[Image.Image]) -> tuple[list[Path], list[Image.Image]]:
             result_path, result_image = [], []
-            for path, image in zip(paths, images):
+            for path, image in zip(paths, images, strict=False):
                 try:
                     image.load()
                     result_path.append(path)
                     result_image.append(image)
-                except Exception as e:
-                    print(f"Error loading image {path}.")
+                except Exception:
+                    logger.exception(f"Error loading image {path}.")
             return result_path, result_image
 
         if not batch_files:
@@ -92,7 +92,7 @@ def worker(args: WorkerArgs) -> None:
                     final_tags = before_tags + more_tags_not_in_before
                     final_tags_str = ", ".join(final_tags)
                     metadata[meta_key]["tags"] = final_tags_str
-                except Exception as e:
+                except Exception:
                     logger.exception('Error processing metadata "%s"', image_path)
         result_queue.put(len_before)
 
