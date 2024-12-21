@@ -18,7 +18,7 @@ if __name__ == "__main__":
     sdxl_config_dict = tomllib.load(config_path.open("rb"))
     sdxl_config = SDXLConfig(**sdxl_config_dict)
 
-    dataset = DiffusionDataset.from_metadata(sdxl_config.dataset_meta_path)
+    dataset = DiffusionDataset.from_metadata(sdxl_config.dataset_meta_path, ds_path=sdxl_config.dataset_path)
 
     tuner = SDXLTuner(config=sdxl_config)
     tuner(dataset=dataset)

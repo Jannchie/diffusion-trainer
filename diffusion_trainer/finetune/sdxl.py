@@ -388,8 +388,6 @@ class SDXLTuner:
     def train(self, dataset: DiffusionDataset) -> None:
         sampler = BucketBasedBatchSampler(dataset, self.batch_size)
         data_loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0, collate_fn=dataset.collate_fn)
-        n_epochs = self.n_epochs
-        progress = get_progress()
 
         self.update_training_flags()
         self.apply_lora_config()
@@ -402,7 +400,7 @@ class SDXLTuner:
         optimizer = self.initialize_optimizer(trainable_parameters)
 
         num_update_steps_per_epoch = math.ceil(len(data_loader) / self.gradient_accumulation_steps)
-        n_total_steps = n_epochs * num_update_steps_per_epoch
+        n_total_steps = self.n_epochs * num_update_steps_per_epoch
 
         lr_scheduler = get_scheduler(
             "cosine_with_restarts",
@@ -423,10 +421,21 @@ class SDXLTuner:
         if self.accelerator.is_main_process:
             self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
 
+        self.execute_training_epoch(data_loader, optimizer, num_update_steps_per_epoch, n_total_steps, lr_scheduler)
+
+    def execute_training_epoch(
+        self,
+        data_loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        num_update_steps_per_epoch: int,
+        n_total_steps: int,
+        lr_scheduler: torch.optim.lr_scheduler.LambdaLR,
+    ) -> None:
+        progress = get_progress()
         total_task = progress.add_task("Total Progress", total=n_total_steps)
         global_step = 0
         with progress:
-            for epoch in range(n_epochs):
+            for epoch in range(self.n_epochs):
                 self.train_loss = 0.0
                 current_epoch_task = progress.add_task(f"Epoch {epoch+1}", total=num_update_steps_per_epoch)
                 for _step, batch in enumerate(data_loader):
@@ -506,7 +515,7 @@ class SDXLTuner:
 
                         self.accelerator.log(
                             {
-                                f"preview_{i}": [wandb.Image(path, caption=f"{sample_option.prompt}")],
+                                f"preview_{i}": [wandb.Image(result.images[0], caption=f"{sample_option.prompt}")],
                             },
                         )
                 else:
