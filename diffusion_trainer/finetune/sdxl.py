@@ -1,6 +1,5 @@
 """Fintunner for Stable Diffusion XL model."""
 
-import gc
 import os
 import random
 import secrets
@@ -16,7 +15,12 @@ import torch.nn.functional as F
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from diffusers.training_utils import EMAModel, compute_snr
+from diffusers.training_utils import EMAModel, cast_training_params, compute_snr
+from diffusers.utils.state_dict_utils import convert_state_dict_to_diffusers
+from peft.tuners.loha.config import LoHaConfig
+from peft.tuners.lokr.config import LoKrConfig
+from peft.tuners.lora.config import LoraConfig
+from peft.utils.save_and_load import get_peft_model_state_dict
 from torch.utils.data import DataLoader
 
 from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset
@@ -41,9 +45,9 @@ def load_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXL
     logger.info('Loading models from "%s" (%s)', path, dtype)
     with Path(os.devnull).open("w") as fnull, redirect_stdout(fnull), redirect_stderr(fnull):
         if path.is_dir():
-            pipe = StableDiffusionXLPipeline.from_pretrained(path, dtype=dtype)
+            pipe = StableDiffusionXLPipeline.from_pretrained(path, torch_dtype=dtype)
         else:
-            pipe = StableDiffusionXLPipeline.from_single_file(path, dtype=dtype)
+            pipe = StableDiffusionXLPipeline.from_single_file(path, torch_dtype=dtype)
     logger.info("Models loaded successfully.")
     if isinstance(pipe, StableDiffusionXLPipeline):
         return pipe
@@ -68,41 +72,30 @@ class SDXLTuner:
         self.pipeline = load_pipeline(self.model_path, self.weight_dtype)
 
         # TODO: ignore the warning about triton
-        self.pipeline.enable_xformers_memory_efficient_attention()
-
-        self.unet = self.accelerator.prepare(self.pipeline.unet)
-        self.text_encoder_1 = self.accelerator.prepare(self.pipeline.text_encoder)
-        self.text_encoder_2 = self.accelerator.prepare(self.pipeline.text_encoder_2)
-        self.vae = self.pipeline.vae
-
-        self.gradient_checkpointing = True
-
-        if self.gradient_checkpointing:
-            self.unet.enable_gradient_checkpointing()
-            self.text_encoder_1.gradient_checkpointing_enable()
-            self.text_encoder_2.gradient_checkpointing_enable()
-
-        self.need_vae = False
-        if not self.need_vae:
-            del self.pipeline.vae
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
         self.prediction_type = None
 
         self.n_epochs = 1
         self.batch_size = 1
         self.gradient_accumulation_steps = 1
 
-        # self.unet_lr = 1e-5
-        # self.text_encoder_1_lr = 1e-6
-        # self.text_encoder_2_lr = 1e-6
         self.unet_lr = 1e-5
-        self.text_encoder_1_lr = 0
-        self.text_encoder_2_lr = 0
+        self.text_encoder_1_lr = 1e-6
+        self.text_encoder_2_lr = 1e-6
+
+        self.mode: Literal["full-finetune", "lora", "lokr", "loha"] = "lokr"
+
+        self.lora_rank = 4
+        self.lora_alpha = 1
+
+        self.lokr_factor = 16  # For LoKr
 
         self.noise_offset = 0.0
+
+        # reduce memory usage by checkpointing the gradients
+        self.gradient_checkpointing = True
+
+        self.init_model_modules()
+        self.init_gradient_checkpointing()
 
         self.dataset = dataset
 
@@ -133,6 +126,9 @@ class SDXLTuner:
 
         self.use_ema = False
 
+        self.init_ema()
+
+    def init_ema(self) -> None:
         # Create EMA for the unet.
         self.ema_unet: None | EMAModel = None
         if self.use_ema:
@@ -143,6 +139,18 @@ class SDXLTuner:
                 model_config=self.unet.config,
             ).to(self.device)
 
+    def init_model_modules(self) -> None:
+        self.unet = self.pipeline.unet.to(self.device, dtype=self.weight_dtype)
+        self.text_encoder_1 = self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype)
+        self.text_encoder_2 = self.pipeline.text_encoder_2.to(self.device, dtype=self.weight_dtype)
+        self.vae = self.pipeline.vae
+
+    def init_gradient_checkpointing(self) -> None:
+        if self.gradient_checkpointing:
+            self.unet.enable_gradient_checkpointing()
+            self.text_encoder_1.gradient_checkpointing_enable()
+            self.text_encoder_2.gradient_checkpointing_enable()
+
     def get_n_params(self, trainable_parameters: list[dict]) -> int:
         n_params = 0
         for param in trainable_parameters:
@@ -152,11 +160,26 @@ class SDXLTuner:
     def get_trainable_parameters(self) -> list[dict]:
         trainable_parameters = []
         if self.unet_lr != 0:
-            trainable_parameters.append({"params": self.unet.parameters(), "lr": self.unet_lr})
+            trainable_parameters.append(
+                {
+                    "params": list(filter(lambda p: p.requires_grad, self.unet.parameters())),
+                    "lr": self.unet_lr,
+                },
+            )
         if self.text_encoder_1_lr != 0:
-            trainable_parameters.append({"params": self.text_encoder_1.parameters(), "lr": self.text_encoder_1_lr})
+            trainable_parameters.append(
+                {
+                    "params": list(filter(lambda p: p.requires_grad, self.text_encoder_1.parameters())),
+                    "lr": self.text_encoder_1_lr,
+                },
+            )
         if self.text_encoder_2_lr != 0:
-            trainable_parameters.append({"params": self.text_encoder_2.parameters(), "lr": self.text_encoder_2_lr})
+            trainable_parameters.append(
+                {
+                    "params": list(filter(lambda p: p.requires_grad, self.text_encoder_2.parameters())),
+                    "lr": self.text_encoder_2_lr,
+                },
+            )
         return trainable_parameters
 
     @property
@@ -171,16 +194,95 @@ class SDXLTuner:
             model.append(self.pipeline.text_encoder_2)
         return model
 
+    def apply_lora_config(self) -> None:
+        # Lora config
+        if self.mode == "lora":
+            if not self.lora_alpha or not self.lora_rank:
+                msg = "Lora rank and alpha must be provided for lora mode."
+                raise ValueError(msg)
+            unet_lora_config = LoraConfig(
+                r=self.lora_rank,
+                lora_alpha=self.lora_alpha,
+                init_lora_weights="gaussian",
+                target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+            )
+            self.unet.add_adapter(unet_lora_config)
+
+            if self.text_encoder_1_lr != 0:
+                text_lora_config = LoraConfig(
+                    r=self.lora_rank,
+                    lora_alpha=self.lora_alpha,
+                    init_lora_weights="gaussian",
+                    target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
+                )
+                self.text_encoder_1.add_adapter(text_lora_config)
+                self.text_encoder_2.add_adapter(text_lora_config)
+        elif self.mode == "lokr":
+            if not self.lora_alpha or not self.lora_rank:
+                msg = "Lora rank and alpha must be provided for lokr mode."
+                raise ValueError(msg)
+            unet_lokr_config = LoKrConfig(
+                r=self.lora_rank,
+                alpha=self.lora_alpha,
+                use_effective_conv2d=True,
+                rank_dropout=0.5,
+                module_dropout=0.5,
+                target_modules=[
+                    "proj_in",
+                    "proj_out",
+                    "to_k",
+                    "to_q",
+                    "to_v",
+                    "to_out.0",
+                    # "ff.net.0.proj",
+                    # "ff.net.2",
+                ],
+            )
+            self.unet.add_adapter(unet_lokr_config)
+
+            if self.text_encoder_1_lr != 0:
+                text_lokr_config = LoKrConfig(
+                    r=self.lora_rank,
+                    alpha=self.lora_alpha,
+                    decompose_factor=self.lokr_factor,
+                    # target_modules=["k_proj", "q_proj", "v_proj", "out_proj", "fc1", "fc2"],
+                    target_modules=["k_proj", "q_proj", "v_proj", "out_proj"],
+                )
+                self.text_encoder_1.add_adapter(text_lokr_config)
+                self.text_encoder_2.add_adapter(text_lokr_config)
+        elif self.mode == "loha":
+            if not self.lora_alpha or not self.lora_rank:
+                msg = "Lora rank and alpha must be provided for loha mode."
+                raise ValueError(msg)
+            unet_loha_config = LoHaConfig(
+                r=self.lora_rank,
+                alpha=self.lora_alpha,
+                use_effective_conv2d=True,
+                target_modules=["proj_in", "proj_out", "to_k", "to_q", "to_v", "to_out.0"],
+            )
+            self.unet.add_adapter(unet_loha_config)
+            if self.text_encoder_1_lr != 0:
+                text_loha_config = LoHaConfig(
+                    r=self.lora_rank,
+                    alpha=self.lora_alpha,
+                    target_modules=["k_proj", "q_proj", "v_proj", "out_proj"],
+                )
+                self.text_encoder_1.add_adapter(text_loha_config)
+                self.text_encoder_2.add_adapter(text_loha_config)
+
     def train(self) -> None:
         sampler = BucketBasedBatchSampler(self.dataset, self.batch_size)
         data_loader = DataLoader(self.dataset, batch_sampler=sampler, num_workers=0, collate_fn=self.dataset.collate_fn)
         n_epochs = self.n_epochs
         progress = get_progress()
 
+        self.update_training_flags()
+        self.apply_lora_config()
+
         trainable_parameters = self.get_trainable_parameters()
+        cast_training_params([self.unet, self.text_encoder_1, self.text_encoder_2])
 
         optimizer = torch.optim.Adafactor(trainable_parameters, lr=self.unet_lr)
-        optimizer = self.accelerator.prepare(optimizer)
 
         self.noise_scheduler = DDPMScheduler(
             beta_start=0.00085,
@@ -190,78 +292,125 @@ class SDXLTuner:
             clip_sample=False,
         )
 
-        self.update_training_flags()
-
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
 
+        optimizer = self.accelerator.prepare(optimizer)
         lr_scheduler = self.accelerator.prepare(lr_scheduler)
+        self.unet = self.accelerator.prepare(self.unet)
+        self.text_encoder_1 = self.accelerator.prepare(self.text_encoder_1)
+        self.text_encoder_2 = self.accelerator.prepare(self.text_encoder_2)
 
-        # autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
+        self.log_training_parameters(trainable_parameters)
 
+        total_task = progress.add_task("Total Progress", total=n_epochs * len(data_loader))
+        global_step = 0
+        with progress:
+            for epoch in range(n_epochs):
+                self.train_loss = 0.0
+                for _step, batch in enumerate(progress.track(data_loader, description=f"Epoch {epoch+1}")):
+                    with self.accelerator.accumulate(self.pipeline.unet):
+                        if not isinstance(batch, DiffusionBatch):
+                            msg = f"Expected DiffusionBatch, got something else. Got: {type(batch)}"
+                            raise TypeError(msg)
+
+                        loss = self.train_each_batch(batch)
+
+                        optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad()
+                        progress.update(total_task, advance=1)
+
+                    if self.accelerator.sync_gradients:
+                        if self.ema_unet:
+                            self.ema_unet.step(self.unet.parameters())
+
+                        global_step += 1
+                        self.accelerator.log({"train_loss": self.train_loss}, step=global_step)
+                        self.train_loss = 0.0
+
+                    progress.update(total_task, description=f"LR: {lr_scheduler.get_last_lr()[0]:.2e} - Loss: {loss:.2f}")
+            # end of epoch
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.is_main_process:
+                if self.mode in ("lora", "lokr", "loha"):
+                    self.save_lora_model()
+                else:
+                    self.save_full_finetune_model()
+
+    def save_lora_model(self) -> None:
+        unet = self.accelerator.unwrap_model(self.unet)
+        unet_lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet))
+
+        if self.text_encoder_1_lr:
+            text_encoder_1 = self.accelerator.unwrap_model(self.text_encoder_1)
+            text_encoder_2 = self.accelerator.unwrap_model(self.text_encoder_2)
+
+            text_encoder_lora_layers: dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(text_encoder_1))
+            text_encoder_2_lora_layers: dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(text_encoder_2))
+        else:
+            text_encoder_lora_layers = None  # type: ignore
+            text_encoder_2_lora_layers = None  # type: ignore
+
+        StableDiffusionXLPipeline.save_lora_weights(
+            save_directory="out",
+            unet_lora_layers=unet_lora_state_dict,
+            text_encoder_lora_layers=text_encoder_lora_layers,
+            text_encoder_2_lora_layers=text_encoder_2_lora_layers,
+        )
+
+    def save_full_finetune_model(self) -> None:
+        msg = "Full finetune model saving is not implemented yet."
+        raise NotImplementedError(msg)
+
+    def log_training_parameters(self, trainable_parameters: list[dict]) -> None:
         n_params = self.get_n_params(trainable_parameters)
-        logger.info("Number of trainable parameters: %s", f"{n_params:,}")
-        logger.info("Number of epochs: %s", n_epochs)
+        logger.info("Number of trainable parameters: %s (%sB)", f"{n_params:,}", f"{n_params * 4 / 1024 / 1024 / 1024:.2f}")
+        logger.info("Number of epochs: %s", self.n_epochs)
         logger.info("Batch size: %s", self.batch_size)
         logger.info("Gradient accumulation steps: %s", self.gradient_accumulation_steps)
         logger.info("Gradient checkpointing: %s", self.gradient_checkpointing)
         logger.info("Noise offset: %s", self.noise_offset)
         logger.info("SNR gamma: %s", self.snr_gamma)
         logger.info("Max gradient norm: %s", self.max_grad_norm)
-        logger.info("Unet: %s", self.unet.device)
-        logger.info("Text Encoder 1: %s", self.text_encoder_1.device)
-        logger.info("Text Encoder 2: %s", self.text_encoder_2.device)
+        logger.info("Unet: %s %s", self.unet.device, self.unet.dtype)
+        logger.info("Text Encoder 1: %s %s", self.text_encoder_1.device, self.text_encoder_1.dtype)
+        logger.info("Text Encoder 2: %s %s", self.text_encoder_2.device, self.text_encoder_2.dtype)
         logger.info("Starting training.")
 
-        total_task = progress.add_task("Total Progress", total=n_epochs * len(data_loader))
-        global_step = 0
-        for epoch in range(n_epochs):
-            self.train_loss = 0.0
-            for _step, batch in enumerate(progress.track(data_loader, description=f"Epoch {epoch+1}")):
-                with self.accelerator.accumulate(self.pipeline.unet), progress:
-                    if not isinstance(batch, DiffusionBatch):
-                        msg = f"Expected DiffusionBatch, got something else. Got: {type(batch)}"
-                        raise TypeError(msg)
-
-                    loss = self.train_each_batch(batch)
-
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad()
-
-                if self.accelerator.sync_gradients:
-                    if self.ema_unet:
-                        self.ema_unet.step(self.unet.parameters())
-
-                    progress.update(total_task, advance=1)
-                    global_step += 1
-                    self.accelerator.log({"train_loss": self.train_loss}, step=global_step)
-                    self.train_loss = 0.0
-
-                logs = {"step_loss": loss, "lr": lr_scheduler.get_last_lr()[0]}
-                progress.print(f"Step {global_step}: {logs}")
-
     def update_training_flags(self) -> None:
-        if self.unet_lr:
-            logger.info("Training the UNet with learning rate %s", self.unet_lr)
-            self.unet.requires_grad_(True)
-            self.unet.train(True)
-        else:
+        if self.mode in ("lora", "lokr", "loha"):
+            logger.info("Training with %s, freezing the models.", self.mode)
             self.unet.requires_grad_(False)
             self.unet.train(False)
-        if self.text_encoder_1_lr:
-            logger.info("Training the text encoder 1 with learning rate %s", self.text_encoder_1_lr)
-            self.text_encoder_1.train(True)
-            self.text_encoder_1.requires_grad_(True)
-        else:
-            self.text_encoder_1.train(False)
             self.text_encoder_1.requires_grad_(False)
-        if self.text_encoder_2_lr:
-            logger.info("Training the text encoder 2 with learning rate %s", self.text_encoder_2_lr)
-            self.text_encoder_2.train(True)
-            self.text_encoder_2.requires_grad_(True)
-        else:
-            self.text_encoder_2.train(False)
+            self.text_encoder_1.train(False)
             self.text_encoder_2.requires_grad_(False)
+            self.text_encoder_2.train(False)
+        elif self.mode == "full-finetune":
+            if self.unet_lr:
+                logger.info("Training the UNet with learning rate %s", self.unet_lr)
+                self.unet.requires_grad_(True)
+                self.unet.train(True)
+            else:
+                self.unet.requires_grad_(False)
+                self.unet.train(False)
+            if self.text_encoder_1_lr:
+                logger.info("Training the text encoder 1 with learning rate %s", self.text_encoder_1_lr)
+                self.text_encoder_1.train(True)
+                self.text_encoder_1.requires_grad_(True)
+            else:
+                self.text_encoder_1.train(False)
+                self.text_encoder_1.requires_grad_(False)
+            if self.text_encoder_2_lr:
+                logger.info("Training the text encoder 2 with learning rate %s", self.text_encoder_2_lr)
+                self.text_encoder_2.train(True)
+                self.text_encoder_2.requires_grad_(True)
+            else:
+                self.text_encoder_2.train(False)
+                self.text_encoder_2.requires_grad_(False)
+        else:
+            msg = f"Unknown mode {self.mode}"
+            raise ValueError(msg)
 
     def train_each_batch(self, original_batch: DiffusionBatch) -> float:
         batch = self.process_batch(original_batch)
@@ -414,8 +563,6 @@ class SDXLTuner:
             ],
             dim=1,
         ).to(self.accelerator.device)
-
-        batch.img_latents = F.interpolate(batch.img_latents, scale_factor=(0.1, 0.1), mode="bilinear", align_corners=False)
 
         return SDXLBatch(
             img_latents=batch.img_latents.to(self.accelerator.device),
