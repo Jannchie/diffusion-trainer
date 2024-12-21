@@ -19,6 +19,7 @@ dependencies = [
     "wandb>=0.18.7",
     "wdtagger[gpu]>=0.10.2",
     "xformers>=0.0.28.post3",
+    "bitsandbytes>=0.45.0",
 ]
 
 

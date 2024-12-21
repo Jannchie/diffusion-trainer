@@ -4,4 +4,4 @@
 *.egg-info
 __pycache__
 
-diffusers_sdxl_trainer.py
+train_text_to_image_sdxl.py
