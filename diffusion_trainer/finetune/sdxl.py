@@ -190,29 +190,7 @@ class SDXLTuner:
             clip_sample=False,
         )
 
-        logger.info(torch.cuda.memory_summary(device=None, abbreviated=False))
-
-        if self.unet_lr:
-            logger.info("Training the UNet with learning rate %s", self.unet_lr)
-            self.unet.requires_grad_(True)
-            self.unet.train(True)
-        else:
-            self.unet.requires_grad_(False)
-            self.unet.train(False)
-        if self.text_encoder_1_lr:
-            logger.info("Training the text encoder 1 with learning rate %s", self.text_encoder_1_lr)
-            self.text_encoder_1.train(True)
-            self.text_encoder_1.requires_grad_(True)
-        else:
-            self.text_encoder_1.train(False)
-            self.text_encoder_1.requires_grad_(False)
-        if self.text_encoder_2_lr:
-            logger.info("Training the text encoder 2 with learning rate %s", self.text_encoder_2_lr)
-            self.text_encoder_2.train(True)
-            self.text_encoder_2.requires_grad_(True)
-        else:
-            self.text_encoder_2.train(False)
-            self.text_encoder_2.requires_grad_(False)
+        self.update_training_flags()
 
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
 
@@ -261,6 +239,29 @@ class SDXLTuner:
 
                 logs = {"step_loss": loss, "lr": lr_scheduler.get_last_lr()[0]}
                 progress.print(f"Step {global_step}: {logs}")
+
+    def update_training_flags(self) -> None:
+        if self.unet_lr:
+            logger.info("Training the UNet with learning rate %s", self.unet_lr)
+            self.unet.requires_grad_(True)
+            self.unet.train(True)
+        else:
+            self.unet.requires_grad_(False)
+            self.unet.train(False)
+        if self.text_encoder_1_lr:
+            logger.info("Training the text encoder 1 with learning rate %s", self.text_encoder_1_lr)
+            self.text_encoder_1.train(True)
+            self.text_encoder_1.requires_grad_(True)
+        else:
+            self.text_encoder_1.train(False)
+            self.text_encoder_1.requires_grad_(False)
+        if self.text_encoder_2_lr:
+            logger.info("Training the text encoder 2 with learning rate %s", self.text_encoder_2_lr)
+            self.text_encoder_2.train(True)
+            self.text_encoder_2.requires_grad_(True)
+        else:
+            self.text_encoder_2.train(False)
+            self.text_encoder_2.requires_grad_(False)
 
     def train_each_batch(self, original_batch: DiffusionBatch) -> float:
         batch = self.process_batch(original_batch)
