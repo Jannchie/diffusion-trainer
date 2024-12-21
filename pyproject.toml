@@ -18,6 +18,7 @@ dependencies = [
     "transformers>=4.46.3",
     "wandb>=0.18.7",
     "wdtagger[gpu]>=0.10.2",
+    "xformers>=0.0.28.post3",
 ]
 
 
@@ -36,6 +37,8 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
+xformers = { index = "pytorch" }
+
 
 [tool.pyright]
 
@@ -56,6 +59,7 @@ ignore = [
     "PLR2004", # Allow Magic Numbers
     "INP001",  # Allow without __init__.py
     "N812",    # Allow aliased to non-lowercase names (e.g. `import torch.nn.functional as F`)
+    "FBT003",  # Allow boolean positional values in function calls
 ]
 
 [dependency-groups]

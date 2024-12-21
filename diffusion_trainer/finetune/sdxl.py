@@ -1,7 +1,10 @@
 """Fintunner for Stable Diffusion XL model."""
 
+import gc
+import os
 import random
 import secrets
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from logging import getLogger
 from os import PathLike
@@ -12,8 +15,8 @@ import torch
 import torch.nn.functional as F
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel, compute_snr
-from rich.status import Status
 from torch.utils.data import DataLoader
 
 from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset
@@ -32,14 +35,15 @@ class SDXLBatch:
     time_ids: torch.Tensor
 
 
-def load_pipeline(path: PathLike | str, device: torch.device, dtype: torch.dtype) -> StableDiffusionXLPipeline:
+def load_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXLPipeline:
     path = Path(path)
-    with Status(f'Loading models from "{path}" to {device}({dtype})'):
+
+    logger.info('Loading models from "%s" (%s)', path, dtype)
+    with Path(os.devnull).open("w") as fnull, redirect_stdout(fnull), redirect_stderr(fnull):
         if path.is_dir():
             pipe = StableDiffusionXLPipeline.from_pretrained(path, dtype=dtype)
         else:
             pipe = StableDiffusionXLPipeline.from_single_file(path, dtype=dtype)
-        pipe.to(device)
     logger.info("Models loaded successfully.")
     if isinstance(pipe, StableDiffusionXLPipeline):
         return pipe
@@ -58,20 +62,45 @@ class SDXLTuner:
         self.accelerator = prepare_accelerator()
         self.device = self.accelerator.device
 
-        self.vae_dtype = torch.float16
         self.save_dtype = torch.float16
         self.weight_dtype = torch.float16
 
-        self.pipeline = load_pipeline(self.model_path, self.accelerator.device, self.vae_dtype)
+        self.pipeline = load_pipeline(self.model_path, self.weight_dtype)
+
+        # TODO: ignore the warning about triton
+        self.pipeline.enable_xformers_memory_efficient_attention()
+
+        self.unet = self.accelerator.prepare(self.pipeline.unet)
+        self.text_encoder_1 = self.accelerator.prepare(self.pipeline.text_encoder)
+        self.text_encoder_2 = self.accelerator.prepare(self.pipeline.text_encoder_2)
+        self.vae = self.pipeline.vae
+
+        self.gradient_checkpointing = True
+
+        if self.gradient_checkpointing:
+            self.unet.enable_gradient_checkpointing()
+            self.text_encoder_1.gradient_checkpointing_enable()
+            self.text_encoder_2.gradient_checkpointing_enable()
+
+        self.need_vae = False
+        if not self.need_vae:
+            del self.pipeline.vae
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         self.prediction_type = None
 
-        self.n_epochs = 10
+        self.n_epochs = 1
         self.batch_size = 1
         self.gradient_accumulation_steps = 1
 
+        # self.unet_lr = 1e-5
+        # self.text_encoder_1_lr = 1e-6
+        # self.text_encoder_2_lr = 1e-6
         self.unet_lr = 1e-5
-        self.text_encoder_1_lr = 1e-6
-        self.text_encoder_2_lr = 1e-6
+        self.text_encoder_1_lr = 0
+        self.text_encoder_2_lr = 0
 
         self.noise_offset = 0.0
 
@@ -104,31 +133,30 @@ class SDXLTuner:
 
         self.use_ema = False
 
-        trainable_parameters = self.get_trainable_parameters()
-        n_params = self.get_n_params(trainable_parameters)
         # Create EMA for the unet.
         self.ema_unet: None | EMAModel = None
         if self.use_ema:
-            unet_copy = self.pipeline.unet.parameters().copy()
+            unet_copy = self.unet.parameters().copy()
             self.ema_unet = EMAModel(
                 unet_copy,
                 model_cls=UNet2DConditionModel,
-                model_config=self.pipeline.unet.config,
+                model_config=self.unet.config,
             ).to(self.device)
 
-        logger.info("Number of trainable parameters: %s", f"{n_params:,}")
+    def get_n_params(self, trainable_parameters: list[dict]) -> int:
+        n_params = 0
+        for param in trainable_parameters:
+            n_params += sum(p.numel() for p in param["params"])
+        return n_params
 
-    def get_n_params(self, trainable_parameters: list[torch.nn.Parameter]) -> int:
-        return sum(p.numel() for p in trainable_parameters)
-
-    def get_trainable_parameters(self) -> list[torch.nn.Parameter]:
+    def get_trainable_parameters(self) -> list[dict]:
         trainable_parameters = []
         if self.unet_lr != 0:
-            trainable_parameters.extend(self.pipeline.unet.parameters())
+            trainable_parameters.append({"params": self.unet.parameters(), "lr": self.unet_lr})
         if self.text_encoder_1_lr != 0:
-            trainable_parameters.extend(self.pipeline.text_encoder.parameters())
+            trainable_parameters.append({"params": self.text_encoder_1.parameters(), "lr": self.text_encoder_1_lr})
         if self.text_encoder_2_lr != 0:
-            trainable_parameters.extend(self.pipeline.text_encoder_2.parameters())
+            trainable_parameters.append({"params": self.text_encoder_2.parameters(), "lr": self.text_encoder_2_lr})
         return trainable_parameters
 
     @property
@@ -149,24 +177,66 @@ class SDXLTuner:
         n_epochs = self.n_epochs
         progress = get_progress()
 
-        optimizer = torch.optim.AdamW(self.get_trainable_parameters(), lr=self.unet_lr)
-        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=self.unet_lr,
-            total_steps=n_epochs * len(data_loader),
-            pct_start=0.1,
-            base_momentum=0.9,
-            max_momentum=0.95,
-            div_factor=25.0,
-            final_div_factor=10000.0,
+        trainable_parameters = self.get_trainable_parameters()
+
+        optimizer = torch.optim.Adafactor(trainable_parameters, lr=self.unet_lr)
+        optimizer = self.accelerator.prepare(optimizer)
+
+        self.noise_scheduler = DDPMScheduler(
+            beta_start=0.00085,
+            beta_end=0.012,
+            beta_schedule="scaled_linear",
+            num_train_timesteps=1000,
+            clip_sample=False,
         )
+
+        logger.info(torch.cuda.memory_summary(device=None, abbreviated=False))
+
+        if self.unet_lr:
+            logger.info("Training the UNet with learning rate %s", self.unet_lr)
+            self.unet.requires_grad_(True)
+            self.unet.train(True)
+        else:
+            self.unet.requires_grad_(False)
+            self.unet.train(False)
+        if self.text_encoder_1_lr:
+            logger.info("Training the text encoder 1 with learning rate %s", self.text_encoder_1_lr)
+            self.text_encoder_1.train(True)
+            self.text_encoder_1.requires_grad_(True)
+        else:
+            self.text_encoder_1.train(False)
+            self.text_encoder_1.requires_grad_(False)
+        if self.text_encoder_2_lr:
+            logger.info("Training the text encoder 2 with learning rate %s", self.text_encoder_2_lr)
+            self.text_encoder_2.train(True)
+            self.text_encoder_2.requires_grad_(True)
+
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+
+        lr_scheduler = self.accelerator.prepare(lr_scheduler)
+
+        # autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
+
+        n_params = self.get_n_params(trainable_parameters)
+        logger.info("Number of trainable parameters: %s", f"{n_params:,}")
+        logger.info("Number of epochs: %s", n_epochs)
+        logger.info("Batch size: %s", self.batch_size)
+        logger.info("Gradient accumulation steps: %s", self.gradient_accumulation_steps)
+        logger.info("Gradient checkpointing: %s", self.gradient_checkpointing)
+        logger.info("Noise offset: %s", self.noise_offset)
+        logger.info("SNR gamma: %s", self.snr_gamma)
+        logger.info("Max gradient norm: %s", self.max_grad_norm)
+        logger.info("Unet: %s", self.unet.device)
+        logger.info("Text Encoder 1: %s", self.text_encoder_1.device)
+        logger.info("Text Encoder 2: %s", self.text_encoder_2.device)
+        logger.info("Starting training.")
 
         total_task = progress.add_task("Total Progress", total=n_epochs * len(data_loader))
         global_step = 0
         for epoch in range(n_epochs):
             self.train_loss = 0.0
             for _step, batch in enumerate(progress.track(data_loader, description=f"Epoch {epoch+1}")):
-                with self.accelerator.accumulate(*self.training_models), progress:
+                with self.accelerator.accumulate(self.pipeline.unet), progress:
                     if not isinstance(batch, DiffusionBatch):
                         msg = f"Expected DiffusionBatch, got something else. Got: {type(batch)}"
                         raise TypeError(msg)
@@ -179,7 +249,7 @@ class SDXLTuner:
 
                 if self.accelerator.sync_gradients:
                     if self.ema_unet:
-                        self.ema_unet.step(self.pipeline.unet.parameters())
+                        self.ema_unet.step(self.unet.parameters())
 
                     progress.update(total_task, advance=1)
                     global_step += 1
@@ -207,7 +277,7 @@ class SDXLTuner:
 
         batch_size = img_latents.shape[0]
         timesteps = self.sample_timesteps(batch_size)
-        img_latents_with_noise = self.pipeline.scheduler.add_noise(img_latents, noise, timesteps)
+        img_latents_with_noise = self.noise_scheduler.add_noise(img_latents, noise, timesteps)
 
         model_pred = self.pipeline.unet(
             img_latents_with_noise,
@@ -225,7 +295,7 @@ class SDXLTuner:
 
         self.accelerator.backward(loss)
         if self.accelerator.sync_gradients:
-            params_to_clip = self.pipeline.unet.parameters()
+            params_to_clip = self.unet.parameters()
             self.accelerator.clip_grad_norm_(params_to_clip, self.max_grad_norm)
         return loss.detach().item()
 
@@ -236,12 +306,11 @@ class SDXLTuner:
             # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
             # Since we predict the noise instead of x_0, the original formulation is slightly changed.
             # This is discussed in Section 4.2 of the same paper.
-            noise_scheduler = self.pipeline.scheduler
-            snr = compute_snr(noise_scheduler, timesteps)
+            snr = compute_snr(self.noise_scheduler, timesteps)
             mse_loss_weights = torch.stack([snr, self.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
-            if noise_scheduler.config.prediction_type == "epsilon":
+            if self.noise_scheduler.config.get("prediction_type") == "epsilon":
                 mse_loss_weights = mse_loss_weights / snr
-            elif noise_scheduler.config.prediction_type == "v_prediction":
+            elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
                 mse_loss_weights = mse_loss_weights / (snr + 1)
 
             loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
@@ -253,25 +322,25 @@ class SDXLTuner:
         self,
         img_latents: torch.Tensor,
         noise: torch.Tensor,
-        timesteps: torch.Tensor,
+        timesteps: torch.IntTensor,
         model_pred: torch.Tensor,
     ) -> torch.Tensor:
-        noise_scheduler = self.pipeline.scheduler
+        noise_scheduler = self.noise_scheduler
         # Get the target for loss depending on the prediction type
         if self.prediction_type is not None:
             # set prediction_type of scheduler if defined
             self.pipeline.register_to_config(prediction_type=self.prediction_type)
-        if noise_scheduler.config.prediction_type == "epsilon":
+        if noise_scheduler.config.get("prediction_type") == "epsilon":
             target = noise
-        elif noise_scheduler.config.prediction_type == "v_prediction":
+        elif noise_scheduler.config.get("prediction_type") == "v_prediction":
             target = noise_scheduler.get_velocity(img_latents, noise, timesteps)
-        elif noise_scheduler.config.prediction_type == "sample":
+        elif noise_scheduler.config.get("prediction_type") == "sample":
             # We set the target to latents here, but the model_pred will return the noise sample prediction.
             target = img_latents
             # We will have to subtract the noise residual from the prediction to get the target sample.
             model_pred = model_pred - noise
         else:
-            msg = f"Unknown prediction type {noise_scheduler.config.prediction_type}"
+            msg = f"Unknown prediction type {noise_scheduler.config.get('prediction_type')}"
             raise ValueError(msg)
         return target
 
@@ -330,9 +399,6 @@ class SDXLTuner:
         prompt_embeds_1 = self.get_prompt_embeds_1(prompts_str)
         prompt_embeds_2, prompt_embeds_pooled_2 = self.get_prompt_embeds_2(prompts_str)
 
-        # 利用 batch.original_size, batch.crop_ltrb, batch.train_resolution， 获取 item ids
-        # 每行分别为 original_size[1], original_size[0], crop_ltrb[0], crop_ltrb[1], crop_ltrb[0], train_resolution[1], train_resolution[0]
-
         time_ids = torch.stack(
             [
                 batch.original_size[:, 1],
@@ -344,6 +410,8 @@ class SDXLTuner:
             ],
             dim=1,
         ).to(self.accelerator.device)
+
+        batch.img_latents = F.interpolate(batch.img_latents, scale_factor=(0.1, 0.1), mode="bilinear", align_corners=False)
 
         return SDXLBatch(
             img_latents=batch.img_latents.to(self.accelerator.device),
@@ -376,7 +444,7 @@ class SDXLTuner:
         )
         text_input_ids = text_inputs["input_ids"]
         prompt_embeds_output = self.pipeline.text_encoder(
-            text_input_ids.to(self.pipeline.text_encoder.device),
+            text_input_ids.to(self.text_encoder_1.device),
             output_hidden_states=True,
         )
 
@@ -393,7 +461,7 @@ class SDXLTuner:
         )
         text_input_ids_2 = text_inputs_2["input_ids"]
         prompt_embeds_output_2 = self.pipeline.text_encoder_2(
-            text_input_ids_2.to(self.pipeline.text_encoder_2.device),
+            text_input_ids_2.to(self.text_encoder_2.device),
             output_hidden_states=True,
         )
 
@@ -416,8 +484,8 @@ class SDXLTuner:
 
         return noise
 
-    def sample_timesteps(self, batch_size: int) -> torch.Tensor:
-        num_timesteps: int = self.pipeline.scheduler.config.num_train_timesteps
+    def sample_timesteps(self, batch_size: int) -> torch.IntTensor:
+        num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
         if self.timestep_bias_strategy == "none":
             # Sample a random timestep for each image without bias.
             timesteps = torch.randint(0, num_timesteps, (batch_size,), device=self.accelerator.device)
@@ -426,7 +494,7 @@ class SDXLTuner:
             # Biasing the timestep weights allows us to spend less time training irrelevant timesteps.
             weights = self.generate_timestep_weights(num_timesteps).to(self.accelerator.device)
             timesteps = torch.multinomial(weights, batch_size, replacement=True).long()
-        return timesteps
+        return timesteps  # type: ignore
 
     def __call__(self) -> None:
         """Run the finetuning process."""
