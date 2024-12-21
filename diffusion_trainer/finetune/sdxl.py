@@ -210,6 +210,9 @@ class SDXLTuner:
             logger.info("Training the text encoder 2 with learning rate %s", self.text_encoder_2_lr)
             self.text_encoder_2.train(True)
             self.text_encoder_2.requires_grad_(True)
+        else:
+            self.text_encoder_2.train(False)
+            self.text_encoder_2.requires_grad_(False)
 
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
 
