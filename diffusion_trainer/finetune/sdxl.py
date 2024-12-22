@@ -163,7 +163,7 @@ def str_to_dtype(dtype: str) -> torch.dtype:
 
 class ParamDict(TypedDict):
     lr: float
-    params: torch.Tensor
+    params: list[torch.Tensor]
 
 
 class SDXLTuner:
@@ -400,7 +400,7 @@ class SDXLTuner:
         self.apply_lora_config()
 
         self.trainable_parameters_dicts = self.get_trainable_parameter_dicts()
-        self.trainable_parameters: list[torch.Tensor] = [param["params"] for param in self.trainable_parameters_dicts]
+        self.trainable_parameters: list[list[torch.Tensor]] = [param["params"] for param in self.trainable_parameters_dicts]
         cast_training_params([self.unet, self.text_encoder_1, self.text_encoder_2])
 
         self.noise_scheduler: DDPMScheduler = DDPMScheduler.from_config(self.pipeline.scheduler.config)  # type: ignore
@@ -539,7 +539,7 @@ class SDXLTuner:
                 lr=self.unet_lr,
                 betas=(0.9, 0.999),
                 weight_decay=1e-2,
-                eps=1e-8,
+                eps=1e-6,
             )
         else:
             optimizer = torch.optim.Adafactor(self.trainable_parameters_dicts, lr=self.unet_lr)  # type: ignore
@@ -669,9 +669,10 @@ class SDXLTuner:
 
         if self.config.optimizer != "adam_bfloat16" and self.config.gradient_precision == "fp32":
             # After backward, convert gradients to fp32 for stable accumulation
-            for param in self.trainable_parameters:
-                if param.grad is not None:
-                    param.grad.data = param.grad.data.to(torch.float32)
+            for params in self.trainable_parameters:
+                for param in params:
+                    if param.grad is not None:
+                        param.grad.data = param.grad.data.to(torch.float32)
 
         if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
             params_to_clip = self.unet.parameters()
