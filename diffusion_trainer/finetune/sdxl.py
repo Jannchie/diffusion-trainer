@@ -184,14 +184,9 @@ class SDXLTuner:
 
         self.save_path = Path(self.save_dir) / self.model_name
 
-        self.seed = config.seed if config.seed is not None else secrets.randbelow(1_000_000_000)
-
         self.save_dtype = str_to_dtype(config.save_dtype)
         self.weight_dtype = str_to_dtype(config.weight_dtype)
 
-        self.prediction_type = config.prediction_type
-
-        self.n_epochs = config.n_epochs
         self.batch_size = config.batch_size
         self.gradient_accumulation_steps = config.gradient_accumulation_steps
 
@@ -205,8 +200,6 @@ class SDXLTuner:
         self.lora_alpha = config.lora_alpha
 
         self.lokr_factor = config.lokr_factor
-
-        self.noise_offset = config.noise_offset
 
         # reduce memory usage by checkpointing the gradients
         self.gradient_checkpointing = config.gradient_checkpointing
@@ -408,7 +401,7 @@ class SDXLTuner:
         optimizer = self.initialize_optimizer()
 
         num_update_steps_per_epoch = math.ceil(len(data_loader) / self.gradient_accumulation_steps)
-        n_total_steps = self.n_epochs * num_update_steps_per_epoch
+        n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
 
         lr_scheduler = get_scheduler(
             "cosine_with_restarts",
@@ -443,7 +436,7 @@ class SDXLTuner:
         total_task = progress.add_task("Total Progress", total=n_total_steps)
         global_step = 0
         with progress:
-            for epoch in range(self.n_epochs):
+            for epoch in range(self.config.n_epochs):
                 self.train_loss = 0.0
                 current_epoch_task = progress.add_task(f"Epoch {epoch+1}", total=num_update_steps_per_epoch)
                 for _step, batch in enumerate(data_loader):
@@ -589,7 +582,7 @@ class SDXLTuner:
     def log_training_parameters(self) -> None:
         n_params = self.get_n_params(self.trainable_parameters_dicts)
         logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
-        logger.info("Number of epochs: %s", self.n_epochs)
+        logger.info("Number of epochs: %s", self.config.n_epochs)
         num_processes = self.accelerator.num_processes
         logger.info("Unet: %s %s", self.unet.device, self.unet.dtype)
         logger.info("Text Encoder 1: %s %s", self.text_encoder_1.device, self.text_encoder_1.dtype)
@@ -651,10 +644,10 @@ class SDXLTuner:
         noise = self.sample_noise(img_latents)
 
         timesteps = self.sample_timesteps(img_latents.shape[0])
-        img_latents_with_noise = self.noise_scheduler.add_noise(img_latents, noise, timesteps)
+        img_noisy_latents = self.noise_scheduler.add_noise(img_latents.float(), noise.float(), timesteps)
 
-        model_pred = self.pipeline.unet(
-            img_latents_with_noise,
+        model_pred = self.unet(
+            img_noisy_latents,
             timesteps,
             prompt_embeds,
             added_cond_kwargs=unet_added_conditions,
@@ -708,9 +701,9 @@ class SDXLTuner:
     ) -> torch.Tensor:
         noise_scheduler = self.noise_scheduler
         # Get the target for loss depending on the prediction type
-        if self.prediction_type is not None:
+        if self.config.prediction_type is not None:
             # set prediction_type of scheduler if defined
-            noise_scheduler.register_to_config(prediction_type=self.prediction_type)
+            noise_scheduler.register_to_config(prediction_type=self.config.prediction_type)
         if noise_scheduler.config.get("prediction_type") == "epsilon":
             target = noise
         elif noise_scheduler.config.get("prediction_type") == "v_prediction":
@@ -853,10 +846,10 @@ class SDXLTuner:
 
     def sample_noise(self, img_latents: torch.Tensor) -> torch.Tensor:
         noise = torch.randn_like(img_latents)
-        if self.noise_offset:
+        if self.config.noise_offset:
             # Add noise to the image latents
             # https://www.crosslabs.org//blog/diffusion-with-offset-noise
-            noise += self.noise_offset * torch.randn(
+            noise += self.config.noise_offset * torch.randn(
                 (img_latents.shape[0], img_latents.shape[1], 1, 1),
                 device=img_latents.device,
             )
