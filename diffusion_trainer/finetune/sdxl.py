@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 import torch
 import torch.nn.functional as F
@@ -101,6 +101,13 @@ class SDXLConfig:
     preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
     preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
     log_with: Literal["wandb", "tensorboard", "none"] = field(default="none", metadata={"help": "Logger."})
+
+    gradient_precision: Literal["fp32", "fp16"] = field(default="fp32", metadata={"help": "Gradient precision."})
+
+    optimizer: Literal["adamW8bit", "adafactor"] = field(default="adamW8bit", metadata={"help": "Optimizer."})
+    optimizer_warmup_steps: int = field(default=0, metadata={"help": "Optimizer warmup steps."})
+    optimizer_num_cycles: int = field(default=1, metadata={"help": "Optimizer num cycles."})
+
     zero_grad_set_to_none: bool = field(default=False, metadata={"help": "Zero grad set to none."})
 
 
@@ -157,6 +164,11 @@ def str_to_dtype(dtype: str) -> torch.dtype:
     raise ValueError(msg)
 
 
+class ParamDict(TypedDict):
+    lr: float
+    params: torch.Tensor
+
+
 class SDXLTuner:
     """Finetune Stable Diffusion XL model."""
 
@@ -168,6 +180,8 @@ class SDXLTuner:
     def __init__(self, *, config: SDXLConfig) -> None:
         """Initialize."""
         self.config = config
+        self.apply_seed_settings()
+
         self.model_path = Path(config.model_path)
 
         self.model_name = config.model_name
@@ -175,14 +189,9 @@ class SDXLTuner:
 
         self.save_path = Path(self.save_dir) / self.model_name
 
-        self.seed = config.seed if config.seed is not None else secrets.randbelow(1_000_000_000)
-
         self.save_dtype = str_to_dtype(config.save_dtype)
         self.weight_dtype = str_to_dtype(config.weight_dtype)
 
-        self.prediction_type = config.prediction_type
-
-        self.n_epochs = config.n_epochs
         self.batch_size = config.batch_size
         self.gradient_accumulation_steps = config.gradient_accumulation_steps
 
@@ -196,8 +205,6 @@ class SDXLTuner:
         self.lora_alpha = config.lora_alpha
 
         self.lokr_factor = config.lokr_factor
-
-        self.noise_offset = config.noise_offset
 
         # reduce memory usage by checkpointing the gradients
         self.gradient_checkpointing = config.gradient_checkpointing
@@ -224,9 +231,6 @@ class SDXLTuner:
         # More details here: https://arxiv.org/abs/2303.09556.
         self.snr_gamma = config.snr_gamma
 
-        # Max gradient norm.
-        self.max_grad_norm = config.max_grad_norm
-
         self.use_ema = config.use_ema
 
         self.save_every_n_epochs = config.save_every_n_epochs
@@ -243,6 +247,11 @@ class SDXLTuner:
 
         for key, value in config.__dict__.items():
             logger.info("%s: %s", key, value)
+
+    def apply_seed_settings(self):
+        seed = self.config.seed
+        random.seed(seed)
+        torch.manual_seed(seed)
 
     def init_ema(self) -> None:
         # Create EMA for the unet.
@@ -267,13 +276,13 @@ class SDXLTuner:
             self.text_encoder_1.gradient_checkpointing_enable()
             self.text_encoder_2.gradient_checkpointing_enable()
 
-    def get_n_params(self, trainable_parameters: list[dict]) -> int:
+    def get_n_params(self, trainable_parameters: list[ParamDict]) -> int:
         n_params = 0
         for param in trainable_parameters:
             n_params += sum(p.numel() for p in param["params"])
         return n_params
 
-    def get_trainable_parameters(self) -> list[dict]:
+    def get_trainable_parameter_dicts(self) -> list[ParamDict]:
         trainable_parameters = []
         if self.unet_lr != 0:
             trainable_parameters.append(
@@ -393,22 +402,23 @@ class SDXLTuner:
         self.update_training_flags()
         self.apply_lora_config()
 
-        trainable_parameters = self.get_trainable_parameters()
+        self.trainable_parameters_dicts = self.get_trainable_parameter_dicts()
+        self.trainable_parameters: list[torch.Tensor] = [param["params"] for param in self.trainable_parameters_dicts]
         cast_training_params([self.unet, self.text_encoder_1, self.text_encoder_2])
 
         self.noise_scheduler: DDPMScheduler = DDPMScheduler.from_config(self.pipeline.scheduler.config)  # type: ignore
 
-        optimizer = self.initialize_optimizer(trainable_parameters)
+        optimizer = self.initialize_optimizer()
 
         num_update_steps_per_epoch = math.ceil(len(data_loader) / self.gradient_accumulation_steps)
-        n_total_steps = self.n_epochs * num_update_steps_per_epoch
+        n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
 
         lr_scheduler = get_scheduler(
             "cosine_with_restarts",
             optimizer=optimizer,
-            num_warmup_steps=100,  # 此处应该是经过 accmulate 之后的 steps
+            num_warmup_steps=self.config.optimizer_warmup_steps,  # 此处应该是经过 accmulate 之后的 steps
             num_training_steps=n_total_steps,
-            num_cycles=2,
+            num_cycles=self.config.optimizer_num_cycles,
         )
 
         optimizer = self.accelerator.prepare(optimizer)
@@ -417,7 +427,7 @@ class SDXLTuner:
         self.text_encoder_1 = self.accelerator.prepare(self.text_encoder_1)
         self.text_encoder_2 = self.accelerator.prepare(self.text_encoder_2)
 
-        self.log_training_parameters(trainable_parameters)
+        self.log_training_parameters()
 
         if self.accelerator.is_main_process:
             self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
@@ -436,7 +446,7 @@ class SDXLTuner:
         total_task = progress.add_task("Total Progress", total=n_total_steps)
         global_step = 0
         with progress:
-            for epoch in range(self.n_epochs):
+            for epoch in range(self.config.n_epochs):
                 self.train_loss = 0.0
                 current_epoch_task = progress.add_task(f"Epoch {epoch+1}", total=num_update_steps_per_epoch)
                 for _step, batch in enumerate(data_loader):
@@ -452,8 +462,8 @@ class SDXLTuner:
                         # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
                         optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
 
-                    current_lr = lr_scheduler.get_last_lr()[0]
                     if self.accelerator.sync_gradients:
+                        current_lr = lr_scheduler.get_last_lr()[0]
                         if self.ema_unet:
                             self.ema_unet.step(self.unet.parameters())
 
@@ -526,20 +536,19 @@ class SDXLTuner:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def initialize_optimizer(self, trainable_parameters: list[dict]) -> torch.optim.Optimizer:
-        optimizer_name = "adamW8bit"
-        if optimizer_name == "adamW8bit":
+    def initialize_optimizer(self) -> torch.optim.Optimizer:
+        if self.config.optimizer == "adamW8bit":
             import bitsandbytes as bnb
 
             optimizer = bnb.optim.AdamW8bit(
-                trainable_parameters,
+                self.trainable_parameters_dicts,
                 lr=self.unet_lr,
                 betas=(0.9, 0.999),
                 weight_decay=1e-2,
                 eps=1e-8,
             )
         else:
-            optimizer = torch.optim.Adafactor(trainable_parameters, lr=self.unet_lr)
+            optimizer = torch.optim.Adafactor(self.trainable_parameters_dicts, lr=self.unet_lr)  # type: ignore
         return optimizer
 
     def saving_model(self, filename: str) -> None:
@@ -581,10 +590,10 @@ class SDXLTuner:
         msg = "Full finetune model saving is not implemented yet."
         raise NotImplementedError(msg)
 
-    def log_training_parameters(self, trainable_parameters: list[dict]) -> None:
-        n_params = self.get_n_params(trainable_parameters)
+    def log_training_parameters(self) -> None:
+        n_params = self.get_n_params(self.trainable_parameters_dicts)
         logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
-        logger.info("Number of epochs: %s", self.n_epochs)
+        logger.info("Number of epochs: %s", self.config.n_epochs)
         num_processes = self.accelerator.num_processes
         logger.info("Unet: %s %s", self.unet.device, self.unet.dtype)
         logger.info("Text Encoder 1: %s %s", self.text_encoder_1.device, self.text_encoder_1.dtype)
@@ -646,10 +655,10 @@ class SDXLTuner:
         noise = self.sample_noise(img_latents)
 
         timesteps = self.sample_timesteps(img_latents.shape[0])
-        img_latents_with_noise = self.noise_scheduler.add_noise(img_latents, noise, timesteps)
+        img_noisy_latents = self.noise_scheduler.add_noise(img_latents.float(), noise.float(), timesteps)
 
-        model_pred = self.pipeline.unet(
-            img_latents_with_noise,
+        model_pred = self.unet(
+            img_noisy_latents,
             timesteps,
             prompt_embeds,
             added_cond_kwargs=unet_added_conditions,
@@ -663,9 +672,16 @@ class SDXLTuner:
         self.train_loss += avg_loss.item() / self.gradient_accumulation_steps
 
         self.accelerator.backward(loss)
-        if self.accelerator.sync_gradients:
+
+        if self.config.optimizer != "adam_bfloat16" and self.config.gradient_precision == "fp32":
+            # After backward, convert gradients to fp32 for stable accumulation
+            for param in self.trainable_parameters:
+                if param.grad is not None:
+                    param.grad.data = param.grad.data.to(torch.float32)
+
+        if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
             params_to_clip = self.unet.parameters()
-            self.accelerator.clip_grad_norm_(params_to_clip, self.max_grad_norm)
+            self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
         return loss.detach().item()
 
     def get_loss(self, timesteps: torch.Tensor, model_pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -696,9 +712,9 @@ class SDXLTuner:
     ) -> torch.Tensor:
         noise_scheduler = self.noise_scheduler
         # Get the target for loss depending on the prediction type
-        if self.prediction_type is not None:
+        if self.config.prediction_type is not None:
             # set prediction_type of scheduler if defined
-            noise_scheduler.register_to_config(prediction_type=self.prediction_type)
+            noise_scheduler.register_to_config(prediction_type=self.config.prediction_type)
         if noise_scheduler.config.get("prediction_type") == "epsilon":
             target = noise
         elif noise_scheduler.config.get("prediction_type") == "v_prediction":
@@ -841,10 +857,10 @@ class SDXLTuner:
 
     def sample_noise(self, img_latents: torch.Tensor) -> torch.Tensor:
         noise = torch.randn_like(img_latents)
-        if self.noise_offset:
+        if self.config.noise_offset:
             # Add noise to the image latents
             # https://www.crosslabs.org//blog/diffusion-with-offset-noise
-            noise += self.noise_offset * torch.randn(
+            noise += self.config.noise_offset * torch.randn(
                 (img_latents.shape[0], img_latents.shape[1], 1, 1),
                 device=img_latents.device,
             )
