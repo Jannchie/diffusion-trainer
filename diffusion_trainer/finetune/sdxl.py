@@ -109,6 +109,13 @@ class SDXLConfig:
     optimizer_num_cycles: int = field(default=1, metadata={"help": "Optimizer num cycles."})
 
     zero_grad_set_to_none: bool = field(default=False, metadata={"help": "Zero grad set to none."})
+    preview_sample_options: list[SampleOptions] = field(default_factory=list, metadata={"help": "Preview sample options."})
+
+    def __post_init__(self) -> None:
+        # convert preview_sample_options to SampleOptions
+        self.preview_sample_options = [
+            item if isinstance(item, SampleOptions) else SampleOptions(**item) for item in self.preview_sample_options
+        ]
 
 
 @dataclass
@@ -248,7 +255,7 @@ class SDXLTuner:
         for key, value in config.__dict__.items():
             logger.info("%s: %s", key, value)
 
-    def apply_seed_settings(self):
+    def apply_seed_settings(self) -> None:
         seed = self.config.seed
         random.seed(seed)
         torch.manual_seed(seed)
@@ -492,14 +499,7 @@ class SDXLTuner:
             return {}
 
         self.accelerator.wait_for_everyone()
-        sample_options = [
-            SampleOptions(
-                prompt="A anime style girl with short hair, simple background, smiling, white hair, red eyes, maid clothes.",
-                negative_prompt="worst quality, bad quality, blurry, low resolution",
-                steps=25,
-                seed=47,
-            ),
-        ]
+        sample_options = self.config.preview_sample_options
         if self.accelerator.is_main_process:
             for i, sample_option in enumerate(sample_options):
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
