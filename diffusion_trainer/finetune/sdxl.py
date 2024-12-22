@@ -101,6 +101,7 @@ class SDXLConfig:
     preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
     preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
     log_with: Literal["wandb", "tensorboard", "none"] = field(default="none", metadata={"help": "Logger."})
+    zero_grad_set_to_none: bool = field(default=False, metadata={"help": "Zero grad set to none."})
 
 
 @dataclass
@@ -448,7 +449,8 @@ class SDXLTuner:
 
                         optimizer.step()
                         lr_scheduler.step()
-                        optimizer.zero_grad()
+                        # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
+                        optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
 
                     current_lr = lr_scheduler.get_last_lr()[0]
                     if self.accelerator.sync_gradients:
