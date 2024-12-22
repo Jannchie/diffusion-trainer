@@ -589,6 +589,7 @@ class SDXLTuner:
         logger.info("Text Encoder 2: %s %s", self.text_encoder_2.device, self.text_encoder_2.dtype)
         effective_batch_size = self.batch_size * num_processes * self.gradient_accumulation_steps
         logger.info("Effective batch size: %s", effective_batch_size)
+        logger.info("Prediction type: %s", self.noise_scheduler.config.get("prediction_type"))
         logger.info("Starting training.")
 
     def update_training_flags(self) -> None:
@@ -642,8 +643,7 @@ class SDXLTuner:
         # Sample noise
         noise = self.sample_noise(img_latents)
 
-        batch_size = img_latents.shape[0]
-        timesteps = self.sample_timesteps(batch_size)
+        timesteps = self.sample_timesteps(img_latents.shape[0])
         img_latents_with_noise = self.noise_scheduler.add_noise(img_latents, noise, timesteps)
 
         model_pred = self.pipeline.unet(
@@ -657,7 +657,7 @@ class SDXLTuner:
         target = self.get_pred_target(img_latents, noise, timesteps, model_pred)
         loss = self.get_loss(timesteps, model_pred, target)
 
-        avg_loss = self.accelerator.gather(loss.repeat(batch_size)).mean()  # type: ignore
+        avg_loss = self.accelerator.gather(loss.repeat(self.batch_size)).mean()  # type: ignore
         self.train_loss += avg_loss.item() / self.gradient_accumulation_steps
 
         self.accelerator.backward(loss)
@@ -696,7 +696,7 @@ class SDXLTuner:
         # Get the target for loss depending on the prediction type
         if self.prediction_type is not None:
             # set prediction_type of scheduler if defined
-            self.pipeline.register_to_config(prediction_type=self.prediction_type)
+            noise_scheduler.register_to_config(prediction_type=self.prediction_type)
         if noise_scheduler.config.get("prediction_type") == "epsilon":
             target = noise
         elif noise_scheduler.config.get("prediction_type") == "v_prediction":
