@@ -416,6 +416,11 @@ class SDXLTuner:
             rescale_betas_zero_snr=True,
             timestep_spacing="leading",
         )  # type: ignore
+        # Get the target for loss depending on the prediction type
+        if self.config.prediction_type is not None:
+            # set prediction_type of scheduler if defined
+            self.noise_scheduler.register_to_config(prediction_type=self.config.prediction_type)
+
         logger.info("Noise scheduler config:")
         for key, value in self.noise_scheduler.config.items():
             logger.info("- %s: %s", key, value)
@@ -595,7 +600,6 @@ class SDXLTuner:
 
     def log_training_parameters(self) -> None:
         n_params = self.get_n_params(self.trainable_parameters_dicts)
-        logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
         logger.info("Number of epochs: %s", self.config.n_epochs)
         num_processes = self.accelerator.num_processes
         logger.info("Unet: %s %s", self.unet.device, self.unet.dtype)
@@ -604,38 +608,30 @@ class SDXLTuner:
         effective_batch_size = self.batch_size * num_processes * self.gradient_accumulation_steps
         logger.info("Effective batch size: %s", effective_batch_size)
         logger.info("Prediction type: %s", self.noise_scheduler.config.get("prediction_type"))
+        logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
         logger.info("Starting training.")
 
     def update_training_flags(self) -> None:
         if self.mode in ("lora", "lokr", "loha"):
             logger.info("Training with %s, freezing the models.", self.mode)
             self.unet.requires_grad_(False)
-            self.unet.train(False)
             self.text_encoder_1.requires_grad_(False)
-            self.text_encoder_1.train(False)
             self.text_encoder_2.requires_grad_(False)
-            self.text_encoder_2.train(False)
         elif self.mode == "full-finetune":
             if self.unet_lr:
                 logger.info("Training the UNet with learning rate %s", self.unet_lr)
                 self.unet.requires_grad_(True)
-                self.unet.train(True)
             else:
                 self.unet.requires_grad_(False)
-                self.unet.train(False)
             if self.text_encoder_1_lr:
                 logger.info("Training the text encoder 1 with learning rate %s", self.text_encoder_1_lr)
-                self.text_encoder_1.train(True)
                 self.text_encoder_1.requires_grad_(True)
             else:
-                self.text_encoder_1.train(False)
                 self.text_encoder_1.requires_grad_(False)
             if self.text_encoder_2_lr:
                 logger.info("Training the text encoder 2 with learning rate %s", self.text_encoder_2_lr)
-                self.text_encoder_2.train(True)
                 self.text_encoder_2.requires_grad_(True)
             else:
-                self.text_encoder_2.train(False)
                 self.text_encoder_2.requires_grad_(False)
         else:
             msg = f"Unknown mode {self.mode}"
@@ -659,13 +655,7 @@ class SDXLTuner:
         timesteps = self.sample_timesteps(img_latents.shape[0])  # tensor([791], device='cuda:0')
         img_noisy_latents = self.noise_scheduler.add_noise(img_latents.float(), noise.float(), timesteps)  # mean 0.5543 std 1.6650
 
-        model_pred = self.unet(
-            img_noisy_latents,
-            timesteps,
-            prompt_embeds,
-            added_cond_kwargs=unet_added_conditions,
-            return_dict=False,
-        )[0]
+        model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds, unet_added_conditions)
 
         target = self.get_pred_target(img_latents, noise, timesteps, model_pred)  # 0.0098 1.0003
         loss = self.get_loss(timesteps, model_pred, target)
@@ -686,6 +676,21 @@ class SDXLTuner:
             params_to_clip = self.unet.parameters()
             self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
         return loss.detach().item()
+
+    def get_model_pred(
+        self,
+        img_noisy_latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        unet_added_conditions: dict,
+    ) -> torch.Tensor:
+        return self.unet(
+            img_noisy_latents,
+            timesteps,
+            prompt_embeds,
+            added_cond_kwargs=unet_added_conditions,
+            return_dict=False,
+        )[0]
 
     def get_loss(self, timesteps: torch.Tensor, model_pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         if self.config.snr_gamma is None:
@@ -714,10 +719,6 @@ class SDXLTuner:
         model_pred: torch.Tensor,
     ) -> torch.Tensor:
         noise_scheduler = self.noise_scheduler
-        # Get the target for loss depending on the prediction type
-        if self.config.prediction_type is not None:
-            # set prediction_type of scheduler if defined
-            noise_scheduler.register_to_config(prediction_type=self.config.prediction_type)
         if noise_scheduler.config.get("prediction_type") == "epsilon":
             target = noise
         elif noise_scheduler.config.get("prediction_type") == "v_prediction":
