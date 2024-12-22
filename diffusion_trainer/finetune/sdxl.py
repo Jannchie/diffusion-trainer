@@ -177,6 +177,8 @@ class SDXLTuner:
     def __init__(self, *, config: SDXLConfig) -> None:
         """Initialize."""
         self.config = config
+        self.apply_seed_settings()
+
         self.model_path = Path(config.model_path)
 
         self.model_name = config.model_name
@@ -242,6 +244,11 @@ class SDXLTuner:
 
         for key, value in config.__dict__.items():
             logger.info("%s: %s", key, value)
+
+    def apply_seed_settings(self):
+        seed = self.config.seed
+        random.seed(seed)
+        torch.manual_seed(seed)
 
     def init_ema(self) -> None:
         # Create EMA for the unet.
