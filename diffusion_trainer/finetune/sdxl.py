@@ -101,9 +101,11 @@ class SDXLConfig:
     preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
     preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
     log_with: Literal["wandb", "tensorboard", "none"] = field(default="none", metadata={"help": "Logger."})
-    optimizer: Literal["adamW8bit", "adafactor"] = field(default="adamW8bit", metadata={"help": "Optimizer."})
     gradient_precision: Literal["fp32", "fp16"] = field(default="fp32", metadata={"help": "Gradient precision."})
 
+    optimizer: Literal["adamW8bit", "adafactor"] = field(default="adamW8bit", metadata={"help": "Optimizer."})
+    optimizer_warmup_steps: int = field(default=0, metadata={"help": "Optimizer warmup steps."})
+    optimizer_num_cycles: int = field(default=1, metadata={"help": "Optimizer num cycles."})
 
 
 @dataclass
@@ -158,9 +160,11 @@ def str_to_dtype(dtype: str) -> torch.dtype:
     msg = f"Unknown dtype {dtype}"
     raise ValueError(msg)
 
+
 class ParamDict(TypedDict):
     lr: float
     params: torch.Tensor
+
 
 class SDXLTuner:
     """Finetune Stable Diffusion XL model."""
@@ -409,9 +413,9 @@ class SDXLTuner:
         lr_scheduler = get_scheduler(
             "cosine_with_restarts",
             optimizer=optimizer,
-            num_warmup_steps=100,  # 此处应该是经过 accmulate 之后的 steps
+            num_warmup_steps=self.config.optimizer_warmup_steps,  # 此处应该是经过 accmulate 之后的 steps
             num_training_steps=n_total_steps,
-            num_cycles=2,
+            num_cycles=self.config.optimizer_num_cycles,
         )
 
         optimizer = self.accelerator.prepare(optimizer)
@@ -529,8 +533,7 @@ class SDXLTuner:
         torch.cuda.empty_cache()
 
     def initialize_optimizer(self) -> torch.optim.Optimizer:
-        optimizer_name = "adamW8bit"
-        if optimizer_name == "adamW8bit":
+        if self.config.optimizer == "adamW8bit":
             import bitsandbytes as bnb
 
             optimizer = bnb.optim.AdamW8bit(
@@ -541,7 +544,7 @@ class SDXLTuner:
                 eps=1e-8,
             )
         else:
-            optimizer = torch.optim.Adafactor(self.trainable_parameters_dicts, lr=self.unet_lr) # type: ignore
+            optimizer = torch.optim.Adafactor(self.trainable_parameters_dicts, lr=self.unet_lr)  # type: ignore
         return optimizer
 
     def saving_model(self, filename: str) -> None:

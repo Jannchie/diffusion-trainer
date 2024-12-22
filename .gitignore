@@ -5,3 +5,4 @@
 __pycache__
 
 diffusers_training_scripts/
+out/
