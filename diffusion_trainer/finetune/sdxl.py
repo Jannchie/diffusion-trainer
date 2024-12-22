@@ -500,9 +500,7 @@ class SDXLTuner:
             for i, sample_option in enumerate(sample_options):
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
                 generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
-                logger.info("Generating training preview....")
-                task = progress.add_task("Generating Preview", total=sample_option.steps)
-
+                task = progress.add_task(f"Generating Preview {i}", total=sample_option.steps)
                 with autocast_ctx:
                     self.pipeline.to(self.accelerator.device)
                     result = self.pipeline(
