@@ -71,7 +71,7 @@ class SDXLConfig:
     save_dir: str = field(default="out", metadata={"help": "Directory to save the model."})
     save_dtype: str = field(default="fp16", metadata={"help": "Save dtype."})
     weight_dtype: str = field(default="fp16", metadata={"help": "Weight dtype."})
-    mixed_precision: Literal["float16", "bfloat16", "fp16", "bf16"] = field(default="fp16", metadata={"help": "Mixed precision."})
+    mixed_precision: Literal["float16", "bfloat16", "fp16", "bf16"] = field(default="bf16", metadata={"help": "Mixed precision."})
     prediction_type: Literal["epsilon", "v_prediction", "sample"] | None = field(default=None, metadata={"help": "Prediction type."})
     n_epochs: int = field(default=10, metadata={"help": "Number of epochs."})
     batch_size: int = field(default=8, metadata={"help": "Batch size."})
@@ -104,7 +104,7 @@ class SDXLConfig:
     preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
     log_with: Literal["wandb", "tensorboard", "none"] = field(default="none", metadata={"help": "Logger."})
 
-    gradient_precision: Literal["fp32", "fp16"] = field(default="fp32", metadata={"help": "Gradient precision."})
+    gradient_precision: Literal["fp32", "fp16", "bf16"] = field(default="bf16", metadata={"help": "Gradient precision."})
 
     optimizer: Literal["adamW8bit", "adafactor"] = field(default="adamW8bit", metadata={"help": "Optimizer."})
     optimizer_warmup_steps: int = field(default=0, metadata={"help": "Optimizer warmup steps."})
