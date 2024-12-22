@@ -23,7 +23,7 @@ class DiffusionBatchItem:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
-    dataset = DiffusionDataset.from_metadata(R"E:\dataset-demo\meta.json")
+    dataset = DiffusionDataset.from_ss(R"E:\dataset-demo\meta.json")
     batch_size = 16
     sampler = BucketBasedBatchSampler(dataset, batch_size)
     data_loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0, collate_fn=DiffusionDataset.collate_fn)  # type: ignore

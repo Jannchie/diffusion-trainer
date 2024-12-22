@@ -95,3 +95,16 @@ def prepare_accelerator(
     )
     logger.info("accelerator device: %s", accelerator.device)
     return accelerator
+
+
+def str_to_dtype(dtype: str) -> torch.dtype:
+    if dtype in ("float16", "half", "fp16"):
+        return torch.float16
+    if dtype in ("float32", "float", "fp32"):
+        return torch.float32
+    if dtype in ("float64", "double", "fp64"):
+        return torch.float64
+    if dtype in ("bfloat16", "bf16"):
+        return torch.bfloat16
+    msg = f"Unknown dtype {dtype}"
+    raise ValueError(msg)

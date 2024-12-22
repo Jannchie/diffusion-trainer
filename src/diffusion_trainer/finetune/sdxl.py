@@ -4,9 +4,8 @@ import gc
 import math
 import os
 import random
-import secrets
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
@@ -30,8 +29,9 @@ from peft.utils.save_and_load import get_peft_model_state_dict
 from rich.progress import Progress
 from torch.utils.data import DataLoader
 
+from diffusion_trainer.config import SDXLConfig
 from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset
-from diffusion_trainer.finetune.utils import prepare_accelerator
+from diffusion_trainer.finetune.utils import prepare_accelerator, str_to_dtype
 from diffusion_trainer.shared import get_progress
 
 logger = getLogger("diffusion_trainer.finetune.sdxl")
@@ -50,74 +50,6 @@ def format_size(num: int) -> str:
 def unwrap_model(accelerator: Accelerator, model: torch.nn.Module) -> torch.nn.Module:
     model = accelerator.unwrap_model(model)
     return model._orig_mod if is_compiled_module(model) else model  # noqa: SLF001
-
-
-@dataclass
-class SampleOptions:
-    prompt: str
-    negative_prompt: str
-    steps: int
-    seed: int
-
-
-@dataclass
-class SDXLConfig:
-    model_path: str = field(metadata={"help": "Path to the model."})
-    dataset_meta_path: str = field(metadata={"help": "Path to the dataset metadata."})
-
-    dataset_path: str | None = field(default=None, metadata={"help": "Path to the dataset."})
-    seed: int = field(default_factory=lambda: secrets.randbelow(1_000_000_000), metadata={"help": "Seed for reproducibility."})
-    model_name: str = field(default="my_model", metadata={"help": "Model name."})
-    save_dir: str = field(default="out", metadata={"help": "Directory to save the model."})
-    save_dtype: str = field(default="fp16", metadata={"help": "Save dtype."})
-    weight_dtype: str = field(default="fp16", metadata={"help": "Weight dtype."})
-    mixed_precision: Literal["float16", "bfloat16", "fp16", "bf16"] = field(default="bf16", metadata={"help": "Mixed precision."})
-    prediction_type: Literal["epsilon", "v_prediction", "sample"] | None = field(default=None, metadata={"help": "Prediction type."})
-    n_epochs: int = field(default=10, metadata={"help": "Number of epochs."})
-    batch_size: int = field(default=8, metadata={"help": "Batch size."})
-    gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps."})
-    unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
-    text_encoder_1_lr: float = field(default=1e-6, metadata={"help": "Text encoder 1 learning rate."})
-    text_encoder_2_lr: float = field(default=1e-6, metadata={"help": "Text encoder 2 learning rate."})
-    mode: Literal["full-finetune", "lora", "lokr", "loha"] = field(default="lokr", metadata={"help": "Mode."})
-    lora_rank: int = field(default=4, metadata={"help": "Lora rank."})
-    lora_alpha: int = field(default=1, metadata={"help": "Lora alpha."})
-    lokr_factor: int = field(default=16, metadata={"help": "LoKr factor."})
-    noise_offset: float = field(default=0.0, metadata={"help": "Noise offset."})
-    gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
-    timestep_bias_strategy: Literal["none", "earlier", "later", "range"] = field(
-        default="none",
-        metadata={"help": "Timestep bias strategy."},
-    )
-    timestep_bias_multiplier: float = field(default=1.0, metadata={"help": "Timestep bias multiplier."})
-    timestep_bias_portion: float = field(default=0.25, metadata={"help": "Timestep bias portion."})
-    timestep_bias_begin: int = field(default=0, metadata={"help": "Timestep bias begin."})
-    timestep_bias_end: int = field(default=1000, metadata={"help": "Timestep bias end."})
-    # SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0.
-    # More details here: https://arxiv.org/abs/2303.09556.
-    snr_gamma: float | None = field(default=None, metadata={"help": "SNR gamma. Recommended value is 5.0."})
-    max_grad_norm: float = field(default=1.0, metadata={"help": "Max gradient norm."})
-    use_ema: bool = field(default=False, metadata={"help": "Use EMA."})
-    save_every_n_steps: int = field(default=0, metadata={"help": "Save every n steps."})
-    save_every_n_epochs: int = field(default=1, metadata={"help": "Save every n epochs."})
-    preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
-    preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
-    log_with: Literal["wandb", "tensorboard", "none"] = field(default="none", metadata={"help": "Logger."})
-
-    gradient_precision: Literal["fp32", "fp16", "bf16"] = field(default="bf16", metadata={"help": "Gradient precision."})
-
-    optimizer: Literal["adamW8bit", "adafactor"] = field(default="adamW8bit", metadata={"help": "Optimizer."})
-    optimizer_warmup_steps: int = field(default=0, metadata={"help": "Optimizer warmup steps."})
-    optimizer_num_cycles: int = field(default=1, metadata={"help": "Optimizer num cycles."})
-
-    zero_grad_set_to_none: bool = field(default=False, metadata={"help": "Zero grad set to none."})
-    preview_sample_options: list[SampleOptions] = field(default_factory=list, metadata={"help": "Preview sample options."})
-
-    def __post_init__(self) -> None:
-        # convert preview_sample_options to SampleOptions
-        self.preview_sample_options = [
-            item if isinstance(item, SampleOptions) else SampleOptions(**item) for item in self.preview_sample_options
-        ]
 
 
 @dataclass
@@ -148,28 +80,15 @@ def load_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXL
 
     logger.info('Loading models from "%s" (%s)', path, dtype)
     with Path(os.devnull).open("w") as fnull, redirect_stdout(fnull), redirect_stderr(fnull):
-        if path.is_dir():
-            pipe = StableDiffusionXLPipeline.from_pretrained(path, torch_dtype=dtype)
+        if path.suffix == ".safetensors":
+            pipe = StableDiffusionXLPipeline.from_single_file(path.as_posix(), torch_dtype=dtype)
         else:
-            pipe = StableDiffusionXLPipeline.from_single_file(path, torch_dtype=dtype)
+            pipe = StableDiffusionXLPipeline.from_pretrained(path.as_posix(), torch_dtype=dtype)
     logger.info("Models loaded successfully.")
     if isinstance(pipe, StableDiffusionXLPipeline):
         pipe.progress_bar = DummyProgressBar  # type: ignore
         return pipe
     msg = "Failed to load models."
-    raise ValueError(msg)
-
-
-def str_to_dtype(dtype: str) -> torch.dtype:
-    if dtype in ("float16", "half", "fp16"):
-        return torch.float16
-    if dtype == ("float32", "float", "fp32"):
-        return torch.float32
-    if dtype == ("float64", "double", "fp64"):
-        return torch.float64
-    if dtype == ("bfloat16", "bf16"):
-        return torch.bfloat16
-    msg = f"Unknown dtype {dtype}"
     raise ValueError(msg)
 
 
@@ -186,7 +105,7 @@ class SDXLTuner:
         """Create a new instance from a configuration dictionary."""
         return SDXLTuner(**config)
 
-    def __init__(self, *, config: SDXLConfig) -> None:
+    def __init__(self, config: SDXLConfig) -> None:
         """Initialize."""
         self.config = config
         self.apply_seed_settings()
@@ -467,6 +386,7 @@ class SDXLTuner:
                 self.train_loss = 0.0
                 current_epoch_task = progress.add_task(f"Epoch {epoch+1}", total=num_update_steps_per_epoch)
                 for _step, batch in enumerate(data_loader):
+                    # TODO: 除了 UNet 之外，还有别的模型！
                     with self.accelerator.accumulate(self.pipeline.unet):
                         if not isinstance(batch, DiffusionBatch):
                             msg = f"Expected DiffusionBatch, got something else. Got: {type(batch)}"

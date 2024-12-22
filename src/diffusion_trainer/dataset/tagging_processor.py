@@ -1,9 +1,10 @@
 """Use the WD Tagger to tag images and merge the tags with existing metadata."""
 
 import argparse
-import json
+import logging
 import threading
 from dataclasses import dataclass
+from os import PathLike
 from pathlib import Path
 from queue import Queue
 
@@ -11,16 +12,19 @@ import torch
 from PIL import Image
 from wdtagger import Tagger
 
-from diffusion_trainer.dataset.utils import get_meta_key_from_path, retrieve_image_paths
+from diffusion_trainer.dataset.utils import get_meta_key_from_path, retrieve_image_paths, retrieve_text_path
 from diffusion_trainer.shared import get_progress, logger
+
+wdtagger_logger = logging.getLogger("wdtagger")
+wdtagger_logger.setLevel(logging.ERROR)
 
 
 @dataclass
 class Args:
     """Arguments for the script."""
 
-    meta_path: str
-    ds_path: str
+    image_base_path: str
+    meta_base_path: str
     num_workers: int
     skip_existing: bool
 
@@ -29,13 +33,34 @@ class Args:
 class WorkerArgs:
     """Arguments for the worker function."""
 
+    image_paths: list[Path]
+    image_base_path: Path
+    meta_base_path: Path
     task_queue: Queue
     result_queue: Queue
     i: int
-    metadata: dict[str, dict[str, str]]
-    ds_path_str: str
     lock: threading.Lock
-    skip_existing: bool
+
+
+def read_tags(meta_path: Path, key: str) -> list[str]:
+    """Read tags from metadata."""
+    file = get_tags_file_path(meta_path, key)
+    if not file.exists():
+        return []
+    with file.open("r") as f:
+        return f.read().split(", ")
+
+
+def write_tags(meta_path: Path, key: str, tags: list[str]) -> None:
+    """Write tags to metadata."""
+    file = get_tags_file_path(meta_path, key)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    with file.open("w") as f:
+        f.write(", ".join(tags))
+
+
+def get_tags_file_path(meta_path: Path, key: str) -> Path:
+    return Path(meta_path / "tags" / f"{key}.txt")
 
 
 def worker(args: WorkerArgs) -> None:  # noqa: C901
@@ -44,20 +69,11 @@ def worker(args: WorkerArgs) -> None:  # noqa: C901
 
     task_queue = args.task_queue
     result_queue = args.result_queue
-    metadata = args.metadata
-    ds_path_str = args.ds_path_str
     lock = args.lock
-    ds_path = Path(ds_path_str)
     while True:
         batch_files = task_queue.get()
         if batch_files is None:
             break  # terminate signal received
-
-        len_before = len(batch_files)
-
-        if args.skip_existing:
-            meta_keys = [get_meta_key_from_path(image_path, ds_path=ds_path) for image_path in batch_files]
-            batch_files = [f for f, key in zip(batch_files, meta_keys, strict=False) if metadata.get(key, {}).get("tags") is None]
 
         def filter_valid_files(paths: list[Path], images: list[Image.Image]) -> tuple[list[Path], list[Image.Image]]:
             result_path, result_image = [], []
@@ -85,16 +101,15 @@ def worker(args: WorkerArgs) -> None:  # noqa: C901
         for image_path, result in zip(valid_batch_files, results, strict=False):
             with lock:
                 try:
-                    meta_key = get_meta_key_from_path(image_path, ds_path=Path(ds_path_str))
-                    before_tags = metadata[meta_key].get("tags", "").split(", ")
+                    meta_key = get_meta_key_from_path(image_path, base_path=args.image_base_path)
+                    before_tags = read_tags(args.meta_base_path, meta_key)
                     more_tags = result.general_tags_string.split(", ")
                     more_tags_not_in_before = [tag for tag in more_tags if tag not in before_tags]
                     final_tags = before_tags + more_tags_not_in_before
-                    final_tags_str = ", ".join(final_tags)
-                    metadata[meta_key]["tags"] = final_tags_str
+                    write_tags(args.meta_base_path, meta_key, final_tags)
                 except Exception:
                     logger.exception('Error processing metadata "%s"', image_path)
-        result_queue.put(len_before)
+        result_queue.put(len(batch_files))
 
     result_queue.put(None)
 
@@ -104,25 +119,41 @@ class TaggingProcessor:
 
     def __init__(  # noqa: PLR0913
         self,
-        meta_path: str,
-        ds_path: str,
-        num_workers: int,
-        batch_size: int = 16,
+        img_path: str | PathLike,
+        meta_path: str | PathLike | None = None,
         *,
-        skip_existing: bool,
+        num_workers: int = 4,
+        batch_size: int = 16,
+        skip_existing: bool = True,
         ignore_hidden: bool = True,
         recursive: bool = True,
     ) -> None:
         """Initialize."""
-        self.meta_path = Path(meta_path)
-        self.ds_path = Path(ds_path)
+        self.img_path = Path(img_path)
+        if not meta_path:
+            logger.info("Metadata path not set. Using %s as metadata path.", self.img_path / "metadata")
+            self.meta_path = self.img_path / "metadata"
+        else:
+            self.meta_path = Path(meta_path)
+
         self.num_workers = num_workers
         self.skip_existing = skip_existing
         self.batch_size = batch_size
 
-        self.image_paths = list(retrieve_image_paths(self.ds_path, ignore_hidden=ignore_hidden, recursive=recursive))
-        logger.info(f"Found {len(self.image_paths)} images in {self.ds_path}")
-        self.metadata = json.load(self.meta_path.open(encoding="utf-8"))
+        self.image_paths = list(retrieve_image_paths(self.img_path, ignore_hidden=ignore_hidden, recursive=recursive))
+        logger.info(f"Found {len(self.image_paths)} images in {self.img_path}")
+        self.skip_count = 0
+        if skip_existing:
+            tags_base_path = self.meta_path / "tags"
+            already_exists = retrieve_text_path(tags_base_path)
+            already_exists_relative_path = {p.relative_to(tags_base_path) for p in already_exists}
+            before_count = len(self.image_paths)
+            self.image_paths = [
+                p for p in self.image_paths if p.relative_to(self.img_path).with_suffix(".txt") not in already_exists_relative_path
+            ]
+            after_count = len(self.image_paths)
+            self.skip_count = before_count - after_count
+            logger.info("Skipping %s - %s = %s existing files", f"{before_count:,}", f"{after_count:,}", f"{self.skip_count:,}")
 
         self.task_queue = Queue()
         self.result_queue = Queue()
@@ -143,10 +174,6 @@ class TaggingProcessor:
 
         self._process_results(workers)
 
-        # Save the updated metadata back to the file
-        with self.meta_path.open("w", encoding="utf-8") as meta_file:
-            json.dump(self.metadata, meta_file, indent=2)
-
     def _populate_task_queue(self) -> None:
         for i in range(0, len(self.image_paths), self.batch_size):
             batch_files = self.image_paths[i : i + self.batch_size]
@@ -158,13 +185,13 @@ class TaggingProcessor:
                 target=worker,
                 args=(
                     WorkerArgs(
+                        meta_base_path=self.meta_path,
+                        image_paths=self.image_paths,
                         task_queue=self.task_queue,
                         result_queue=self.result_queue,
                         i=i % self.gpu_count,
-                        metadata=self.metadata,
-                        ds_path_str=str(self.ds_path),
+                        image_base_path=self.img_path,
                         lock=self.lock,
-                        skip_existing=self.skip_existing,
                     ),
                 ),
             )
@@ -173,8 +200,7 @@ class TaggingProcessor:
 
     def _process_results(self, workers: list[threading.Thread]) -> None:
         with get_progress() as progress:
-            task = progress.add_task("Tagging...", total=len(self.image_paths))
-
+            task = progress.add_task("Tagging...", total=len(self.image_paths), completed=self.skip_count)
             processed_count = 0
             done_workers = 0
 

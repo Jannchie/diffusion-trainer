@@ -44,7 +44,7 @@ class WritePayload:
 class SimpleLatentsProcessor:
     """ImageProcessor class to process images and save the latent vectors."""
 
-    def __init__(self, model_name_or_path: str, dtype: torch.dtype = torch.float32, device: str | torch.device = "cuda") -> None:
+    def __init__(self, model_name_or_path: str, dtype: torch.dtype | None = None, device: str | torch.device = "cuda") -> None:
         """Initialize the ImageProcessor class."""
         self.model_name_or_path = model_name_or_path
         self.device = device
@@ -67,12 +67,15 @@ class SimpleLatentsProcessor:
 
     def load_vae_model(self) -> AutoencoderKL:
         """Load the VAE model."""
+        logger.info("Loading vae")
         path = Path(self.model_name_or_path)
         if path.is_file():
             vae = AutoencoderKL.from_single_file(self.model_name_or_path, torch_dtype=self.dtype)  # type: ignore
         else:
             vae = AutoencoderKL.from_pretrained(self.model_name_or_path, torch_dtype=self.dtype)  # type: ignore
-        return vae.to(self.device).eval()  # type: ignore
+        vae = vae.to(self.device).eval()  # type: ignore
+        logger.info("Loaded vae (%s) - dtype = %s, device = %s", self.model_name_or_path, vae.dtype, vae.device)
+        return vae
 
     def select_reso(self, image_width: int, image_height: int) -> tuple[tuple[int, int], tuple[int, int]]:
         """Select the resolution for the image."""
@@ -186,15 +189,15 @@ class LatentsGenerateProcessor:
     def __init__(  # noqa: PLR0913
         self,
         vae_path: str,
-        ds_path: str,
-        target_path: str,
-        dtype: torch.dtype = torch.float32,
+        img_path: str,
+        meta_path: str,
+        vae_dtype: torch.dtype | None = None,
         num_reader: int = 4,
         num_writer: int = 4,
     ) -> None:
         """Initialize the ImageProcessingPipeline class."""
-        self.ds_path = Path(ds_path)
-        self.target_path = Path(target_path)
+        self.ds_path = Path(img_path)
+        self.meta_path = Path(meta_path)
         self.num_reader = num_reader
         self.num_writer = num_writer
 
@@ -213,7 +216,7 @@ class LatentsGenerateProcessor:
 
         self.gpu_count = torch.cuda.device_count()
         self.processor_list = [
-            SimpleLatentsProcessor(model_name_or_path=vae_path, dtype=dtype, device=f"cuda:{i}") for i in range(self.gpu_count)
+            SimpleLatentsProcessor(model_name_or_path=vae_path, dtype=vae_dtype, device=f"cuda:{i}") for i in range(self.gpu_count)
         ]
 
         self.lock = threading.Lock()
@@ -254,7 +257,7 @@ class LatentsGenerateProcessor:
         """Get the npz save path for the image."""
         base_path = self.ds_path
         relative_path = image_path.relative_to(base_path)
-        target_path = self.target_path / relative_path
+        target_path = self.meta_path / "latents" / relative_path
         return target_path.with_suffix(".npz")
 
     @torch.no_grad()
@@ -341,7 +344,7 @@ class LatentsGenerateProcessor:
         for t in self.writer_threads:
             t.join()
 
-    def process_metadata(self, meta_path: Path | str) -> None:
+    def process_ss_meta(self, meta_path: Path | str) -> None:
         """Process the metadata and save it to the meta_path."""
         meta_path = Path(meta_path)
         if Path.exists(meta_path):
@@ -353,10 +356,10 @@ class LatentsGenerateProcessor:
                 metadata = {}
         else:
             metadata = {}
-        npz_path_list = retrieve_npz_path(self.target_path, recursive=True)
+        npz_path_list = retrieve_npz_path(self.meta_path, recursive=True)
 
         for path in npz_path_list:
-            relative_path = path.relative_to(self.target_path).with_suffix("").as_posix()
+            relative_path = path.relative_to(self.meta_path).with_suffix("").as_posix()
             if metadata.get(relative_path) is None:
                 metadata[relative_path] = {}
             metadata[relative_path]["train_resolution"] = np.load(path)["train_resolution"].tolist()
@@ -413,4 +416,4 @@ if __name__ == "__main__":
     pipeline = LatentsGenerateProcessor(vae_path, ds_path, target_path)
 
     pipeline.__call__()
-    pipeline.process_metadata(meta_path)
+    pipeline.process_ss_meta(meta_path)

@@ -11,6 +11,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
 
+from diffusion_trainer.config import SDXLConfig
+from diffusion_trainer.dataset.utils import retrieve_npz_path
 from diffusion_trainer.shared import get_progress
 
 logger = logging.getLogger("diffusion_trainer.dataset")
@@ -30,10 +32,9 @@ def process_caption(caption: str | None) -> str:
 
 @dataclass
 class DiffusionTrainingItem:
-    key: str
     npz_path: str
-    caption: str
-    tags: list[str]
+    caption: str | None
+    tags: list[str] | None
 
 
 @dataclass
@@ -77,7 +78,7 @@ class DiffusionDataset(Dataset):
         )
 
     @staticmethod
-    def from_metadata(
+    def from_ss(
         metadata_path: str | PathLike,
         ds_path: str | PathLike | None = None,
     ) -> "DiffusionDataset":
@@ -90,7 +91,6 @@ class DiffusionDataset(Dataset):
             for key in progress.track(metadata, description="Processing metadata"):
                 buckets[tuple(metadata[key].get("train_resolution"))].append(
                     DiffusionTrainingItem(
-                        key,
                         str(ds_path / key) + ".npz",
                         process_caption(metadata[key].get("caption")),
                         process_tags(metadata[key].get("tags")),
@@ -99,6 +99,39 @@ class DiffusionDataset(Dataset):
                 metadata[key]
             buckets = dict(sorted(buckets.items()))
         logger.info("Buckets created, Here are the buckets information:")
+        return DiffusionDataset(buckets)
+
+    @staticmethod
+    def from_filesystem(
+        config: SDXLConfig,
+    ) -> "DiffusionDataset":
+        buckets: dict[tuple[int, int], list[DiffusionTrainingItem]] = defaultdict(list)
+
+        if config.meta_path is None and config.image_path is not None:
+            meta_dir = Path(config.image_path) / "metadata"
+        elif config.meta_path is not None:
+            meta_dir = Path(config.meta_path)
+        else:
+            msg = "Please specify the `meta_path` in the config file."
+            raise ValueError(msg)
+
+        npz_path_list = list(retrieve_npz_path(Path(meta_dir)))
+        latents_dir = meta_dir / "latents"
+        with get_progress() as progress:
+            for npz_path in progress.track(npz_path_list, description="Processing npz files"):
+                npz = np.load(npz_path)
+                key = npz_path.relative_to(latents_dir).with_suffix("")
+                tag_file = meta_dir / "tags" / f"{key}.txt"
+                caption_file = meta_dir / "caption" / f"{key}.txt"
+                caption = caption_file.read_text() if caption_file.exists() else ""
+                tags = tag_file.read_text().split(",") if tag_file.exists() else []
+                train_resolution = npz.get("train_resolution")
+                item = DiffusionTrainingItem(
+                    npz_path=npz_path.as_posix(),
+                    caption=caption,
+                    tags=tags,
+                )
+                buckets[tuple(train_resolution.tolist())].append(item)
         return DiffusionDataset(buckets)
 
     def get_bucket_key(self, idx: int) -> tuple[int, int]:

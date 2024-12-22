@@ -1,9 +1,15 @@
 seed = 47
 
-model_path = "E:/webui_forge_cu121_torch21/webui/models/Stable-diffusion/creative-xl-0.9-b2.safetensors"
+image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
+skip_prepare_image = true
+
+vae_path = "madebyollin/sdxl-vae-fp16-fix"
+vae_dtype = "fp16"
+
+model_path = "../SimpleTuner/models/creative-xl-0.9-b2"
 save_dir = "./out"
 
-dataset_meta_path = "E:/dataset-demo/meta.json"
+# ss_meta_path = "E:/dataset-demo/meta.json"
 
 # if dataset_path is not set, it will use the dataset_meta_path folder.
 # dataset_path = "E:/dataset-demo"
