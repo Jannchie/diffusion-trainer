@@ -34,8 +34,8 @@ save_dtype = "fp16"
 
 unet_lr = 1e-4
 
-text_encoder_1_lr = 1e-5
-text_encoder_2_lr = 1e-5
+text_encoder_1_lr = 0
+text_encoder_2_lr = 0
 
 
 lora_rank = 4
@@ -59,7 +59,7 @@ gradient_checkpointing = true
 
 # log_with = "wandb"
 
-prediction_type = 'v_prediction'
+# prediction_type = 'v_prediction'
 
 [[preview_sample_options]]
 prompt = "A anime style girl with short hair, 1girl, upper body, simple background, smiling, white hair, red eyes, maid clothes."

@@ -21,6 +21,7 @@ dependencies = [
     "xformers>=0.0.28.post3",
     "bitsandbytes>=0.45.0",
     "peft>=0.14.0",
+    "lycoris-lora>=3.1.1.post1",
 ]
 
 
