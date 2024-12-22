@@ -93,7 +93,9 @@ class SDXLConfig:
     timestep_bias_portion: float = field(default=0.25, metadata={"help": "Timestep bias portion."})
     timestep_bias_begin: int = field(default=0, metadata={"help": "Timestep bias begin."})
     timestep_bias_end: int = field(default=1000, metadata={"help": "Timestep bias end."})
-    snr_gamma: float = field(default=5.0, metadata={"help": "SNR gamma."})
+    # SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0.
+    # More details here: https://arxiv.org/abs/2303.09556.
+    snr_gamma: float | None = field(default=None, metadata={"help": "SNR gamma. Recommended value is 5.0."})
     max_grad_norm: float = field(default=1.0, metadata={"help": "Max gradient norm."})
     use_ema: bool = field(default=False, metadata={"help": "Use EMA."})
     save_every_n_steps: int = field(default=0, metadata={"help": "Save every n steps."})
@@ -233,10 +235,6 @@ class SDXLTuner:
         # When using `--timestep_bias_strategy=range`, the final timestep (inclusive) to bias.
         # Defaults to 1000, which is the number of timesteps that Stable Diffusion is trained on.
         self.timestep_bias_end = config.timestep_bias_end
-
-        # SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0.
-        # More details here: https://arxiv.org/abs/2303.09556.
-        self.snr_gamma = config.snr_gamma
 
         self.use_ema = config.use_ema
 
@@ -413,7 +411,14 @@ class SDXLTuner:
         self.trainable_parameters: list[list[torch.Tensor]] = [param["params"] for param in self.trainable_parameters_dicts]
         cast_training_params([self.unet, self.text_encoder_1, self.text_encoder_2])
 
-        self.noise_scheduler: DDPMScheduler = DDPMScheduler.from_config(self.pipeline.scheduler.config)  # type: ignore
+        self.noise_scheduler: DDPMScheduler = DDPMScheduler.from_config(
+            self.pipeline.scheduler.config,
+            rescale_betas_zero_snr=True,
+            timestep_spacing="leading",
+        )  # type: ignore
+        logger.info("Noise scheduler config:")
+        for key, value in self.noise_scheduler.config.items():
+            logger.info("- %s: %s", key, value)
 
         optimizer = self.initialize_optimizer()
 
@@ -649,11 +654,10 @@ class SDXLTuner:
             "text_embeds": prompt_embeds_pooled_2,
             "time_ids": time_ids,
         }
-        # Sample noise
-        noise = self.sample_noise(img_latents)
+        noise = self.sample_noise(img_latents)  # torch.Size([1, 4, 168, 96]) mean 0.0098 std 1.0003
 
-        timesteps = self.sample_timesteps(img_latents.shape[0])
-        img_noisy_latents = self.noise_scheduler.add_noise(img_latents.float(), noise.float(), timesteps)
+        timesteps = self.sample_timesteps(img_latents.shape[0])  # tensor([791], device='cuda:0')
+        img_noisy_latents = self.noise_scheduler.add_noise(img_latents.float(), noise.float(), timesteps)  # mean 0.5543 std 1.6650
 
         model_pred = self.unet(
             img_noisy_latents,
@@ -663,7 +667,7 @@ class SDXLTuner:
             return_dict=False,
         )[0]
 
-        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)
+        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)  # 0.0098 1.0003
         loss = self.get_loss(timesteps, model_pred, target)
 
         avg_loss = self.accelerator.gather(loss.repeat(self.batch_size)).mean()  # type: ignore
@@ -684,14 +688,14 @@ class SDXLTuner:
         return loss.detach().item()
 
     def get_loss(self, timesteps: torch.Tensor, model_pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        if self.snr_gamma is None:
+        if self.config.snr_gamma is None:
             loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
         else:
             # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
             # Since we predict the noise instead of x_0, the original formulation is slightly changed.
             # This is discussed in Section 4.2 of the same paper.
             snr = compute_snr(self.noise_scheduler, timesteps)
-            mse_loss_weights = torch.stack([snr, self.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
+            mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
             if self.noise_scheduler.config.get("prediction_type") == "epsilon":
                 mse_loss_weights = mse_loss_weights / snr
             elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
