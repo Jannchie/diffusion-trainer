@@ -39,8 +39,8 @@ def prepare_deepspeed_plugin() -> None | DeepSpeedPlugin:
 def prepare_ddp_kwargs(
     *,
     ddp_timeout: int = 100_000,
-    ddp_gradient_as_bucket_view: bool = True,
-    ddp_static_graph: bool = True,
+    ddp_gradient_as_bucket_view: bool = False,
+    ddp_static_graph: bool = False,
 ) -> list:
     """Prepare kwargs for DistributedDataParallel."""
     kwargs_handlers = (

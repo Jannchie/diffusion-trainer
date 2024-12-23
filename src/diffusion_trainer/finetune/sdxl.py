@@ -177,9 +177,8 @@ class SDXLTuner:
         # Create EMA for the unet.
         self.ema_unet: None | EMAModel = None
         if self.use_ema:
-            unet_copy = self.unet.parameters().copy()
             self.ema_unet = EMAModel(
-                unet_copy,
+                parameters=self.unet.parameters(),
                 model_cls=UNet2DConditionModel,
                 model_config=self.unet.config,
             ).to(self.device)
@@ -187,7 +186,11 @@ class SDXLTuner:
     def init_model_modules(self) -> None:
         # self.pipeline.enable_sequential_cpu_offload()
         # self.pipeline.enable_model_cpu_offload()
-        self.unet = self.pipeline.unet.to(self.device, dtype=self.weight_dtype)
+        self.unet: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(
+            self.model_path,
+            subfolder="unet",
+        )  # type: ignore
+        self.unet.to(self.device, dtype=self.weight_dtype)
         self.text_encoder_1 = self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype)
         self.text_encoder_2 = self.pipeline.text_encoder_2.to(self.device, dtype=self.weight_dtype)
         self.vae = self.pipeline.vae
@@ -258,7 +261,8 @@ class SDXLTuner:
                 self.unet_lr,
                 format_size(self.get_n_params([trainable_parameters[-1]])),
             )
-            self.accelerator.prepare(self.lycoris_model)
+            self.accelerator.prepare(self.unet)
+            self.unet.train()
         return trainable_parameters
 
     @property
@@ -400,7 +404,7 @@ class SDXLTuner:
             self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
         self.execute_training_epoch(num_update_steps_per_epoch, n_total_steps)
 
-    def execute_training_epoch(
+    def execute_training_epoch(  # noqa: C901
         self,
         num_update_steps_per_epoch: int,
         n_total_steps: int,
@@ -437,7 +441,7 @@ class SDXLTuner:
                         raise TypeError(msg)
                     batch = self.process_batch(orig_batch)
 
-                    with self.accelerator.accumulate(self.training_models):
+                    with self.accelerator.accumulate([self.unet]):
                         loss = self.train_each_batch(batch)
 
                     if self.accelerator.sync_gradients:
