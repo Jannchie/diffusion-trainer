@@ -116,7 +116,7 @@ class DiffusionDataset(Dataset):
             raise ValueError(msg)
 
         npz_path_list = list(retrieve_npz_path(Path(meta_dir)))
-        latents_dir = meta_dir / "latents"
+        latents_dir = (meta_dir / "latents").resolve()
         with get_progress() as progress:
             for npz_path in progress.track(npz_path_list, description="Processing npz files"):
                 npz = np.load(npz_path)

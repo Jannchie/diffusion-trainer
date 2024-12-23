@@ -1,6 +1,5 @@
 """Fintunner for Stable Diffusion XL model."""
 
-import gc
 import math
 import os
 import random
@@ -19,7 +18,7 @@ from diffusers.optimization import get_scheduler
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from diffusers.training_utils import EMAModel, cast_training_params, compute_snr
+from diffusers.training_utils import EMAModel, compute_snr, free_memory
 from diffusers.utils.torch_utils import is_compiled_module
 from lycoris import LycorisNetwork, create_lycoris
 from peft.tuners.loha.config import LoHaConfig
@@ -469,6 +468,8 @@ class SDXLTuner:
 
     @torch.no_grad()
     def generate_preview(self, progress: Progress, filename: str) -> None:
+        free_memory()
+
         def callback_on_step_end(_pipe: StableDiffusionXLPipelineOutput, _step: int, _timestep: int, _kwargs: dict) -> dict:
             progress.update(task, advance=1)
             return {}
@@ -506,8 +507,7 @@ class SDXLTuner:
                 else:
                     msg = f"Expected StableDiffusionXLPipelineOutput, got {type(result)}"
                     raise TypeError(msg)
-        gc.collect()
-        torch.cuda.empty_cache()
+        free_memory()
 
     def initialize_optimizer(self) -> torch.optim.Optimizer:
         if self.config.optimizer == "adamW8bit":

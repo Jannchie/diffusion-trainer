@@ -1,6 +1,7 @@
 seed = 47
 
-image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
+# image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
+meta_path = "demo_meta"
 skip_prepare_image = true
 
 vae_path = "madebyollin/sdxl-vae-fp16-fix"

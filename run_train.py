@@ -22,9 +22,6 @@ if __name__ == "__main__":
     sdxl_config_dict = tomllib.load(config_path.open("rb"))
     sdxl_config = SDXLConfig(**sdxl_config_dict)
 
-    if sdxl_config.image_path is None:
-        msg = "Please specify the image path in the config file."
-        raise ValueError(msg)
     if sdxl_config.image_path and sdxl_config.skip_prepare_image is False:
         logger.info("Prepare image from %s", sdxl_config.image_path)
         if not sdxl_config.vae_path:
