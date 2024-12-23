@@ -9,7 +9,7 @@ from typing import Literal
 import torch
 import wandb
 from accelerate import Accelerator, DeepSpeedPlugin, DistributedDataParallelKwargs, InitProcessGroupKwargs
-from accelerate.utils import PrecisionType
+from accelerate.utils import PrecisionType, ProfileKwargs
 
 logger = getLogger("diffusion_trainer")
 
@@ -83,12 +83,19 @@ def prepare_accelerator(
 
     deepspeed_plugin = prepare_deepspeed_plugin()
     ddp_kwargs = prepare_ddp_kwargs()
+
+    profile_kwargs = ProfileKwargs(
+        activities=["cuda"],
+        profile_memory=True,
+        record_shapes=True,
+    )
+
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
         log_with=log_with if log_with != "none" else None,
         project_dir=logging_dir,
-        kwargs_handlers=ddp_kwargs,
+        kwargs_handlers=[*ddp_kwargs, profile_kwargs],
         dynamo_backend=dynamo_backend,
         deepspeed_plugin=deepspeed_plugin,
     )

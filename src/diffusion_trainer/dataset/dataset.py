@@ -163,26 +163,25 @@ class DiffusionDataset(Dataset):
 
 
 class BucketBasedBatchSampler(Sampler):
-    def __init__(self, dataset: DiffusionDataset, batch_size: int, *, shuffle: bool = True) -> None:
+    def __init__(self, dataset: DiffusionDataset, batch_size: int, *, shuffle: bool = True, seed: int = 47) -> None:
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
-
+        self.rng = np.random.default_rng(seed)
     def __iter__(self) -> Generator[list[int], None, None]:
         batche_indices_list = []
         logger.debug("Prepare batch indices...")
-        rng = np.random.default_rng()
         for i, key in enumerate(self.dataset.bucket_keys):
             key_start_idx = self.dataset.bucket_boundaries[i - 1] if i > 0 else 0
             bucket_items = self.dataset.buckets[key]
             indices = list(range(len(bucket_items)))
             if self.shuffle:
-                rng.shuffle(indices)
+                self.rng.shuffle(indices)
             for j in range(0, len(bucket_items), self.batch_size):
                 batch_indices = [key_start_idx + indices[k] for k in range(j, min(j + self.batch_size, len(indices)))]
                 batche_indices_list.append(batch_indices)
         if self.shuffle:
-            rng.shuffle(batche_indices_list)
+            self.rng.shuffle(batche_indices_list)
         logger.debug("Batch indices prepared!")
         for batch_indices in batche_indices_list:
             yield batch_indices

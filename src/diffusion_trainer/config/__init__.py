@@ -60,9 +60,7 @@ class SDXLConfig:
     save_every_n_epochs: int = field(default=1, metadata={"help": "Save every n epochs."})
     preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
     preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
-    log_with: Literal["wandb", "tensorboard", "none"] = field(default="none", metadata={"help": "Logger."})
-
-    gradient_precision: Literal["fp32", "fp16", "bf16"] = field(default="fp32", metadata={"help": "Gradient precision."})
+    log_with: Literal["wandb", "tensorboard", "none"] = field(default="wandb", metadata={"help": "Logger."})
 
     optimizer: Literal["adamW8bit", "adafactor"] = field(default="adamW8bit", metadata={"help": "Optimizer."})
     optimizer_warmup_steps: int = field(default=0, metadata={"help": "Optimizer warmup steps."})
@@ -70,6 +68,9 @@ class SDXLConfig:
 
     zero_grad_set_to_none: bool = field(default=False, metadata={"help": "Zero grad set to none."})
     preview_sample_options: list[SampleOptions] = field(default_factory=list, metadata={"help": "Preview sample options."})
+
+    checkpoint_every_n_steps: int = field(default=1000, metadata={"help": "Checkpoint steps."})
+    checkpoint_epochs: int = field(default=0, metadata={"help": "Checkpoint epochs."})
 
     def __post_init__(self) -> None:
         # convert preview_sample_options to SampleOptions

@@ -21,6 +21,7 @@ from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel, cast_training_params, compute_snr
 from diffusers.utils.torch_utils import is_compiled_module
+from lycoris import LycorisNetwork, create_lycoris
 from peft.tuners.loha.config import LoHaConfig
 from peft.tuners.lora.config import LoraConfig
 from rich.progress import Progress
@@ -185,6 +186,8 @@ class SDXLTuner:
             ).to(self.device)
 
     def init_model_modules(self) -> None:
+        # self.pipeline.enable_sequential_cpu_offload()
+        # self.pipeline.enable_model_cpu_offload()
         self.unet = self.pipeline.unet.to(self.device, dtype=self.weight_dtype)
         self.text_encoder_1 = self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype)
         self.text_encoder_2 = self.pipeline.text_encoder_2.to(self.device, dtype=self.weight_dtype)
@@ -195,6 +198,7 @@ class SDXLTuner:
             unwrap_model(self.accelerator, self.unet).enable_gradient_checkpointing()
             unwrap_model(self.accelerator, self.text_encoder_1).gradient_checkpointing_enable()
             unwrap_model(self.accelerator, self.text_encoder_2).gradient_checkpointing_enable()
+            unwrap_model(self.accelerator, self.lycoris_model).enable_gradient_checkpointing()
 
     def get_n_params(self, trainable_parameters: list[ParamDict]) -> int:
         n_params = 0
@@ -204,7 +208,7 @@ class SDXLTuner:
 
     def get_trainable_parameter_dicts(self) -> list[ParamDict]:
         trainable_parameters = []
-        if self.unet_lr != 0:
+        if self.unet_lr != 0 and self.mode == "full-finetune":
             trainable_parameters.append(
                 {
                     "params": list(filter(lambda p: p.requires_grad, self.unet.parameters())),
@@ -216,6 +220,7 @@ class SDXLTuner:
                 self.unet_lr,
                 format_size(self.get_n_params([trainable_parameters[-1]])),
             )
+            self.accelerator.prepare(self.unet)
         if self.text_encoder_1_lr != 0:
             trainable_parameters.append(
                 {
@@ -228,6 +233,7 @@ class SDXLTuner:
                 self.text_encoder_1_lr,
                 format_size(self.get_n_params([trainable_parameters[-1]])),
             )
+            self.accelerator.prepare(self.text_encoder_1)
         if self.text_encoder_2_lr != 0:
             trainable_parameters.append(
                 {
@@ -240,10 +246,11 @@ class SDXLTuner:
                 self.text_encoder_2_lr,
                 format_size(self.get_n_params([trainable_parameters[-1]])),
             )
-        if self.lycoris_wrapped_network:
+            self.accelerator.prepare(self.text_encoder_2)
+        if self.mode in ("lokr", "loha") and self.lycoris_model:
             trainable_parameters.append(
                 {
-                    "params": list(filter(lambda p: p.requires_grad, self.lycoris_wrapped_network.parameters())),
+                    "params": list(filter(lambda p: p.requires_grad, self.lycoris_model.parameters())),
                     "lr": self.unet_lr,
                 },
             )
@@ -252,18 +259,21 @@ class SDXLTuner:
                 self.unet_lr,
                 format_size(self.get_n_params([trainable_parameters[-1]])),
             )
+            self.accelerator.prepare(self.lycoris_model)
         return trainable_parameters
 
     @property
     def training_models(self) -> list[torch.nn.Module]:
         """Get the training model."""
         model = []
-        if self.unet_lr != 0:
+        if self.unet_lr != 0 and self.mode == "full-finetune":
             model.append(self.pipeline.unet)
         if self.text_encoder_1_lr != 0:
             model.append(self.pipeline.text_encoder)
         if self.text_encoder_2_lr != 0:
             model.append(self.pipeline.text_encoder_2)
+        if self.lycoris_model:
+            model.append(self.lycoris_model)
         return model
 
     def apply_lora_config(self) -> None:
@@ -293,25 +303,6 @@ class SDXLTuner:
             if not self.lora_alpha or not self.lora_rank:
                 msg = "Lora rank and alpha must be provided for lokr mode."
                 raise ValueError(msg)
-            # unet_lokr_config = LoKrConfig(
-            #     r=self.lora_rank,
-            #     alpha=self.lora_alpha,
-            #     use_effective_conv2d=True,
-            #     rank_dropout=0.5,
-            #     module_dropout=0.5,
-            #     target_modules=[
-            #         # "proj_in",
-            #         # "proj_out",
-            #         "to_k",
-            #         "to_q",
-            #         "to_v",
-            #         # "to_out.0",
-            #         # "ff.net.0.proj",
-            #         # "ff.net.2",
-            #     ],
-            # )
-            # self.unet.add_adapter(unet_lokr_config)
-            from lycoris import LycorisNetwork, create_lycoris
 
             lycoris_config = {
                 "algo": "lokr",
@@ -329,13 +320,13 @@ class SDXLTuner:
             }
             LycorisNetwork.apply_preset(lycoris_config.get("apply_preset"))
 
-            self.lycoris_wrapped_network = create_lycoris(
+            self.lycoris_model = create_lycoris(
                 self.unet,
                 **lycoris_config,
             )
-            self.lycoris_wrapped_network.apply_to()
-            lycoris_num_params = sum(p.numel() for p in self.lycoris_wrapped_network.parameters())
-            self.lycoris_wrapped_network = self.lycoris_wrapped_network.to(self.accelerator.device, dtype=self.weight_dtype)
+            self.lycoris_model.apply_to()
+            lycoris_num_params = sum(p.numel() for p in self.lycoris_model.parameters())
+            self.lycoris_model = self.lycoris_model.to(self.accelerator.device, dtype=self.weight_dtype)
             logger.info(
                 "LyCORIS network has been initialized with %s parameters (%s)",
                 f"{lycoris_num_params:,}",
@@ -367,7 +358,6 @@ class SDXLTuner:
 
         self.trainable_parameters_dicts = self.get_trainable_parameter_dicts()
         self.trainable_parameters: list[list[torch.Tensor]] = [param["params"] for param in self.trainable_parameters_dicts]
-        cast_training_params([self.unet, self.text_encoder_1, self.text_encoder_2])
 
         self.noise_scheduler: DDPMScheduler = DDPMScheduler.from_config(
             self.pipeline.scheduler.config,
@@ -394,63 +384,70 @@ class SDXLTuner:
         lr_scheduler = get_scheduler(
             "polynomial",
             optimizer=optimizer,
-            num_warmup_steps=self.config.optimizer_warmup_steps,  # 此处应该是经过 accmulate 之后的 steps
+            num_warmup_steps=self.config.optimizer_warmup_steps,
             num_training_steps=n_total_steps,
             num_cycles=self.config.optimizer_num_cycles,
         )
 
-        optimizer = self.accelerator.prepare(optimizer)
-        lr_scheduler = self.accelerator.prepare(lr_scheduler)
-        self.unet = self.accelerator.prepare(self.unet)
-        self.text_encoder_1 = self.accelerator.prepare(self.text_encoder_1)
-        self.text_encoder_2 = self.accelerator.prepare(self.text_encoder_2)
-        sampler = self.accelerator.prepare(sampler)
-        data_loader = self.accelerator.prepare(data_loader)
+        self.optimizer = self.accelerator.prepare(optimizer)
+        self.lr_scheduler = self.accelerator.prepare(lr_scheduler)
+        self.data_loader = self.accelerator.prepare(data_loader)
+
         self.init_gradient_checkpointing()
 
         self.log_training_parameters()
 
         if self.accelerator.is_main_process:
             self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
-
-        self.execute_training_epoch(data_loader, optimizer, num_update_steps_per_epoch, n_total_steps, lr_scheduler)
+        self.execute_training_epoch(num_update_steps_per_epoch, n_total_steps)
 
     def execute_training_epoch(
         self,
-        data_loader: DataLoader,
-        optimizer: torch.optim.Optimizer,
         num_update_steps_per_epoch: int,
         n_total_steps: int,
-        lr_scheduler: torch.optim.lr_scheduler.LambdaLR,
     ) -> None:
         progress = get_progress()
-        total_task = progress.add_task("Total Progress", total=n_total_steps)
-        global_step = 0
-        with progress:
-            for epoch in range(self.config.n_epochs):
-                self.train_loss = 0.0
-                current_epoch_task = progress.add_task(f"Epoch {epoch+1}", total=num_update_steps_per_epoch)
-                for _step, batch in enumerate(data_loader):
-                    # TODO: 除了 UNet 之外，还有别的模型！
-                    with self.accelerator.accumulate(self.lycoris_wrapped_network):
-                        if not isinstance(batch, DiffusionBatch):
-                            msg = f"Expected DiffusionBatch, got something else. Got: {type(batch)}"
-                            raise TypeError(msg)
 
+        self.checkpointing_path = self.save_path / "state"
+        self.global_steps_file = self.checkpointing_path / "global_steps"
+
+        try:
+            self.accelerator.load_state(self.checkpointing_path.as_posix())
+            global_step = int(self.global_steps_file.read_text())
+        except Exception:
+            global_step = 0
+
+        skiped_epoch = math.floor(global_step / num_update_steps_per_epoch)
+        if global_step != 0:
+            logger.info("skiping %d steps", global_step)
+        skiped_data_loader = self.accelerator.skip_first_batches(self.data_loader, global_step % num_update_steps_per_epoch)
+        total_task = progress.add_task("Total Progress", total=n_total_steps, completed=global_step)
+
+        with progress:
+            for epoch in range(skiped_epoch, self.config.n_epochs):
+                self.train_loss = 0.0
+                current_epoch_task = progress.add_task(
+                    f"Epoch {epoch+1}",
+                    total=num_update_steps_per_epoch,
+                    completed=global_step % num_update_steps_per_epoch,
+                )
+                dl = skiped_data_loader if epoch == skiped_epoch else self.data_loader
+                for _step, orig_batch in enumerate(dl):
+                    if not isinstance(orig_batch, DiffusionBatch):
+                        msg = f"Expected DiffusionBatch, got something else. Got: {type(orig_batch)}"
+                        raise TypeError(msg)
+                    batch = self.process_batch(orig_batch)
+
+                    with self.accelerator.accumulate(self.training_models):
                         loss = self.train_each_batch(batch)
 
-                        optimizer.step()
-                        lr_scheduler.step()
-                        # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
-                        optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
-
                     if self.accelerator.sync_gradients:
-                        current_lr = lr_scheduler.get_last_lr()[0]
+                        current_lr = self.lr_scheduler.get_last_lr()[0]
                         if self.ema_unet:
                             self.ema_unet.step(self.unet.parameters())
 
-                        global_step += 1
                         self.accelerator.log({"train_loss": self.train_loss, "lr": current_lr}, step=global_step)
+                        global_step += 1
                         self.train_loss = 0.0
 
                         progress.update(total_task, advance=1, description=f"Global Step: {global_step} - Epoch: {epoch+1}")
@@ -458,6 +455,9 @@ class SDXLTuner:
 
                         if self.save_every_n_steps and global_step % self.save_every_n_steps == 0 and global_step != 0:
                             self.saving_model(f"{self.model_name}-step{global_step}")
+                        if self.config.checkpoint_every_n_steps and global_step % self.config.checkpoint_every_n_steps == 0:
+                            self.accelerator.save_state(self.checkpointing_path.as_posix())
+                            self.global_steps_file.write_text(str(global_step))
                         if self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0:
                             self.generate_preview(progress, f"{self.model_name}-step{global_step}")
                 if self.save_every_n_epochs and epoch % self.save_every_n_epochs == 0:
@@ -535,7 +535,7 @@ class SDXLTuner:
     def save_lora_model(self, filename: str) -> None:
         out_path = self.save_path / f"{filename}.safetensors"
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        self.lycoris_wrapped_network.save_weights(self.save_path / f"{filename}.safetensors", dtype=self.save_dtype, metadata={})
+        self.lycoris_model.save_weights(self.save_path / f"{filename}.safetensors", dtype=self.save_dtype, metadata={})
 
     def save_full_finetune_model(self, filename: str) -> None:
         msg = "Full finetune model saving is not implemented yet."
@@ -581,10 +581,8 @@ class SDXLTuner:
             raise ValueError(msg)
         self.accelerator.wait_for_everyone()
 
-    def train_each_batch(self, original_batch: DiffusionBatch) -> float:
-        batch = self.process_batch(original_batch)
-
-        img_latents = batch.img_latents.to(self.accelerator.device)
+    def train_each_batch(self, batch: SDXLBatch) -> float:
+        img_latents = self.vae.config.get("scaling_factor", 0) * batch.img_latents.to(self.accelerator.device)
         prompt_embeds_1 = batch.prompt_embeds_1.to(self.accelerator.device)
         prompt_embeds_2 = batch.prompt_embeds_2.to(self.accelerator.device)
         prompt_embeds_pooled_2 = batch.prompt_embeds_pooled_2.to(self.accelerator.device)
@@ -594,14 +592,12 @@ class SDXLTuner:
             "text_embeds": prompt_embeds_pooled_2,
             "time_ids": time_ids,
         }
-        noise = self.sample_noise(img_latents)  # torch.Size([1, 4, 168, 96]) mean 0.0098 std 1.0003
-
-        timesteps = self.sample_timesteps(img_latents.shape[0])  # tensor([791], device='cuda:0')
-        img_noisy_latents = self.noise_scheduler.add_noise(img_latents.float(), noise.float(), timesteps)  # mean 0.5543 std 1.6650
+        noise = self.sample_noise(img_latents)
+        timesteps = self.sample_timesteps(img_latents.shape[0])
+        img_noisy_latents = self.noise_scheduler.add_noise(img_latents.float(), noise.float(), timesteps).to(self.weight_dtype)
 
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds, unet_added_conditions)
-
-        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)  # 0.0098 1.0003
+        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)
         loss = self.get_loss(timesteps, model_pred, target)
 
         avg_loss = self.accelerator.gather(loss.repeat(self.batch_size)).mean()  # type: ignore
@@ -609,16 +605,15 @@ class SDXLTuner:
 
         self.accelerator.backward(loss)
 
-        # if self.config.optimizer != "adam_bfloat16" and self.config.gradient_precision == "fp32":
-        #     # After backward, convert gradients to fp32 for stable accumulation
-        #     for params in self.trainable_parameters:
-        #         for param in params:
-        #             if param.grad is not None:
-        #                 param.grad.data = param.grad.data.to(torch.float32)
-
         if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
             params_to_clip = self.unet.parameters()
             self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
+
+        self.optimizer.step()
+        self.lr_scheduler.step()
+        # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
+        self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
+
         return loss.detach().item()
 
     def get_model_pred(
@@ -774,9 +769,9 @@ class SDXLTuner:
             truncation=True,
             return_tensors="pt",
         )
-        text_input_ids = text_inputs["input_ids"]
-        prompt_embeds_output = self.pipeline.text_encoder(
-            text_input_ids.to(self.text_encoder_1.device),
+        text_input_ids = text_inputs["input_ids"].to(self.accelerator.device)
+        prompt_embeds_output = self.text_encoder_1(
+            text_input_ids,
             output_hidden_states=True,
         )
 
@@ -787,13 +782,13 @@ class SDXLTuner:
         text_inputs_2 = self.pipeline.tokenizer_2(
             prompts_str,
             padding="max_length",
-            max_length=self.pipeline.tokenizer.model_max_length,
+            max_length=self.pipeline.tokenizer_2.model_max_length,
             truncation=True,
             return_tensors="pt",
         )
         text_input_ids_2 = text_inputs_2["input_ids"]
-        prompt_embeds_output_2 = self.pipeline.text_encoder_2(
-            text_input_ids_2.to(self.text_encoder_2.device),
+        prompt_embeds_output_2 = self.text_encoder_2(
+            text_input_ids_2.to(self.accelerator.device),
             output_hidden_states=True,
         )
 

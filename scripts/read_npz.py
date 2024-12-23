@@ -19,9 +19,9 @@ def latents_to_image(latent: torch.Tensor) -> Image.Image:
     return image_processor.postprocess(sample)[0]  # type: ignore
 
 
-npz_file = np.load("./diffusion_trainer/scripts/test.npz")
+npz_file = np.load("latents_1_0.npy")
 
-latents = npz_file.get("latents")
+latents = npz_file[0] / vae.config.get("scaling_factor", 1.0)
 
 img = latents_to_image(torch.Tensor(latents).to(device, dtype=torch.float16))
-img.show()
+img.save("reconstructed_image.png")
