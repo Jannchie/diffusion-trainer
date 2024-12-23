@@ -1,8 +1,10 @@
 import json
 import logging
+import threading
 from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
@@ -104,6 +106,7 @@ class DiffusionDataset(Dataset):
     @staticmethod
     def from_filesystem(
         config: SDXLConfig,
+        max_workers: int = 8,
     ) -> "DiffusionDataset":
         buckets: dict[tuple[int, int], list[DiffusionTrainingItem]] = defaultdict(list)
 
@@ -117,8 +120,14 @@ class DiffusionDataset(Dataset):
 
         npz_path_list = list(retrieve_npz_path(Path(meta_dir)))
         latents_dir = (meta_dir / "latents").resolve()
-        with get_progress() as progress:
-            for npz_path in progress.track(npz_path_list, description="Processing npz files"):
+        lock = threading.Lock()
+
+        with get_progress() as progress, ThreadPoolExecutor(max_workers=max_workers) as executor:
+            task = progress.add_task("Processing npz files", total=len(npz_path_list))
+
+            def process_metadata_files(
+                npz_path: Path,
+            ) -> None:
                 npz = np.load(npz_path)
                 key = npz_path.relative_to(latents_dir).with_suffix("")
                 tag_file = meta_dir / "tags" / f"{key}.txt"
@@ -131,7 +140,12 @@ class DiffusionDataset(Dataset):
                     caption=caption,
                     tags=tags,
                 )
-                buckets[tuple(train_resolution.tolist())].append(item)
+                with lock:
+                    buckets[tuple(train_resolution.tolist())].append(item)
+                    progress.update(task, advance=1)
+
+            for npz_path in npz_path_list:
+                executor.submit(process_metadata_files, npz_path)
         return DiffusionDataset(buckets)
 
     def get_bucket_key(self, idx: int) -> tuple[int, int]:
@@ -168,6 +182,7 @@ class BucketBasedBatchSampler(Sampler):
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.rng = np.random.default_rng(seed)
+
     def __iter__(self) -> Generator[list[int], None, None]:
         batche_indices_list = []
         logger.debug("Prepare batch indices...")
