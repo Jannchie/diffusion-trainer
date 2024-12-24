@@ -30,7 +30,10 @@ class SDXLConfig:
     save_dtype: str = field(default="fp16", metadata={"help": "Save dtype."})
     weight_dtype: str = field(default="bf16", metadata={"help": "Weight dtype."})
     mixed_precision: Literal["float16", "bfloat16", "fp16", "bf16"] = field(default="bf16", metadata={"help": "Mixed precision."})
-    prediction_type: Literal["epsilon", "v_prediction", "sample"] | None = field(default=None, metadata={"help": "Prediction type."})
+    prediction_type: Literal["epsilon", "v_prediction", "sample"] | None = field(
+        default="v_prediction",
+        metadata={"help": "Prediction type."},
+    )
     n_epochs: int = field(default=10, metadata={"help": "Number of epochs."})
     batch_size: int = field(default=8, metadata={"help": "Batch size."})
     gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps."})

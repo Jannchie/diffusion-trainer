@@ -10,11 +10,6 @@ vae_dtype = "fp16"
 model_path = "../SimpleTuner/models/creative-xl-0.9-b2"
 save_dir = "./out"
 
-# ss_meta_path = "E:/dataset-demo/meta.json"
-
-# if dataset_path is not set, it will use the dataset_meta_path folder.
-# dataset_path = "E:/dataset-demo"
-
 optimizer = "adamW8bit"
 
 model_name = "creativexl-test"
@@ -32,10 +27,12 @@ preview_every_n_epochs = 1
 preview_every_n_steps = 1000
 
 mixed_precision = "bf16"
-weight_dtype = "bf16"
+weight_dtype = "fp32"
 save_dtype = "fp16"
 
-unet_lr = 5e-4
+unet_lr = 1e-4
+optimizer_warmup_steps = 100
+optimizer_num_cycles = 10
 
 text_encoder_1_lr = 0
 text_encoder_2_lr = 0
@@ -44,7 +41,7 @@ text_encoder_2_lr = 0
 # lora_alpha = 1
 # lokr_factor = 16
 
-noise_offset = 0.0
+noise_offset = 0.1
 
 snr_gamma = 5.0
 
@@ -61,7 +58,7 @@ gradient_checkpointing = true
 
 # log_with = "wandb"
 
-# prediction_type = 'v_prediction'
+prediction_type = 'v_prediction'
 
 [[preview_sample_options]]
 prompt = "background, cityscape, urban, city, street, road, buildings, cars, traffic, night, star, cloud"

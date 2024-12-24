@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +30,9 @@ from diffusion_trainer.config import SDXLConfig
 from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset
 from diffusion_trainer.finetune.utils import prepare_accelerator, str_to_dtype
 from diffusion_trainer.shared import get_progress
+
+if TYPE_CHECKING:
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection
 
 logger = getLogger("diffusion_trainer.finetune.sdxl")
 
@@ -184,15 +187,9 @@ class SDXLTuner:
             ).to(self.device)
 
     def init_model_modules(self) -> None:
-        # self.pipeline.enable_sequential_cpu_offload()
-        # self.pipeline.enable_model_cpu_offload()
-        self.unet: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(
-            self.model_path,
-            subfolder="unet",
-        )  # type: ignore
-        self.unet.to(self.device, dtype=self.weight_dtype)
-        self.text_encoder_1 = self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype)
-        self.text_encoder_2 = self.pipeline.text_encoder_2.to(self.device, dtype=self.weight_dtype)
+        self.unet: UNet2DConditionModel = self.pipeline.unet.to(self.device, dtype=self.weight_dtype)
+        self.text_encoder_1: CLIPTextModel = self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype)
+        self.text_encoder_2: CLIPTextModelWithProjection = self.pipeline.text_encoder_2.to(self.device, dtype=self.weight_dtype)
         self.vae = self.pipeline.vae
 
     def init_gradient_checkpointing(self) -> None:
@@ -362,10 +359,11 @@ class SDXLTuner:
         self.trainable_parameters_dicts = self.get_trainable_parameter_dicts()
         self.trainable_parameters: list[list[torch.Tensor]] = [param["params"] for param in self.trainable_parameters_dicts]
 
+        # https://huggingface.co/docs/diffusers/api/schedulers/ddim
         self.noise_scheduler: DDPMScheduler = DDPMScheduler.from_config(
             self.pipeline.scheduler.config,
             rescale_betas_zero_snr=True,
-            timestep_spacing="leading",
+            timestep_spacing="trailing",
         )  # type: ignore
         # Get the target for loss depending on the prediction type
         if self.config.prediction_type is not None:
@@ -450,8 +448,8 @@ class SDXLTuner:
                             self.ema_unet.step(self.unet.parameters())
 
                         self.accelerator.log({"train_loss": self.train_loss, "lr": current_lr}, step=global_step)
-                        global_step += 1
                         self.train_loss = 0.0
+                        global_step += 1
 
                         progress.update(total_task, advance=1, description=f"Global Step: {global_step} - Epoch: {epoch+1}")
                         progress.update(current_epoch_task, advance=1, description=f"LR: {current_lr:.2e} - Loss: {loss:.2f}")
@@ -604,6 +602,19 @@ class SDXLTuner:
         target = self.get_pred_target(img_latents, noise, timesteps, model_pred)
         loss = self.get_loss(timesteps, model_pred, target)
 
+        if torch.isnan(loss):
+            logger.info("img_latents: %s %s", img_latents.shape, img_latents.mean())
+            logger.info("prompt_embeds: %s %s", prompt_embeds.shape, prompt_embeds.mean())
+            logger.info("prompt_embeds_pooled_2: %s %s", prompt_embeds_pooled_2.shape, prompt_embeds_pooled_2.mean())
+            logger.info("time_ids: %s %s", time_ids.shape, time_ids)
+            logger.info("noise: %s %s", noise.shape, noise.mean())
+            logger.info("timesteps: %s %s", timesteps.shape, timesteps)
+            logger.info("img_noisy_latents: %s %s", img_noisy_latents.shape, img_noisy_latents.mean())
+            logger.info("model_pred: %s %s", model_pred.shape, model_pred.mean())
+            logger.info("target: %s %s", target.shape, target.mean())
+            msg = "Loss is NaN."
+            raise ValueError(msg)
+
         avg_loss = self.accelerator.gather(loss.repeat(self.batch_size)).mean()  # type: ignore
         self.train_loss += avg_loss.item() / self.gradient_accumulation_steps
 
@@ -646,7 +657,9 @@ class SDXLTuner:
             snr = compute_snr(self.noise_scheduler, timesteps)
             mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
             if self.noise_scheduler.config.get("prediction_type") == "epsilon":
-                mse_loss_weights = mse_loss_weights / snr
+                epsilon = 1e-8
+                snr_safe = snr + epsilon
+                mse_loss_weights = mse_loss_weights / (snr_safe + epsilon)
             elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
                 mse_loss_weights = mse_loss_weights / (snr + 1)
 
