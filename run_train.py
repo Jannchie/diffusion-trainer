@@ -4,8 +4,6 @@ import logging
 
 from rich.logging import RichHandler
 
-from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
-
 logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
 if __name__ == "__main__":
@@ -14,6 +12,7 @@ if __name__ == "__main__":
 
     from diffusion_trainer.config import SDXLConfig
     from diffusion_trainer.dataset.dataset import DiffusionDataset
+    from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
     from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
     from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
     from diffusion_trainer.finetune.sdxl import SDXLTuner

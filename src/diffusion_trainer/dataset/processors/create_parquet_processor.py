@@ -47,12 +47,12 @@ class CreateParquetProcessor:
             }
             with self.lock:
                 items.append(item)
-                progress.advance(task)
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            progress.update(task, advance=1)
+        with progress, ThreadPoolExecutor(max_workers=max_workers) as executor:
             for npz_path in npz_path_list:
-                executor.map(process_metadata_files, (npz_path,))
-        # 将 items 转换成列存储。也就是成一个字典，字典的 key 是列名，value 是列的值，是一个列表
+                executor.submit(process_metadata_files, npz_path)
+
+        # convert items to dictionary
         items_dict = {}
         for item in items:
             for key, value in item.items():
