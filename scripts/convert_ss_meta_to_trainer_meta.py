@@ -1,7 +1,13 @@
 import argparse
 import json
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from diffusion_trainer.shared import get_progress
 
@@ -25,18 +31,33 @@ trainer_meta_path.mkdir(exist_ok=True)
 (trainer_meta_path / "tags").mkdir(exist_ok=True)
 (trainer_meta_path / "captions").mkdir(exist_ok=True)
 
+
+def process_key(key: str) -> dict:
+    item = {}
+    with suppress(FileNotFoundError):
+        npz_path = ss_latent_path / f"{key}.npz"
+        npz = np.load(npz_path)
+
+        target_npz_path = trainer_meta_path / "latents" / f"{key}.npz"
+        target_npz_path.write_bytes(npz_path.read_bytes())
+        item["key"] = key
+        item["tags"] = ss_meta[key].get("tags", []).split(", ")
+        item["caption"] = ss_meta[key].get("caption", "")
+        item["train_resolution"] = npz.get("train_resolution").tolist()
+        item["original_size"] = npz.get("original_size").tolist()
+        item["crop_ltrb"] = npz.get("crop_ltrb").tolist()
+    return item
+
+
 with progress:
-    for key in progress.track(ss_meta.keys(), description="Converting metadata"):
-        with suppress(FileNotFoundError):
-            npz_path = ss_latent_path / f"{key}.npz"
+    with ThreadPoolExecutor() as executor:
+        results = list(progress.track(executor.map(process_key, ss_meta.keys()), description="Converting metadata", total=len(ss_meta)))
 
-            target_npz_path = trainer_meta_path / "latents" / f"{key}.npz"
-            target_npz_path.write_bytes(npz_path.read_bytes())
+    items = defaultdict(list)
+    for result in results:
+        if result:
+            for k, v in result.items():
+                items[k].append(v)
 
-            if tags := ss_meta[key].get("tags", None):
-                target_tags_path = trainer_meta_path / "tags" / f"{key}.txt"
-                target_tags_path.write_text(tags)
-
-            if prompt := ss_meta[key].get("caption", None):
-                target_prompt_path = trainer_meta_path / "caption" / f"{key}.txt"
-                target_prompt_path.write_text(prompt)
+    table = pa.table(items)
+    pq.write_table(table, trainer_meta_path / "metadata.parquet")

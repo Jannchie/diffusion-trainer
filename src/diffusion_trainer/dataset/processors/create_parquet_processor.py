@@ -1,3 +1,4 @@
+from collections import defaultdict
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from os import PathLike
@@ -21,7 +22,10 @@ class CreateParquetProcessor:
     lock = threading.Lock()
 
     def __call__(self, max_workers: int = 8) -> None:
-        items = []
+        self.process(max_workers)
+
+    def process(self, max_workers: int) -> None:
+        items = defaultdict(list)
         progress = get_progress()
         npz_path_list = list(retrieve_npz_path(Path(self.meta_dir)))
         task = progress.add_task("Processing metadata files", total=len(npz_path_list))
@@ -37,27 +41,18 @@ class CreateParquetProcessor:
             caption = caption_file.read_text() if caption_file.exists() else ""
             tags = tag_file.read_text().split(",") if tag_file.exists() else []
 
-            item = {
-                "key": key.as_posix(),
-                "caption": caption,
-                "tags": tags,
-                "train_resolution": npz.get("train_resolution").tolist(),
-                "original_size": npz.get("original_size").tolist(),
-                "crop_ltrb": npz.get("crop_ltrb").tolist(),
-            }
             with self.lock:
-                items.append(item)
+                items["key"].append(key.as_posix())
+                items["caption"].append(caption)
+                items["tags"].append(tags)
+                items["train_resolution"].append(npz.get("train_resolution").tolist())
+                items["original_size"].append(npz.get("original_size").tolist())
+                items["crop_ltrb"].append(npz.get("crop_ltrb").tolist())
             progress.update(task, advance=1)
+
         with progress, ThreadPoolExecutor(max_workers=max_workers) as executor:
             for npz_path in npz_path_list:
                 executor.submit(process_metadata_files, npz_path)
 
-        # convert items to dictionary
-        items_dict = {}
-        for item in items:
-            for key, value in item.items():
-                items_dict.setdefault(key, []).append(value)
-
-        # 将 items 转换为 parquet 文件
-        table = pa.table(items_dict)
+        table = pa.table(items)
         pq.write_table(table, self.meta_dir / "metadata.parquet")
