@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from pyarrow import parquet as pq
 from torch.utils.data import Dataset, Sampler
 
 from diffusion_trainer.config import SDXLConfig
@@ -101,6 +102,25 @@ class DiffusionDataset(Dataset):
                 metadata[key]
             buckets = dict(sorted(buckets.items()))
         logger.info("Buckets created, Here are the buckets information:")
+        return DiffusionDataset(buckets)
+
+    @staticmethod
+    def from_parquet(meta_path: str | PathLike) -> "DiffusionDataset":
+        parquet_path = Path(meta_path) / "metadata.parquet"
+        table = pq.read_table(parquet_path)
+        metadata = table.to_pandas()
+        buckets: dict[tuple[int, int], list[DiffusionTrainingItem]] = defaultdict(list)
+        for _idx, row in metadata.iterrows():
+            key = row["key"]
+            npz_path = parquet_path.parent / "latents" / f"{key}.npz"
+            train_resolution = tuple(row["train_resolution"].tolist())
+            buckets[tuple(train_resolution)].append(
+                DiffusionTrainingItem(
+                    npz_path=npz_path.as_posix(),
+                    caption=row["caption"],
+                    tags=row["tags"].tolist(),
+                ),
+            )
         return DiffusionDataset(buckets)
 
     @staticmethod

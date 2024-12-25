@@ -4,6 +4,8 @@ import logging
 
 from rich.logging import RichHandler
 
+from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
+
 logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
 if __name__ == "__main__":
@@ -12,8 +14,8 @@ if __name__ == "__main__":
 
     from diffusion_trainer.config import SDXLConfig
     from diffusion_trainer.dataset.dataset import DiffusionDataset
-    from diffusion_trainer.dataset.latents_generate_processor import LatentsGenerateProcessor
-    from diffusion_trainer.dataset.tagging_processor import TaggingProcessor
+    from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
+    from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
     from diffusion_trainer.finetune.sdxl import SDXLTuner
     from diffusion_trainer.finetune.utils import str_to_dtype
 
@@ -31,6 +33,7 @@ if __name__ == "__main__":
         if not sdxl_config.meta_path:
             sdxl_config.meta_path = (Path(sdxl_config.image_path) / "metadata").as_posix()
             logger.info("Metadata path not set. Using %s as metadata path.", sdxl_config.meta_path)
+
         vae_dtype = str_to_dtype(sdxl_config.vae_dtype)
         latents_processor = LatentsGenerateProcessor(
             vae_path=sdxl_config.vae_path,
@@ -43,8 +46,17 @@ if __name__ == "__main__":
         tagging_processor = TaggingProcessor(img_path=sdxl_config.image_path, num_workers=1)
         tagging_processor()
 
-    dataset = DiffusionDataset.from_filesystem(sdxl_config)
+    if not sdxl_config.meta_path:
+        msg = "Please specify the meta path in the config file."
+        raise ValueError(msg)
+    parquet_path = Path(sdxl_config.meta_path) / "metadata.parquet"
+    if not parquet_path.exists():
+        logger.info("Creating parquet file from metadata.")
+        CreateParquetProcessor(meta_dir=sdxl_config.meta_path)(max_workers=8)
+    else:
+        logger.info("Parquet file already exists at %s", parquet_path)
 
+    dataset = DiffusionDataset.from_parquet(sdxl_config.meta_path)
     tuner = SDXLTuner(sdxl_config)
     tuner.train(dataset)
     # if sdxl_config.ss_meta_path is None:
