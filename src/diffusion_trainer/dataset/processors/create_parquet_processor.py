@@ -1,5 +1,5 @@
-from collections import defaultdict
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from os import PathLike
 from pathlib import Path

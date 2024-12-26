@@ -365,10 +365,15 @@ class SDXLTuner:
             rescale_betas_zero_snr=True,
             timestep_spacing="trailing",
         )  # type: ignore
+
+        self.pipeline.scheduler.register_to_config(rescale_betas_zero_snr=True, timestep_spacing="trailing")
+
         # Get the target for loss depending on the prediction type
         if self.config.prediction_type is not None:
             # set prediction_type of scheduler if defined
             self.noise_scheduler.register_to_config(prediction_type=self.config.prediction_type)
+            self.pipeline.scheduler.register_to_config(prediction_type=self.config.prediction_type)
+
 
         logger.info("Noise scheduler config:")
         for key, value in self.noise_scheduler.config.items():
@@ -447,9 +452,9 @@ class SDXLTuner:
                         if self.ema_unet:
                             self.ema_unet.step(self.unet.parameters())
 
+                        global_step += 1
                         self.accelerator.log({"train_loss": self.train_loss, "lr": current_lr}, step=global_step)
                         self.train_loss = 0.0
-                        global_step += 1
 
                         progress.update(total_task, advance=1, description=f"Global Step: {global_step} - Epoch: {epoch+1}")
                         progress.update(current_epoch_task, advance=1, description=f"LR: {current_lr:.2e} - Loss: {loss:.2f}")
