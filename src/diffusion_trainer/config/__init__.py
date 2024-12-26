@@ -31,7 +31,7 @@ class SDXLConfig:
     weight_dtype: str = field(default="bf16", metadata={"help": "Weight dtype."})
     mixed_precision: Literal["float16", "bfloat16", "fp16", "bf16"] = field(default="bf16", metadata={"help": "Mixed precision."})
     prediction_type: Literal["epsilon", "v_prediction", "sample"] | None = field(
-        default="v_prediction",
+        default=None,
         metadata={"help": "Prediction type."},
     )
     n_epochs: int = field(default=10, metadata={"help": "Number of epochs."})

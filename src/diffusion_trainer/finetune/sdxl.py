@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
-from diffusers.optimization import get_scheduler
+from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
@@ -359,21 +359,17 @@ class SDXLTuner:
         self.trainable_parameters_dicts = self.get_trainable_parameter_dicts()
         self.trainable_parameters: list[list[torch.Tensor]] = [param["params"] for param in self.trainable_parameters_dicts]
 
+        if self.config.prediction_type == "v_prediction":
+            self.pipeline.scheduler.register_to_config(
+                rescale_betas_zero_snr=True,
+                timestep_spacing="trailing",
+                prediction_type="v_prediction",
+            )
+
         # https://huggingface.co/docs/diffusers/api/schedulers/ddim
         self.noise_scheduler: DDPMScheduler = DDPMScheduler.from_config(
             self.pipeline.scheduler.config,
-            rescale_betas_zero_snr=True,
-            timestep_spacing="trailing",
         )  # type: ignore
-
-        self.pipeline.scheduler.register_to_config(rescale_betas_zero_snr=True, timestep_spacing="trailing")
-
-        # Get the target for loss depending on the prediction type
-        if self.config.prediction_type is not None:
-            # set prediction_type of scheduler if defined
-            self.noise_scheduler.register_to_config(prediction_type=self.config.prediction_type)
-            self.pipeline.scheduler.register_to_config(prediction_type=self.config.prediction_type)
-
 
         logger.info("Noise scheduler config:")
         for key, value in self.noise_scheduler.config.items():
@@ -388,7 +384,7 @@ class SDXLTuner:
         n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
 
         lr_scheduler = get_scheduler(
-            "polynomial",
+            SchedulerType.COSINE_WITH_RESTARTS,
             optimizer=optimizer,
             num_warmup_steps=self.config.optimizer_warmup_steps,
             num_training_steps=n_total_steps,
