@@ -27,7 +27,7 @@ preview_every_n_epochs = 1
 preview_every_n_steps = 1000
 
 mixed_precision = "bf16"
-weight_dtype = "fp32"
+weight_dtype = "bf16"
 save_dtype = "fp16"
 
 unet_lr = 1e-4
@@ -36,10 +36,6 @@ optimizer_num_cycles = 10
 
 text_encoder_1_lr = 0
 text_encoder_2_lr = 0
-
-# lora_rank = 4
-# lora_alpha = 1
-# lokr_factor = 16
 
 noise_offset = 0.1
 
@@ -56,9 +52,6 @@ use_ema = false
 
 gradient_checkpointing = true
 
-# log_with = "wandb"
-
-prediction_type = 'v_prediction'
 
 [[preview_sample_options]]
 prompt = "background, cityscape, urban, city, street, road, buildings, cars, traffic, night, star, cloud"

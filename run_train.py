@@ -57,4 +57,5 @@ if __name__ == "__main__":
         else:
             logger.info("Parquet file already exists at %s", parquet_path)
         dataset = DiffusionDataset.from_parquet(sdxl_config.meta_path)
+
     tuner.train(dataset)

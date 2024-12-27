@@ -23,7 +23,6 @@ from diffusers.utils.torch_utils import is_compiled_module
 from lycoris import LycorisNetwork, create_lycoris
 from peft.tuners.loha.config import LoHaConfig
 from peft.tuners.lora.config import LoraConfig
-from rich.progress import Progress
 from torch.utils.data import DataLoader
 
 from diffusion_trainer.config import SampleOptions, SDXLConfig
@@ -353,6 +352,11 @@ class SDXLTuner:
                 self.text_encoder_2.add_adapter(text_loha_config)
 
     def train(self, dataset: DiffusionDataset) -> None:
+        self.accelerator.wait_for_everyone()
+
+        if self.accelerator.is_main_process:
+            dataset.print_bucket_info()
+
         self.freeze_model()
         self.apply_lora_config()
 

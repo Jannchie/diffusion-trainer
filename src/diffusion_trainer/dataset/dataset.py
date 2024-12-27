@@ -61,7 +61,10 @@ class DiffusionDataset(Dataset):
             length = len(buckets[key])
             last_index += length
             self.bucket_boundaries.append(last_index)
-            logger.info("Bucket %s: %s samples", key, length)
+
+    def print_bucket_info(self) -> None:
+        for key in self.bucket_keys:
+            logger.info("Bucket %s: %s samples", key, len(self.buckets[key]))
 
     @staticmethod
     def collate_fn(batch: list[dict]) -> DiffusionBatch:
