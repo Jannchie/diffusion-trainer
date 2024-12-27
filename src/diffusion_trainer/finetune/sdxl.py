@@ -519,7 +519,7 @@ class SDXLTuner:
 
                         self.accelerator.log(
                             {
-                                f"{filename}": [wandb.Image(result.images[0], caption=f"{sample_option.prompt}")],
+                                f"{hash_hex}": [wandb.Image(result.images[0], caption=f"{sample_option.prompt}")],
                             },
                         )
                 else:
