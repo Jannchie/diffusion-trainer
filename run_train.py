@@ -24,7 +24,7 @@ if __name__ == "__main__":
     sdxl_config = SDXLConfig(**sdxl_config_dict)
 
     tuner = SDXLTuner(sdxl_config)
-    with tuner.accelerator.main_process_first():
+    if tuner.accelerator.is_main_process:
         if sdxl_config.image_path and sdxl_config.skip_prepare_image is False:
             logger.info("Prepare image from %s", sdxl_config.image_path)
             if not sdxl_config.vae_path:
@@ -55,7 +55,7 @@ if __name__ == "__main__":
             logger.info("Creating parquet file from metadata.")
             CreateParquetProcessor(meta_dir=sdxl_config.meta_path)(max_workers=8)
         else:
-            logger.info("Parquet file already exists at %s", parquet_path)
-        dataset = DiffusionDataset.from_parquet(sdxl_config.meta_path)
+            logger.info('Parquet file already exists at "%s"', parquet_path)
 
+    dataset = DiffusionDataset.from_parquet(sdxl_config.meta_path)
     tuner.train(dataset)

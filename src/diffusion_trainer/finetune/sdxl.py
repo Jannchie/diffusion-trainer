@@ -425,10 +425,19 @@ class SDXLTuner:
             global_step = 0
 
         skiped_epoch = math.floor(global_step / num_update_steps_per_epoch)
+        skiped_batch = global_step * self.accelerator.num_processes * self.config.batch_size * self.config.gradient_accumulation_steps
         if global_step != 0:
-            logger.info("skiping %d steps", global_step)
-        skiped_data_loader = self.accelerator.skip_first_batches(self.data_loader, global_step % num_update_steps_per_epoch)
-        total_task = progress.add_task("Total Progress", total=n_total_steps, completed=global_step)
+            logger.info(
+                "skiping %d global steps (%d batches)",
+                global_step,
+                skiped_batch,
+            )
+        skiped_data_loader = self.accelerator.skip_first_batches(self.data_loader, skiped_batch % len(self.data_loader))
+        total_task = progress.add_task(
+            "Total Progress",
+            total=n_total_steps,
+            completed=global_step,
+        )
 
         if self.accelerator.is_main_process:
             progress.start()
@@ -643,10 +652,9 @@ class SDXLTuner:
             self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
 
         self.optimizer.step()
+        self.lr_scheduler.step()
         # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
         self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
-
-        self.lr_scheduler.step()
 
         return loss.detach().item()
 
