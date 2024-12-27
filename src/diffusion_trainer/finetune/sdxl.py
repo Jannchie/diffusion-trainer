@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict
 
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator
+from accelerate import Accelerator, PartialState
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
@@ -26,7 +26,7 @@ from peft.tuners.lora.config import LoraConfig
 from rich.progress import Progress
 from torch.utils.data import DataLoader
 
-from diffusion_trainer.config import SDXLConfig
+from diffusion_trainer.config import SampleOptions, SDXLConfig
 from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset
 from diffusion_trainer.finetune.utils import prepare_accelerator, str_to_dtype
 from diffusion_trainer.shared import get_progress
@@ -378,9 +378,11 @@ class SDXLTuner:
         optimizer = self.initialize_optimizer()
 
         sampler = BucketBasedBatchSampler(dataset, self.batch_size)
-        data_loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0, collate_fn=dataset.collate_fn)
+        with self.accelerator.main_process_first():
+            data_loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0, collate_fn=dataset.collate_fn)
+        self.data_loader = self.accelerator.prepare(data_loader)
 
-        num_update_steps_per_epoch = math.ceil(len(data_loader) / self.gradient_accumulation_steps)
+        num_update_steps_per_epoch = math.ceil(len(data_loader) / self.gradient_accumulation_steps / self.accelerator.num_processes)
         n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
 
         lr_scheduler = get_scheduler(
@@ -393,7 +395,6 @@ class SDXLTuner:
 
         self.optimizer = self.accelerator.prepare(optimizer)
         self.lr_scheduler = self.accelerator.prepare(lr_scheduler)
-        self.data_loader = self.accelerator.prepare(data_loader)
 
         self.init_gradient_checkpointing()
 
@@ -403,7 +404,7 @@ class SDXLTuner:
             self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
         self.execute_training_epoch(num_update_steps_per_epoch, n_total_steps)
 
-    def execute_training_epoch(  # noqa: C901
+    def execute_training_epoch(  # noqa: C901, PLR0912
         self,
         num_update_steps_per_epoch: int,
         n_total_steps: int,
@@ -425,65 +426,75 @@ class SDXLTuner:
         skiped_data_loader = self.accelerator.skip_first_batches(self.data_loader, global_step % num_update_steps_per_epoch)
         total_task = progress.add_task("Total Progress", total=n_total_steps, completed=global_step)
 
-        with progress:
-            for epoch in range(skiped_epoch, self.config.n_epochs):
-                self.train_loss = 0.0
-                current_epoch_task = progress.add_task(
-                    f"Epoch {epoch+1}",
-                    total=num_update_steps_per_epoch,
-                    completed=global_step % num_update_steps_per_epoch,
-                )
-                dl = skiped_data_loader if epoch == skiped_epoch else self.data_loader
-                for _step, orig_batch in enumerate(dl):
-                    if not isinstance(orig_batch, DiffusionBatch):
-                        msg = f"Expected DiffusionBatch, got something else. Got: {type(orig_batch)}"
-                        raise TypeError(msg)
-                    batch = self.process_batch(orig_batch)
+        if self.accelerator.is_main_process:
+            progress.start()
 
-                    with self.accelerator.accumulate([self.unet]):
-                        loss = self.train_each_batch(batch)
+        for epoch in range(skiped_epoch, self.config.n_epochs):
+            self.train_loss = 0.0
+            current_epoch_task = progress.add_task(
+                f"Epoch {epoch+1}",
+                total=num_update_steps_per_epoch,
+                completed=global_step % num_update_steps_per_epoch,
+            )
+            dl = skiped_data_loader if epoch == skiped_epoch else self.data_loader
+            for _step, orig_batch in enumerate(dl):
+                if not isinstance(orig_batch, DiffusionBatch):
+                    msg = f"Expected DiffusionBatch, got something else. Got: {type(orig_batch)}"
+                    raise TypeError(msg)
+                batch = self.process_batch(orig_batch)
 
-                    if self.accelerator.sync_gradients:
-                        current_lr = self.lr_scheduler.get_last_lr()[0]
-                        if self.ema_unet:
-                            self.ema_unet.step(self.unet.parameters())
+                with self.accelerator.accumulate([self.unet]):
+                    loss = self.train_each_batch(batch)
 
-                        global_step += 1
-                        self.accelerator.log({"train_loss": self.train_loss, "lr": current_lr}, step=global_step)
-                        self.train_loss = 0.0
+                if self.accelerator.sync_gradients:
+                    current_lr = self.lr_scheduler.get_last_lr()[0]
+                    if self.ema_unet:
+                        self.ema_unet.step(self.unet.parameters())
 
+                    global_step += 1
+                    self.accelerator.log({"train_loss": self.train_loss, "lr": current_lr}, step=global_step)
+                    self.train_loss = 0.0
+
+                    if self.accelerator.is_main_process:
                         progress.update(total_task, advance=1, description=f"Global Step: {global_step} - Epoch: {epoch+1}")
                         progress.update(current_epoch_task, advance=1, description=f"LR: {current_lr:.2e} - Loss: {loss:.2f}")
 
-                        if self.save_every_n_steps and global_step % self.save_every_n_steps == 0 and global_step != 0:
-                            self.saving_model(f"{self.model_name}-step{global_step}")
-                        if self.config.checkpoint_every_n_steps and global_step % self.config.checkpoint_every_n_steps == 0:
-                            self.accelerator.save_state(self.checkpointing_path.as_posix())
-                            self.global_steps_file.write_text(str(global_step))
-                        if self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0:
-                            self.generate_preview(progress, f"{self.model_name}-step{global_step}")
-                if self.save_every_n_epochs and epoch % self.save_every_n_epochs == 0:
-                    self.saving_model(f"{self.model_name}-ep{epoch+1}")
-                if self.config.preview_every_n_epochs and epoch % self.config.preview_every_n_epochs == 0:
-                    self.generate_preview(progress, f"{self.model_name}-ep{epoch+1}")
-                progress.remove_task(current_epoch_task)
-            self.saving_model(f"{self.model_name}")
+                    if self.save_every_n_steps and global_step % self.save_every_n_steps == 0 and global_step != 0:
+                        self.saving_model(f"{self.model_name}-step{global_step}")
+                    if self.config.checkpoint_every_n_steps and global_step % self.config.checkpoint_every_n_steps == 0:
+                        self.accelerator.save_state(self.checkpointing_path.as_posix())
+                        self.global_steps_file.write_text(str(global_step))
+                    if self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0:
+                        self.generate_preview(f"{self.model_name}-step{global_step}")
+            if self.save_every_n_epochs and epoch % self.save_every_n_epochs == 0:
+                self.saving_model(f"{self.model_name}-ep{epoch+1}")
+            if self.config.preview_every_n_epochs and epoch % self.config.preview_every_n_epochs == 0:
+                self.generate_preview(f"{self.model_name}-ep{epoch+1}")
+            progress.remove_task(current_epoch_task)
+        if self.accelerator.is_main_process:
+            progress.stop()
+        self.saving_model(f"{self.model_name}")
 
     @torch.no_grad()
-    def generate_preview(self, progress: Progress, filename: str) -> None:
+    def generate_preview(self, filename: str) -> None:
         free_memory()
 
         def callback_on_step_end(_pipe: StableDiffusionXLPipelineOutput, _step: int, _timestep: int, _kwargs: dict) -> dict:
-            progress.update(task, advance=1)
             return {}
 
+        state = PartialState()
         self.accelerator.wait_for_everyone()
-        sample_options = self.config.preview_sample_options
-        if self.accelerator.is_main_process:
-            for i, sample_option in enumerate(sample_options):
+        with state.split_between_processes(self.config.preview_sample_options) as sample_options:
+            for sample_option in sample_options:
+                if not isinstance(sample_option, SampleOptions):
+                    msg = f"Expected SampleOption, got {type(sample_option)}"
+                    raise TypeError(msg)
+                filename_hash = f"{filename}-{sample_option.seed}"
+                logger.info("Generating preview for %s", filename_hash)
+                hash_value = hash(sample_option)
+                hash_hex = f"{hash_value:x}"
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
                 generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
-                task = progress.add_task(f"Generating Preview {i}", total=sample_option.steps)
                 with autocast_ctx:
                     self.pipeline.to(self.accelerator.device)
                     result = self.pipeline(
@@ -493,9 +504,9 @@ class SDXLTuner:
                         generator=generator,
                         callback_on_step_end=callback_on_step_end,  # type: ignore
                     )
+                logger.info("Preview generated for %s", filename_hash)
 
-                progress.remove_task(task)
-                path = (Path(self.save_path) / "previews" / f"{filename}-{i}").with_suffix(".png")
+                path = (Path(self.save_path) / "previews" / f"{filename}-{hash_hex}").with_suffix(".png")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if isinstance(result, StableDiffusionXLPipelineOutput):
                     result.images[0].save(path)
@@ -504,13 +515,14 @@ class SDXLTuner:
 
                         self.accelerator.log(
                             {
-                                f"preview_{i}": [wandb.Image(result.images[0], caption=f"{sample_option.prompt}")],
+                                f"{filename}": [wandb.Image(result.images[0], caption=f"{sample_option.prompt}")],
                             },
                         )
                 else:
                     msg = f"Expected StableDiffusionXLPipelineOutput, got {type(result)}"
                     raise TypeError(msg)
         free_memory()
+        self.accelerator.wait_for_everyone()
 
     def initialize_optimizer(self) -> torch.optim.Optimizer:
         if self.config.optimizer == "adamW8bit":
@@ -545,17 +557,18 @@ class SDXLTuner:
         raise NotImplementedError(msg)
 
     def log_training_parameters(self) -> None:
-        n_params = self.get_n_params(self.trainable_parameters_dicts)
-        logger.info("Number of epochs: %s", self.config.n_epochs)
-        num_processes = self.accelerator.num_processes
-        logger.info("Unet: %s %s", self.unet.device, self.unet.dtype)
-        logger.info("Text Encoder 1: %s %s", self.text_encoder_1.device, self.text_encoder_1.dtype)
-        logger.info("Text Encoder 2: %s %s", self.text_encoder_2.device, self.text_encoder_2.dtype)
-        effective_batch_size = self.batch_size * num_processes * self.gradient_accumulation_steps
-        logger.info("Effective batch size: %s", effective_batch_size)
-        logger.info("Prediction type: %s", self.noise_scheduler.config.get("prediction_type"))
-        logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
-        logger.info("Starting training.")
+        if self.accelerator.is_main_process:
+            n_params = self.get_n_params(self.trainable_parameters_dicts)
+            logger.info("Number of epochs: %s", self.config.n_epochs)
+            num_processes = self.accelerator.num_processes
+            logger.info("Unet: %s %s", self.unet.device, self.unet.dtype)
+            logger.info("Text Encoder 1: %s %s", self.text_encoder_1.device, self.text_encoder_1.dtype)
+            logger.info("Text Encoder 2: %s %s", self.text_encoder_2.device, self.text_encoder_2.dtype)
+            effective_batch_size = self.batch_size * num_processes * self.gradient_accumulation_steps
+            logger.info("Effective batch size: %s", effective_batch_size)
+            logger.info("Prediction type: %s", self.noise_scheduler.config.get("prediction_type"))
+            logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
+            logger.info("Hold tight, training is about to start!")
 
     def freeze_model(self) -> None:
         if self.mode in ("lora", "lokr", "loha"):
@@ -626,9 +639,10 @@ class SDXLTuner:
             self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
 
         self.optimizer.step()
-        self.lr_scheduler.step()
         # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
         self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
+
+        self.lr_scheduler.step()
 
         return loss.detach().item()
 
