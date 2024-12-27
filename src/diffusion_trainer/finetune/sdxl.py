@@ -392,8 +392,8 @@ class SDXLTuner:
         lr_scheduler = get_scheduler(
             SchedulerType.COSINE_WITH_RESTARTS,
             optimizer=optimizer,
-            num_warmup_steps=self.config.optimizer_warmup_steps,
-            num_training_steps=n_total_steps,
+            num_warmup_steps=self.config.optimizer_warmup_steps * self.accelerator.num_processes,
+            num_training_steps=n_total_steps * self.accelerator.num_processes,
             num_cycles=self.config.optimizer_num_cycles,
         )
 
