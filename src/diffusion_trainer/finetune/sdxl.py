@@ -199,7 +199,8 @@ class SDXLTuner:
             unwrap_model(self.accelerator, self.unet).enable_gradient_checkpointing()
             unwrap_model(self.accelerator, self.text_encoder_1).gradient_checkpointing_enable()
             unwrap_model(self.accelerator, self.text_encoder_2).gradient_checkpointing_enable()
-            unwrap_model(self.accelerator, self.lycoris_model).enable_gradient_checkpointing()
+            if hasattr(self, "lycoris_model"):
+                unwrap_model(self.accelerator, self.lycoris_model).enable_gradient_checkpointing()
 
     def get_n_params(self, trainable_parameters: list[ParamDict]) -> int:
         n_params = 0
@@ -614,8 +615,8 @@ class SDXLTuner:
         self.lycoris_model.save_weights(self.save_path / f"{filename}.safetensors", dtype=self.save_dtype, metadata={})
 
     def save_full_finetune_model(self, filename: str) -> None:
-        msg = "Full finetune model saving is not implemented yet."
-        raise NotImplementedError(msg)
+        self.save_path.mkdir(parents=True, exist_ok=True)
+        self.pipeline.save_pretrained(self.save_path / f"{filename}")
 
     def log_training_parameters(self) -> None:
         if self.accelerator.is_main_process:
