@@ -914,7 +914,3 @@ class SDXLTuner:
             weights = self.generate_timestep_weights(num_timesteps).to(self.accelerator.device)
             timesteps = torch.multinomial(weights, batch_size, replacement=True).long()
         return timesteps  # type: ignore
-
-    def __call__(self, *, dataset: DiffusionDataset) -> None:
-        """Run the finetuning process."""
-        self.train(dataset)
