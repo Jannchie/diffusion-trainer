@@ -108,8 +108,8 @@ class DiffusionDataset(Dataset):
         return DiffusionDataset(buckets)
 
     @staticmethod
-    def from_parquet(meta_path: str | PathLike) -> "DiffusionDataset":
-        parquet_path = Path(meta_path) / "metadata.parquet"
+    def from_parquet(parquet_path: str | PathLike) -> "DiffusionDataset":
+        parquet_path =  Path(parquet_path)
         table = pq.read_table(parquet_path)
         metadata = table.to_pandas()
         buckets: dict[tuple[int, int], list[DiffusionTrainingItem]] = defaultdict(list)

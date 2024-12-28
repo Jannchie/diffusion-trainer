@@ -27,6 +27,9 @@ from torch.utils.data import DataLoader
 
 from diffusion_trainer.config import SampleOptions, SDXLConfig
 from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset
+from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
+from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
+from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
 from diffusion_trainer.finetune.utils import prepare_accelerator, str_to_dtype
 from diffusion_trainer.shared import get_progress
 
@@ -351,9 +354,54 @@ class SDXLTuner:
                 self.text_encoder_1.add_adapter(text_loha_config)
                 self.text_encoder_2.add_adapter(text_loha_config)
 
-    def train(self, dataset: DiffusionDataset) -> None:
-        self.accelerator.wait_for_everyone()
+    def prepare_dataset(self) -> DiffusionDataset:
+        if self.config.meta_path:
+            meta_path = Path(self.config.meta_path)
+        elif self.config.image_path:
+            meta_path = Path(self.config.image_path) / "metadata"
+        else:
+            msg = "Please specify the meta path in the config file."
+            raise ValueError(msg)
+        parquet_path = meta_path / "metadata.parquet"
+        with self.accelerator.main_process_first():
+            if not self.accelerator.is_main_process:
+                # Wait for the main process to finish preparing, then load the dataset.
+                return DiffusionDataset.from_parquet(parquet_path)
+            if self.config.image_path and self.config.skip_prepare_image is False:
+                logger.info("Prepare image from %s", self.config.image_path)
+                if not self.config.vae_path:
+                    msg = "Please specify the vae_path in the config file."
+                    raise ValueError(msg)
 
+                if not self.config.meta_path:
+                    self.config.meta_path = (Path(self.config.image_path) / "metadata").as_posix()
+                    logger.info("Metadata path not set. Using %s as metadata path.", self.config.meta_path)
+
+                vae_dtype = str_to_dtype(self.config.vae_dtype)
+                latents_processor = LatentsGenerateProcessor(
+                    vae_path=self.config.vae_path,
+                    img_path=self.config.image_path,
+                    meta_path=self.config.meta_path,
+                    vae_dtype=vae_dtype,
+                )
+                latents_processor()
+
+                tagging_processor = TaggingProcessor(img_path=self.config.image_path, num_workers=1)
+                tagging_processor()
+
+            if not self.config.meta_path:
+                msg = "Please specify the meta path in the config file."
+                raise ValueError(msg)
+            if not parquet_path.exists():
+                logger.info('Creating parquet file at "%s"', parquet_path)
+                CreateParquetProcessor(meta_dir=self.config.meta_path)(max_workers=8)
+            else:
+                logger.info('found parquet file at "%s"', parquet_path)
+            return DiffusionDataset.from_parquet(parquet_path)
+
+    def train(self) -> None:
+        self.accelerator.wait_for_everyone()
+        dataset = self.prepare_dataset()
         if self.accelerator.is_main_process:
             dataset.print_bucket_info()
 
