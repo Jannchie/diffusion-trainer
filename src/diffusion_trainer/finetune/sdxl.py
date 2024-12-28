@@ -397,7 +397,7 @@ class SDXLTuner:
                 CreateParquetProcessor(meta_dir=self.config.meta_path)(max_workers=8)
             else:
                 logger.info('found parquet file at "%s"', parquet_path)
-            return DiffusionDataset.from_parquet(parquet_path)
+        return DiffusionDataset.from_parquet(parquet_path)
 
     def train(self) -> None:
         self.accelerator.wait_for_everyone()
