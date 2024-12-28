@@ -453,8 +453,7 @@ class SDXLTuner:
 
         self.log_training_parameters()
 
-        if self.accelerator.is_main_process:
-            self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
+        self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
         self.execute_training_epoch(num_update_steps_per_epoch, n_total_steps)
 
     def execute_training_epoch(  # noqa: C901, PLR0912
@@ -474,7 +473,8 @@ class SDXLTuner:
             global_step = 0
 
         skiped_epoch = math.floor(global_step / num_update_steps_per_epoch)
-        skiped_batch = global_step * self.accelerator.num_processes * self.config.batch_size * self.config.gradient_accumulation_steps
+        # no need to divide by gradient_accumulation_steps
+        skiped_batch = global_step * self.accelerator.num_processes * self.config.batch_size
         if global_step != 0:
             logger.info(
                 "skiping %d global steps (%d batches)",
