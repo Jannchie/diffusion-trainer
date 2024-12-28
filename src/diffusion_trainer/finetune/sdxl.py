@@ -551,9 +551,9 @@ class SDXLTuner:
                 if not isinstance(sample_option, SampleOptions):
                     msg = f"Expected SampleOption, got {type(sample_option)}"
                     raise TypeError(msg)
-                filename_hash = f"{filename}-{sample_option.seed}"
-                logger.info("Generating preview for %s", filename_hash)
                 hash_value = hash(sample_option)
+                filename_with_hash = f"{filename}-{hash_value}"
+                logger.info("Generating preview for %s", filename_with_hash)
                 hash_hex = f"{hash_value:x}"
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
                 generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
@@ -566,9 +566,9 @@ class SDXLTuner:
                         generator=generator,
                         callback_on_step_end=callback_on_step_end,  # type: ignore
                     )
-                logger.info("Preview generated for %s", filename_hash)
+                logger.info("Preview generated for %s", filename_with_hash)
 
-                path = (Path(self.save_path) / "previews" / f"{filename}-{hash_hex}").with_suffix(".png")
+                path = (Path(self.save_path) / "previews" / filename_with_hash).with_suffix(".png")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if isinstance(result, StableDiffusionXLPipelineOutput):
                     result.images[0].save(path)
