@@ -21,8 +21,11 @@ class SDXLConfig:
     meta_path: str | None = field(default=None, metadata={"help": "Path to the metadata."})
     vae_path: str | None = field(default=None, metadata={"help": "Path to the VAE."})
     vae_dtype: str = field(default="fp32", metadata={"help": "the VAE dtype."})
+
     ss_latent_path: str | None = field(default=None, metadata={"help": "Path to the ss-script dataset latents."})
     ss_meta_path: str | None = field(default=None, metadata={"help": "Path to the ss-script dataset metadata."})
+
+    shuffle_tags: bool = field(default=False, metadata={"help": "Shuffle tags."})
 
     seed: int = field(default_factory=lambda: secrets.randbelow(1_000_000_000), metadata={"help": "Seed for reproducibility."})
     model_name: str = field(default="my_model", metadata={"help": "Model name."})

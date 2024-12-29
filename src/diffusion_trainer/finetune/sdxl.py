@@ -841,15 +841,14 @@ class SDXLTuner:
         )
 
     def create_prompts_str(self, batch: DiffusionBatch) -> list[str]:
-        shuffle_tags = False
         prompts = []
         for caption, tags in zip(batch.caption, batch.tags, strict=True):
             if not tags:
                 prompt = caption
             else:
-                if shuffle_tags:
+                if self.config.shuffle_tags:
                     random.shuffle(tags)
-                prompt = ",".join(tags) if not caption else caption + "," + ",".join(tags)
+                prompt = ", ".join(tags) if not caption else caption + ", " + ", ".join(tags)
             prompts.append(prompt)
         return prompts
 
