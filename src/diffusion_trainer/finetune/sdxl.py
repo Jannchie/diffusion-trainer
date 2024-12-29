@@ -583,8 +583,6 @@ class SDXLTuner:
         free_memory()
         self.accelerator.wait_for_everyone()
 
-
-
     def initialize_optimizer(self) -> torch.optim.Optimizer:
         if self.config.optimizer == "adamW8bit":
             import bitsandbytes as bnb
@@ -842,14 +840,37 @@ class SDXLTuner:
 
     def create_prompts_str(self, batch: DiffusionBatch) -> list[str]:
         prompts = []
+        caption_dropout_ratio = self.config.caption_dropout
+        all_tags_dropout_ratio = self.config.all_tags_dropout
+        single_tag_dropout_ratio = self.config.single_tag_dropout
+        shuffle_tags = self.config.shuffle_tags
+
         for caption, tags in zip(batch.caption, batch.tags, strict=True):
-            if not tags:
-                prompt = caption
+            # Decide if the caption should be dropped
+            true_caption = "" if random.random() < caption_dropout_ratio else caption
+
+            # Decide if all tags should be dropped or process individual tag dropout
+            if random.random() < all_tags_dropout_ratio:
+                true_tags = []
+            elif single_tag_dropout_ratio > 0:
+                true_tags = [tag for tag in tags if random.random() >= single_tag_dropout_ratio]
             else:
-                if self.config.shuffle_tags:
-                    random.shuffle(tags)
-                prompt = ", ".join(tags) if not caption else caption + ", " + ", ".join(tags)
+                true_tags = tags
+
+            # Shuffle tags if necessary
+            if shuffle_tags:
+                random.shuffle(true_tags)
+
+            # Create prompt string
+            if true_caption and true_tags:
+                prompt = f"{true_caption}, " + ", ".join(true_tags)
+            elif true_caption:
+                prompt = true_caption
+            else:
+                prompt = ", ".join(true_tags)
+
             prompts.append(prompt)
+
         return prompts
 
     def get_prompt_embeds_1(self, prompts_str: list[str]) -> torch.Tensor:

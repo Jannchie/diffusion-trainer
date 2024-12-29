@@ -1,4 +1,4 @@
-import secrets
+import random
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -26,8 +26,11 @@ class SDXLConfig:
     ss_meta_path: str | None = field(default=None, metadata={"help": "Path to the ss-script dataset metadata."})
 
     shuffle_tags: bool = field(default=False, metadata={"help": "Shuffle tags."})
+    single_tag_dropout: float = field(default=0.0, metadata={"help": "Single tag dropout."})
+    all_tags_dropout: float = field(default=0.0, metadata={"help": "All tags dropout."})
+    caption_dropout: float = field(default=0.0, metadata={"help": "Caption dropout."})
 
-    seed: int = field(default_factory=lambda: secrets.randbelow(1_000_000_000), metadata={"help": "Seed for reproducibility."})
+    seed: int = field(default_factory=lambda: random.randint(0, 1_000_000_000), metadata={"help": "Seed for reproducibility."})
     model_name: str = field(default="my_model", metadata={"help": "Model name."})
     save_dir: str = field(default="out", metadata={"help": "Directory to save the model."})
     save_dtype: str = field(default="fp16", metadata={"help": "Save dtype."})

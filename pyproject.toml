@@ -63,6 +63,7 @@ ignore = [
     "INP001",  # Allow without __init__.py
     "N812",    # Allow aliased to non-lowercase names (e.g. `import torch.nn.functional as F`)
     "FBT003",  # Allow boolean positional values in function calls
+    "S311",    # Allow use random
 ]
 exclude = ["diffusion_trainer/diffusers_training_scripts/**/*"]
 
