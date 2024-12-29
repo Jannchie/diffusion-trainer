@@ -136,9 +136,6 @@ class SDXLTuner:
 
         self.lokr_factor = config.lokr_factor
 
-        # reduce memory usage by checkpointing the gradients
-        self.gradient_checkpointing = config.gradient_checkpointing
-
         # The timestep bias strategy, which may help direct the model toward learning low or high frequency details.
         # The default value is 'none', which means no bias is applied.
         # The value of 'later' will increase the frequency of the model's final training timesteps.
@@ -195,7 +192,7 @@ class SDXLTuner:
         self.vae = self.pipeline.vae
 
     def init_gradient_checkpointing(self) -> None:
-        if self.gradient_checkpointing:
+        if self.config.gradient_checkpointing:
             unwrap_model(self.accelerator, self.unet).enable_gradient_checkpointing()
             unwrap_model(self.accelerator, self.text_encoder_1).gradient_checkpointing_enable()
             unwrap_model(self.accelerator, self.text_encoder_2).gradient_checkpointing_enable()
@@ -275,7 +272,7 @@ class SDXLTuner:
             model.append(self.pipeline.text_encoder)
         if self.text_encoder_2_lr != 0:
             model.append(self.pipeline.text_encoder_2)
-        if self.lycoris_model:
+        if getattr(self, "lycoris_model", None):
             model.append(self.lycoris_model)
         return model
 
@@ -490,7 +487,6 @@ class SDXLTuner:
 
         if self.accelerator.is_main_process:
             progress.start()
-
         for epoch in range(skiped_epoch, self.config.n_epochs):
             self.train_loss = 0.0
             current_epoch_task = progress.add_task(
@@ -505,7 +501,7 @@ class SDXLTuner:
                     raise TypeError(msg)
                 batch = self.process_batch(orig_batch)
 
-                with self.accelerator.accumulate([self.unet]):
+                with self.accelerator.accumulate(self.training_models):
                     loss = self.train_each_batch(batch)
 
                 if self.accelerator.sync_gradients:
