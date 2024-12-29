@@ -497,7 +497,7 @@ class SDXLTuner:
                 completed=global_step % num_update_steps_per_epoch,
             )
             dl = skiped_data_loader if epoch == skiped_epoch else self.data_loader
-            for _step, orig_batch in enumerate(dl):
+            for step, orig_batch in enumerate(dl):
                 if not isinstance(orig_batch, DiffusionBatch):
                     msg = f"Expected DiffusionBatch, got something else. Got: {type(orig_batch)}"
                     raise TypeError(msg)
@@ -516,8 +516,8 @@ class SDXLTuner:
                     self.train_loss = 0.0
 
                     if self.accelerator.is_main_process:
-                        progress.update(total_task, advance=1, description=f"Global Step: {global_step} - Epoch: {epoch+1}")
-                        progress.update(current_epoch_task, advance=1, description=f"LR: {current_lr:.2e} - Loss: {loss:.2f}")
+                        progress.update(total_task, completed=global_step, description=f"Global Step: {global_step} - Epoch: {epoch+1}")
+                        progress.update(current_epoch_task, completed=step, description=f"LR: {current_lr:.2e} - Loss: {loss:.2f}")
 
                     if self.save_every_n_steps and global_step % self.save_every_n_steps == 0 and global_step != 0:
                         self.saving_model(f"{self.model_name}-step{global_step}")
