@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator, PartialState
+from accelerate.logging import get_logger
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
@@ -30,7 +31,7 @@ from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, Diffusion
 from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
 from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
 from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
-from diffusion_trainer.finetune.utils import prepare_accelerator, str_to_dtype
+from diffusion_trainer.finetune.utils import get_sample_options_hash, prepare_accelerator, str_to_dtype
 from diffusion_trainer.shared import get_progress
 
 if TYPE_CHECKING:
@@ -163,12 +164,13 @@ class SDXLTuner:
 
         self.pipeline = load_pipeline(self.model_path, self.weight_dtype)
         self.accelerator = prepare_accelerator(self.gradient_accumulation_steps, self.mixed_precision, self.config.log_with)
+        self.logger = get_logger("diffusion_trainer.finetune.sdxl")
         self.device = self.accelerator.device
         self.init_model_modules()
         self.init_ema()
 
         for key, value in config.__dict__.items():
-            logger.info("%s: %s", key, value)
+            self.logger.info("%s: %s", key, value)
 
     def apply_seed_settings(self) -> None:
         seed = self.config.seed
@@ -214,7 +216,7 @@ class SDXLTuner:
                     "lr": self.unet_lr,
                 },
             )
-            logger.info(
+            self.logger.info(
                 "UNet learning rate: %s, number of parameters: %s",
                 self.unet_lr,
                 format_size(self.get_n_params([trainable_parameters[-1]])),
@@ -227,7 +229,7 @@ class SDXLTuner:
                     "lr": self.text_encoder_1_lr,
                 },
             )
-            logger.info(
+            self.logger.info(
                 "Text Encoder 1 learning rate: %s, number of parameters: %s",
                 self.text_encoder_1_lr,
                 format_size(self.get_n_params([trainable_parameters[-1]])),
@@ -240,7 +242,7 @@ class SDXLTuner:
                     "lr": self.text_encoder_2_lr,
                 },
             )
-            logger.info(
+            self.logger.info(
                 "Text Encoder 2 learning rate: %s, number of parameters: %s",
                 self.text_encoder_2_lr,
                 format_size(self.get_n_params([trainable_parameters[-1]])),
@@ -253,7 +255,7 @@ class SDXLTuner:
                     "lr": self.unet_lr,
                 },
             )
-            logger.info(
+            self.logger.info(
                 "LyCORIS network learning rate: %s, number of parameters: %s",
                 self.unet_lr,
                 format_size(self.get_n_params([trainable_parameters[-1]])),
@@ -327,7 +329,7 @@ class SDXLTuner:
             self.lycoris_model.apply_to()
             lycoris_num_params = sum(p.numel() for p in self.lycoris_model.parameters())
             self.lycoris_model = self.lycoris_model.to(self.accelerator.device, dtype=self.weight_dtype)
-            logger.info(
+            self.logger.info(
                 "LyCORIS network has been initialized with %s parameters (%s)",
                 f"{lycoris_num_params:,}",
                 format_size(lycoris_num_params),
@@ -366,14 +368,14 @@ class SDXLTuner:
                 # Wait for the main process to finish preparing, then load the dataset.
                 return DiffusionDataset.from_parquet(parquet_path)
             if self.config.image_path and self.config.skip_prepare_image is False:
-                logger.info("Prepare image from %s", self.config.image_path)
+                self.logger.info("Prepare image from %s", self.config.image_path)
                 if not self.config.vae_path:
                     msg = "Please specify the vae_path in the config file."
                     raise ValueError(msg)
 
                 if not self.config.meta_path:
                     self.config.meta_path = (Path(self.config.image_path) / "metadata").as_posix()
-                    logger.info("Metadata path not set. Using %s as metadata path.", self.config.meta_path)
+                    self.logger.info("Metadata path not set. Using %s as metadata path.", self.config.meta_path)
 
                 vae_dtype = str_to_dtype(self.config.vae_dtype)
                 latents_processor = LatentsGenerateProcessor(
@@ -391,10 +393,10 @@ class SDXLTuner:
                 msg = "Please specify the meta path in the config file."
                 raise ValueError(msg)
             if not parquet_path.exists():
-                logger.info('Creating parquet file at "%s"', parquet_path)
+                self.logger.info('Creating parquet file at "%s"', parquet_path)
                 CreateParquetProcessor(meta_dir=self.config.meta_path)(max_workers=8)
             else:
-                logger.info('found parquet file at "%s"', parquet_path)
+                self.logger.info('found parquet file at "%s"', parquet_path)
         return DiffusionDataset.from_parquet(parquet_path)
 
     def train(self) -> None:
@@ -421,9 +423,9 @@ class SDXLTuner:
             self.pipeline.scheduler.config,
         )  # type: ignore
 
-        logger.info("Noise scheduler config:")
+        self.logger.info("Noise scheduler config:")
         for key, value in self.noise_scheduler.config.items():
-            logger.info("- %s: %s", key, value)
+            self.logger.info("- %s: %s", key, value)
 
         optimizer = self.initialize_optimizer()
 
@@ -473,7 +475,7 @@ class SDXLTuner:
         # no need to divide by gradient_accumulation_steps
         skiped_batch = global_step * self.accelerator.num_processes * self.config.batch_size
         if global_step != 0:
-            logger.info(
+            self.logger.info(
                 "skiping %d global steps (%d batches)",
                 global_step,
                 skiped_batch,
@@ -547,10 +549,9 @@ class SDXLTuner:
                 if not isinstance(sample_option, SampleOptions):
                     msg = f"Expected SampleOption, got {type(sample_option)}"
                     raise TypeError(msg)
-                hash_value = hash(sample_option)
-                filename_with_hash = f"{filename}-{hash_value}"
-                logger.info("Generating preview for %s", filename_with_hash)
-                hash_hex = f"{hash_value:x}"
+                hash_hex = get_sample_options_hash(sample_option)
+                filename_with_hash = f"{filename}-{hash_hex}"
+                self.logger.info("Generating preview for %s", filename_with_hash)
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
                 generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
                 with autocast_ctx:
@@ -562,7 +563,7 @@ class SDXLTuner:
                         generator=generator,
                         callback_on_step_end=callback_on_step_end,  # type: ignore
                     )
-                logger.info("Preview generated for %s", filename_with_hash)
+                self.logger.info("Preview generated for %s", filename_with_hash)
 
                 path = (Path(self.save_path) / "previews" / filename_with_hash).with_suffix(".png")
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -581,6 +582,8 @@ class SDXLTuner:
                     raise TypeError(msg)
         free_memory()
         self.accelerator.wait_for_everyone()
+
+
 
     def initialize_optimizer(self) -> torch.optim.Optimizer:
         if self.config.optimizer == "adamW8bit":
@@ -617,36 +620,36 @@ class SDXLTuner:
     def log_training_parameters(self) -> None:
         if self.accelerator.is_main_process:
             n_params = self.get_n_params(self.trainable_parameters_dicts)
-            logger.info("Number of epochs: %s", self.config.n_epochs)
+            self.logger.info("Number of epochs: %s", self.config.n_epochs)
             num_processes = self.accelerator.num_processes
-            logger.info("Unet: %s %s", self.unet.device, self.unet.dtype)
-            logger.info("Text Encoder 1: %s %s", self.text_encoder_1.device, self.text_encoder_1.dtype)
-            logger.info("Text Encoder 2: %s %s", self.text_encoder_2.device, self.text_encoder_2.dtype)
+            self.logger.info("Unet: %s %s", self.unet.device, self.unet.dtype)
+            self.logger.info("Text Encoder 1: %s %s", self.text_encoder_1.device, self.text_encoder_1.dtype)
+            self.logger.info("Text Encoder 2: %s %s", self.text_encoder_2.device, self.text_encoder_2.dtype)
             effective_batch_size = self.batch_size * num_processes * self.gradient_accumulation_steps
-            logger.info("Effective batch size: %s", effective_batch_size)
-            logger.info("Prediction type: %s", self.noise_scheduler.config.get("prediction_type"))
-            logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
-            logger.info("Hold tight, training is about to start!")
+            self.logger.info("Effective batch size: %s", effective_batch_size)
+            self.logger.info("Prediction type: %s", self.noise_scheduler.config.get("prediction_type"))
+            self.logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
+            self.logger.info("Hold tight, training is about to start!")
 
     def freeze_model(self) -> None:
         if self.mode in ("lora", "lokr", "loha"):
-            logger.info("Training with %s, freezing the models.", self.mode)
+            self.logger.info("Training with %s, freezing the models.", self.mode)
             self.unet.requires_grad_(False)
             self.text_encoder_1.requires_grad_(False)
             self.text_encoder_2.requires_grad_(False)
         elif self.mode == "full-finetune":
             if self.unet_lr:
-                logger.info("Training the UNet with learning rate %s", self.unet_lr)
+                self.logger.info("Training the UNet with learning rate %s", self.unet_lr)
                 self.unet.requires_grad_(True)
             else:
                 self.unet.requires_grad_(False)
             if self.text_encoder_1_lr:
-                logger.info("Training the text encoder 1 with learning rate %s", self.text_encoder_1_lr)
+                self.logger.info("Training the text encoder 1 with learning rate %s", self.text_encoder_1_lr)
                 self.text_encoder_1.requires_grad_(True)
             else:
                 self.text_encoder_1.requires_grad_(False)
             if self.text_encoder_2_lr:
-                logger.info("Training the text encoder 2 with learning rate %s", self.text_encoder_2_lr)
+                self.logger.info("Training the text encoder 2 with learning rate %s", self.text_encoder_2_lr)
                 self.text_encoder_2.requires_grad_(True)
             else:
                 self.text_encoder_2.requires_grad_(False)
@@ -675,15 +678,15 @@ class SDXLTuner:
         loss = self.get_loss(timesteps, model_pred, target)
 
         if torch.isnan(loss):
-            logger.info("img_latents: %s %s", img_latents.shape, img_latents.mean())
-            logger.info("prompt_embeds: %s %s", prompt_embeds.shape, prompt_embeds.mean())
-            logger.info("prompt_embeds_pooled_2: %s %s", prompt_embeds_pooled_2.shape, prompt_embeds_pooled_2.mean())
-            logger.info("time_ids: %s %s", time_ids.shape, time_ids)
-            logger.info("noise: %s %s", noise.shape, noise.mean())
-            logger.info("timesteps: %s %s", timesteps.shape, timesteps)
-            logger.info("img_noisy_latents: %s %s", img_noisy_latents.shape, img_noisy_latents.mean())
-            logger.info("model_pred: %s %s", model_pred.shape, model_pred.mean())
-            logger.info("target: %s %s", target.shape, target.mean())
+            self.logger.info("img_latents: %s %s", img_latents.shape, img_latents.mean())
+            self.logger.info("prompt_embeds: %s %s", prompt_embeds.shape, prompt_embeds.mean())
+            self.logger.info("prompt_embeds_pooled_2: %s %s", prompt_embeds_pooled_2.shape, prompt_embeds_pooled_2.mean())
+            self.logger.info("time_ids: %s %s", time_ids.shape, time_ids)
+            self.logger.info("noise: %s %s", noise.shape, noise.mean())
+            self.logger.info("timesteps: %s %s", timesteps.shape, timesteps)
+            self.logger.info("img_noisy_latents: %s %s", img_noisy_latents.shape, img_noisy_latents.mean())
+            self.logger.info("model_pred: %s %s", model_pred.shape, model_pred.mean())
+            self.logger.info("target: %s %s", target.shape, target.mean())
             msg = "Loss is NaN."
             raise ValueError(msg)
 

@@ -1,7 +1,9 @@
 """Utility functions for finetuning."""
 
 import datetime
+import hashlib
 import os
+from dataclasses import asdict
 from logging import getLogger
 from pathlib import Path
 from typing import Literal
@@ -10,6 +12,8 @@ import torch
 import wandb
 from accelerate import Accelerator, DeepSpeedPlugin, DistributedDataParallelKwargs, InitProcessGroupKwargs
 from accelerate.utils import PrecisionType, ProfileKwargs
+
+from diffusion_trainer.config import SampleOptions
 
 logger = getLogger("diffusion_trainer")
 
@@ -114,3 +118,8 @@ def str_to_dtype(dtype: str) -> torch.dtype:
         return torch.bfloat16
     msg = f"Unknown dtype {dtype}"
     raise ValueError(msg)
+
+
+def get_sample_options_hash(sample_options: SampleOptions) -> str:
+    d = asdict(sample_options)
+    return hashlib.sha256(str(d).encode()).hexdigest()[:8]
