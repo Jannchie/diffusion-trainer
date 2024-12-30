@@ -481,6 +481,10 @@ class SDXLTuner:
                 skiped_batch,
             )
         skiped_data_loader = self.accelerator.skip_first_batches(self.data_loader, skiped_batch % len(self.data_loader))
+
+        self.logger.info("full_loader_length: %d", len(self.data_loader))
+        self.logger.info("skiped_loader_length: %d", len(skiped_data_loader))
+
         total_task = progress.add_task(
             "Total Progress",
             total=n_total_steps,
@@ -497,14 +501,14 @@ class SDXLTuner:
                 completed=global_step % num_update_steps_per_epoch,
             )
             dl = skiped_data_loader if epoch == skiped_epoch else self.data_loader
-            for step, orig_batch in enumerate(dl):
+            for _step, orig_batch in enumerate(dl):
                 if not isinstance(orig_batch, DiffusionBatch):
                     msg = f"Expected DiffusionBatch, got something else. Got: {type(orig_batch)}"
                     raise TypeError(msg)
                 batch = self.process_batch(orig_batch)
 
                 with self.accelerator.accumulate(self.training_models):
-                    loss = self.train_each_batch(batch)
+                    self.train_each_batch(batch)
 
                 if self.accelerator.sync_gradients:
                     current_lr = self.lr_scheduler.get_last_lr()[0]
@@ -516,8 +520,9 @@ class SDXLTuner:
                     self.train_loss = 0.0
 
                     if self.accelerator.is_main_process:
-                        progress.update(total_task, completed=global_step, description=f"Global Step: {global_step} - Epoch: {epoch+1}")
-                        progress.update(current_epoch_task, completed=step, description=f"LR: {current_lr:.2e} - Loss: {loss:.2f}")
+                        current_completed = global_step % num_update_steps_per_epoch
+                        progress.update(total_task, completed=global_step, description=f"Epoch: {epoch+1}")
+                        progress.update(current_epoch_task, completed=current_completed, description=f"Lr: {current_lr:.2e}")
 
                     if self.save_every_n_steps and global_step % self.save_every_n_steps == 0 and global_step != 0:
                         self.saving_model(f"{self.model_name}-step{global_step}")
@@ -656,7 +661,7 @@ class SDXLTuner:
             raise ValueError(msg)
         self.accelerator.wait_for_everyone()
 
-    def train_each_batch(self, batch: SDXLBatch) -> float:
+    def train_each_batch(self, batch: SDXLBatch) -> None:
         img_latents = self.vae.config.get("scaling_factor", 0) * batch.img_latents.to(self.accelerator.device)
         prompt_embeds_1 = batch.prompt_embeds_1.to(self.accelerator.device)
         prompt_embeds_2 = batch.prompt_embeds_2.to(self.accelerator.device)
@@ -701,8 +706,6 @@ class SDXLTuner:
         self.lr_scheduler.step()
         # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
         self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
-
-        return loss.detach().item()
 
     def get_model_pred(
         self,
