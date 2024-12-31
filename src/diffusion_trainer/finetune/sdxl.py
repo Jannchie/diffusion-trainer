@@ -35,6 +35,7 @@ from diffusion_trainer.finetune.utils import get_sample_options_hash, prepare_ac
 from diffusion_trainer.shared import get_progress
 
 if TYPE_CHECKING:
+    from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
     from transformers import CLIPTextModel, CLIPTextModelWithProjection
 
 logger = getLogger("diffusion_trainer.finetune.sdxl")
@@ -191,7 +192,7 @@ class SDXLTuner:
         self.unet: UNet2DConditionModel = self.pipeline.unet.to(self.device, dtype=self.weight_dtype)
         self.text_encoder_1: CLIPTextModel = self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype)
         self.text_encoder_2: CLIPTextModelWithProjection = self.pipeline.text_encoder_2.to(self.device, dtype=self.weight_dtype)
-        self.vae = self.pipeline.vae
+        self.vae: AutoencoderKL = self.pipeline.vae
 
     def init_gradient_checkpointing(self) -> None:
         if self.config.gradient_checkpointing:
@@ -455,7 +456,7 @@ class SDXLTuner:
         self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
         self.execute_training_epoch(num_update_steps_per_epoch, n_total_steps)
 
-    def execute_training_epoch(  # noqa: C901, PLR0912
+    def execute_training_epoch(  # noqa: C901, PLR0912, PLR0915
         self,
         num_update_steps_per_epoch: int,
         n_total_steps: int,
@@ -618,7 +619,9 @@ class SDXLTuner:
 
     def save_full_finetune_model(self, filename: str) -> None:
         self.save_path.mkdir(parents=True, exist_ok=True)
+        self.pipeline.to(self.config.save_dtype)
         self.pipeline.save_pretrained(self.save_path / f"{filename}")
+        self.pipeline.to(self.weight_dtype)
 
     def log_training_parameters(self) -> None:
         if self.accelerator.is_main_process:
