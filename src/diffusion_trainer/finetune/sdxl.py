@@ -619,7 +619,7 @@ class SDXLTuner:
 
     def save_full_finetune_model(self, filename: str) -> None:
         self.save_path.mkdir(parents=True, exist_ok=True)
-        self.pipeline.to(self.config.save_dtype)
+        self.pipeline.to(self.save_dtype)
         self.pipeline.save_pretrained(self.save_path / f"{filename}")
         self.pipeline.to(self.weight_dtype)
 
