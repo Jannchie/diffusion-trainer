@@ -1,14 +1,14 @@
-# Copied from: https://raw.githubusercontent.com/huggingface/diffusers/main/scripts/convert_diffusers_to_original_sdxl.py
 # Script for converting a HF Diffusers saved pipeline to a Stable Diffusion checkpoint.
 # *Only* converts the UNet, VAE, and Text Encoder.
 # Does not convert optimizer state or any other thing.
 
 import argparse
+import os.path as osp
 import re
-from pathlib import Path
 
 import torch
 from safetensors.torch import load_file, save_file
+
 
 # =================#
 # UNet Conversion #
@@ -93,24 +93,24 @@ for j in range(2):
     unet_conversion_map_layer.append((sd_mid_res_prefix, hf_mid_res_prefix))
 
 
-def convert_unet_state_dict(unet_state_dict: dict) -> dict:
+def convert_unet_state_dict(unet_state_dict):
     # buyer beware: this is a *brittle* function,
     # and correct output requires that all of these pieces interact in
     # the exact order in which I have arranged them.
-    mapping = {hf_name: sd_name for sd_name, hf_name in unet_conversion_map}
-    mapping.update({k: k for k in unet_state_dict})
+    mapping = {k: k for k in unet_state_dict.keys()}
+    for sd_name, hf_name in unet_conversion_map:
+        mapping[hf_name] = sd_name
     for k, v in mapping.items():
         if "resnets" in k:
-            new_v = v
             for sd_part, hf_part in unet_conversion_map_resnet:
-                new_v = v.replace(hf_part, sd_part)
-            mapping[k] = new_v
+                v = v.replace(hf_part, sd_part)
+            mapping[k] = v
     for k, v in mapping.items():
-        new_v = v
         for sd_part, hf_part in unet_conversion_map_layer:
-            new_v = v.replace(hf_part, sd_part)
-        mapping[k] = new_v
-    return {sd_name: unet_state_dict[hf_name] for hf_name, sd_name in mapping.items()}
+            v = v.replace(hf_part, sd_part)
+        mapping[k] = v
+    new_state_dict = {sd_name: unet_state_dict[hf_name] for hf_name, sd_name in mapping.items()}
+    return new_state_dict
 
 
 # ================#
@@ -165,29 +165,31 @@ vae_conversion_map_attn = [
 ]
 
 
-def reshape_weight_for_sd(w: torch.Tensor) -> torch.Tensor:
+def reshape_weight_for_sd(w):
     # convert HF linear weights to SD conv2d weights
-    return w.reshape(*w.shape, 1, 1)
+    if not w.ndim == 1:
+        return w.reshape(*w.shape, 1, 1)
+    else:
+        return w
 
 
-def convert_vae_state_dict(vae_state_dict: dict) -> dict:
-    mapping = {k: k for k in vae_state_dict}
+def convert_vae_state_dict(vae_state_dict):
+    mapping = {k: k for k in vae_state_dict.keys()}
     for k, v in mapping.items():
-        new_v = v
         for sd_part, hf_part in vae_conversion_map:
-            new_v = v.replace(hf_part, sd_part)
-        mapping[k] = new_v
+            v = v.replace(hf_part, sd_part)
+        mapping[k] = v
     for k, v in mapping.items():
         if "attentions" in k:
-            new_v = v
             for sd_part, hf_part in vae_conversion_map_attn:
-                new_v = v.replace(hf_part, sd_part)
-            mapping[k] = new_v
+                v = v.replace(hf_part, sd_part)
+            mapping[k] = v
     new_state_dict = {v: vae_state_dict[k] for k, v in mapping.items()}
     weights_to_convert = ["q", "k", "v", "proj_out"]
     for k, v in new_state_dict.items():
         for weight_name in weights_to_convert:
             if f"mid.attn_1.{weight_name}.weight" in k:
+                print(f"Reshaping {k} for SD format")
                 new_state_dict[k] = reshape_weight_for_sd(v)
     return new_state_dict
 
@@ -216,12 +218,12 @@ textenc_pattern = re.compile("|".join(protected.keys()))
 code2idx = {"q": 0, "k": 1, "v": 2}
 
 
-def convert_openclip_text_enc_state_dict(text_enc_dict: dict) -> dict:
+def convert_openclip_text_enc_state_dict(text_enc_dict):
     new_state_dict = {}
     capture_qkv_weight = {}
     capture_qkv_bias = {}
     for k, v in text_enc_dict.items():
-        if k.endswith((".self_attn.q_proj.weight", ".self_attn.k_proj.weight", ".self_attn.v_proj.weight")):
+        if k.endswith(".self_attn.q_proj.weight") or k.endswith(".self_attn.k_proj.weight") or k.endswith(".self_attn.v_proj.weight"):
             k_pre = k[: -len(".q_proj.weight")]
             k_code = k[-len("q_proj.weight")]
             if k_pre not in capture_qkv_weight:
@@ -229,7 +231,7 @@ def convert_openclip_text_enc_state_dict(text_enc_dict: dict) -> dict:
             capture_qkv_weight[k_pre][code2idx[k_code]] = v
             continue
 
-        if k.endswith((".self_attn.q_proj.bias", ".self_attn.k_proj.bias", ".self_attn.v_proj.bias")):
+        if k.endswith(".self_attn.q_proj.bias") or k.endswith(".self_attn.k_proj.bias") or k.endswith(".self_attn.v_proj.bias"):
             k_pre = k[: -len(".q_proj.bias")]
             k_code = k[-len("q_proj.bias")]
             if k_pre not in capture_qkv_bias:
@@ -242,106 +244,91 @@ def convert_openclip_text_enc_state_dict(text_enc_dict: dict) -> dict:
 
     for k_pre, tensors in capture_qkv_weight.items():
         if None in tensors:
-            msg = "CORRUPTED MODEL: one of the q-k-v values for the text encoder was missing"
-            raise ValueError(msg)
+            raise Exception("CORRUPTED MODEL: one of the q-k-v values for the text encoder was missing")
         relabelled_key = textenc_pattern.sub(lambda m: protected[re.escape(m.group(0))], k_pre)
-        new_state_dict[f"{relabelled_key}.in_proj_weight"] = torch.cat(tensors)
+        new_state_dict[relabelled_key + ".in_proj_weight"] = torch.cat(tensors)
 
     for k_pre, tensors in capture_qkv_bias.items():
         if None in tensors:
-            msg = "CORRUPTED MODEL: one of the q-k-v values for the text encoder was missing"
-            raise ValueError(msg)
+            raise Exception("CORRUPTED MODEL: one of the q-k-v values for the text encoder was missing")
         relabelled_key = textenc_pattern.sub(lambda m: protected[re.escape(m.group(0))], k_pre)
-        new_state_dict[f"{relabelled_key}.in_proj_bias"] = torch.cat(tensors)
+        new_state_dict[relabelled_key + ".in_proj_bias"] = torch.cat(tensors)
 
     return new_state_dict
 
 
-def convert_openai_text_enc_state_dict(text_enc_dict: dict) -> dict:
+def convert_openai_text_enc_state_dict(text_enc_dict):
     return text_enc_dict
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--model_path",
-        default=None,
-        type=str,
-        required=True,
-        help="Path to the model to convert.",
-    )
-    parser.add_argument(
-        "--checkpoint_path",
-        default=None,
-        type=str,
-        required=True,
-        help="Path to the output model.",
-    )
+    parser.add_argument("--model_path", default=None, type=str, required=True, help="Path to the model to convert.")
+    parser.add_argument("--checkpoint_path", default=None, type=str, required=True, help="Path to the output model.")
     parser.add_argument("--half", action="store_true", help="Save weights in half precision.")
-    parser.add_argument(
-        "--use_safetensors",
-        action="store_true",
-        help="Save weights use safetensors, default is ckpt.",
-    )
+    parser.add_argument("--use_safetensors", action="store_true", help="Save weights use safetensors, default is ckpt.")
 
     args = parser.parse_args()
 
-    if args.model_path is not None:
-        msg = "Must provide a model path!"
-        raise ValueError(msg)
+    assert args.model_path is not None, "Must provide a model path!"
 
-    if args.checkpoint_path is not None:
-        msg = "Must provide a checkpoint path!"
-        raise ValueError(msg)
+    assert args.checkpoint_path is not None, "Must provide a checkpoint path!"
 
     # Path for safetensors
-    unet_path = Path(args.model_path) / "unet" / "diffusion_pytorch_model.safetensors"
-    vae_path = Path(args.model_path) / "vae" / "diffusion_pytorch_model.safetensors"
-    text_enc_path = Path(args.model_path) / "text_encoder" / "model.safetensors"
-    text_enc_2_path = Path(args.model_path) / "text_encoder_2" / "model.safetensors"
+    unet_path = osp.join(args.model_path, "unet", "diffusion_pytorch_model.safetensors")
+    vae_path = osp.join(args.model_path, "vae", "diffusion_pytorch_model.safetensors")
+    text_enc_path = osp.join(args.model_path, "text_encoder", "model.safetensors")
+    text_enc_2_path = osp.join(args.model_path, "text_encoder_2", "model.safetensors")
 
     # Load models from safetensors if it exists, if it doesn't pytorch
-    if unet_path.exists():
+    if osp.exists(unet_path):
         unet_state_dict = load_file(unet_path, device="cpu")
     else:
-        unet_path = Path(args.model_path) / "unet" / "diffusion_pytorch_model.bin"
+        unet_path = osp.join(args.model_path, "unet", "diffusion_pytorch_model.bin")
         unet_state_dict = torch.load(unet_path, map_location="cpu")
 
-    if vae_path.exists():
+    if osp.exists(vae_path):
         vae_state_dict = load_file(vae_path, device="cpu")
     else:
-        vae_path = Path(args.model_path) / "vae" / "diffusion_pytorch_model.bin"
+        vae_path = osp.join(args.model_path, "vae", "diffusion_pytorch_model.bin")
         vae_state_dict = torch.load(vae_path, map_location="cpu")
 
-    if text_enc_path.exists():
+    if osp.exists(text_enc_path):
         text_enc_dict = load_file(text_enc_path, device="cpu")
     else:
-        text_enc_path = Path(args.model_path) / "text_encoder" / "pytorch_model.bin"
+        text_enc_path = osp.join(args.model_path, "text_encoder", "pytorch_model.bin")
         text_enc_dict = torch.load(text_enc_path, map_location="cpu")
 
-    if text_enc_2_path.exists():
+    if osp.exists(text_enc_2_path):
         text_enc_2_dict = load_file(text_enc_2_path, device="cpu")
     else:
-        text_enc_2_path = Path(args.model_path) / "text_encoder_2" / "pytorch_model.bin"
+        text_enc_2_path = osp.join(args.model_path, "text_encoder_2", "pytorch_model.bin")
         text_enc_2_dict = torch.load(text_enc_2_path, map_location="cpu")
 
     # Convert the UNet model
     unet_state_dict = convert_unet_state_dict(unet_state_dict)
-    unet_state_dict = {f"model.diffusion_model.{k}": v for k, v in unet_state_dict.items()}
+    unet_state_dict = {"model.diffusion_model." + k: v for k, v in unet_state_dict.items()}
 
     # Convert the VAE model
     vae_state_dict = convert_vae_state_dict(vae_state_dict)
-    vae_state_dict = {f"first_stage_model.{k}": v for k, v in vae_state_dict.items()}
+    vae_state_dict = {"first_stage_model." + k: v for k, v in vae_state_dict.items()}
 
+    # Convert text encoder 1
     text_enc_dict = convert_openai_text_enc_state_dict(text_enc_dict)
-    text_enc_dict = {f"conditioner.embedders.0.transformer.{k}": v for k, v in text_enc_dict.items()}
+    text_enc_dict = {"conditioner.embedders.0.transformer." + k: v for k, v in text_enc_dict.items()}
 
+    # Convert text encoder 2
     text_enc_2_dict = convert_openclip_text_enc_state_dict(text_enc_2_dict)
-    text_enc_2_dict = {f"conditioner.embedders.1.model.{k}": v for k, v in text_enc_2_dict.items()}
+    text_enc_2_dict = {"conditioner.embedders.1.model." + k: v for k, v in text_enc_2_dict.items()}
+    # We call the `.T.contiguous()` to match what's done in
+    # https://github.com/huggingface/diffusers/blob/84905ca7287876b925b6bf8e9bb92fec21c78764/src/diffusers/loaders/single_file_utils.py#L1085
+    text_enc_2_dict["conditioner.embedders.1.model.text_projection"] = text_enc_2_dict.pop(
+        "conditioner.embedders.1.model.text_projection.weight"
+    ).T.contiguous()
 
     # Put together new checkpoint
-    state_dict = unet_state_dict | vae_state_dict | text_enc_dict | text_enc_2_dict
+    state_dict = {**unet_state_dict, **vae_state_dict, **text_enc_dict, **text_enc_2_dict}
 
     if args.half:
         state_dict = {k: v.half() for k, v in state_dict.items()}
