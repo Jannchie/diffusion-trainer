@@ -18,6 +18,16 @@ from diffusion_trainer.config import SampleOptions
 logger = getLogger("diffusion_trainer")
 
 
+def format_size(num: int) -> str:
+    if num >= 1_000_000_000:
+        return f"{num / 1_000_000_000:.1f} B"
+    if num >= 1_000_000:
+        return f"{num / 1_000_000:.1f} M"
+    if num >= 1_000:
+        return f"{num / 1_000:.1f} K"
+    return str(num)
+
+
 def prepare_logger(log_with: str, logging_dir: Path) -> None:
     """Prepare logger for the training."""
     if log_with == "wandb":
@@ -123,3 +133,17 @@ def str_to_dtype(dtype: str) -> torch.dtype:
 def get_sample_options_hash(sample_options: SampleOptions) -> str:
     d = asdict(sample_options)
     return hashlib.sha256(str(d).encode()).hexdigest()[:8]
+
+
+class DummyProgressBar:
+    def __init__(self, total: int) -> None:
+        pass
+
+    def __enter__(self) -> "DummyProgressBar":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        pass
+
+    def update(self) -> None:
+        pass

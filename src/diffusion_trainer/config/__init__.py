@@ -12,9 +12,8 @@ class SampleOptions:
 
 
 @dataclass
-class SDXLConfig:
+class BaseConfig:
     model_path: str = field(metadata={"help": "Path to the model."})
-
     image_path: str | None = field(default=None, metadata={"help": "Path to the images."})
     skip_prepare_image: bool = field(default=False, metadata={"help": "Skip preparing the images."})
 
@@ -43,13 +42,12 @@ class SDXLConfig:
     n_epochs: int = field(default=10, metadata={"help": "Number of epochs."})
     batch_size: int = field(default=8, metadata={"help": "Batch size."})
     gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps."})
-    unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
-    text_encoder_1_lr: float = field(default=1e-6, metadata={"help": "Text encoder 1 learning rate."})
-    text_encoder_2_lr: float = field(default=1e-6, metadata={"help": "Text encoder 2 learning rate."})
+
     mode: Literal["full-finetune", "lora", "lokr", "loha"] = field(default="lokr", metadata={"help": "Mode."})
     lora_rank: int = field(default=4, metadata={"help": "Lora rank."})
     lora_alpha: int = field(default=1, metadata={"help": "Lora alpha."})
     lokr_factor: int = field(default=16, metadata={"help": "LoKr factor."})
+
     noise_offset: float = field(default=0.0, metadata={"help": "Noise offset."})
     gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
     timestep_bias_strategy: Literal["none", "earlier", "later", "range"] = field(
@@ -69,6 +67,7 @@ class SDXLConfig:
     save_every_n_epochs: int = field(default=1, metadata={"help": "Save every n epochs."})
     preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
     preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
+
     log_with: Literal["wandb", "tensorboard", "none"] = field(default="wandb", metadata={"help": "Logger."})
 
     optimizer: Literal["adamW8bit", "adafactor"] = field(default="adamW8bit", metadata={"help": "Optimizer."})
@@ -86,3 +85,16 @@ class SDXLConfig:
         self.preview_sample_options = [
             item if isinstance(item, SampleOptions) else SampleOptions(**item) for item in self.preview_sample_options
         ]
+
+
+@dataclass
+class SDXLConfig(BaseConfig):
+    unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
+    text_encoder_1_lr: float = field(default=1e-6, metadata={"help": "Text encoder 1 learning rate."})
+    text_encoder_2_lr: float = field(default=1e-6, metadata={"help": "Text encoder 2 learning rate."})
+
+
+@dataclass
+class SD15Config(BaseConfig):
+    unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
+    text_encoder_lr: float = field(default=1e-6, metadata={"help": "Text encoder learning rate."})

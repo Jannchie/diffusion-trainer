@@ -31,7 +31,7 @@ from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, Diffusion
 from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
 from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
 from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
-from diffusion_trainer.finetune.utils import get_sample_options_hash, prepare_accelerator, str_to_dtype
+from diffusion_trainer.finetune.utils import DummyProgressBar, format_size, get_sample_options_hash, prepare_accelerator, str_to_dtype
 from diffusion_trainer.shared import get_progress
 
 if TYPE_CHECKING:
@@ -39,16 +39,6 @@ if TYPE_CHECKING:
     from transformers import CLIPTextModel, CLIPTextModelWithProjection
 
 logger = getLogger("diffusion_trainer.finetune.sdxl")
-
-
-def format_size(num: int) -> str:
-    if num >= 1_000_000_000:
-        return f"{num / 1_000_000_000:.1f} B"
-    if num >= 1_000_000:
-        return f"{num / 1_000_000:.1f} M"
-    if num >= 1_000:
-        return f"{num / 1_000:.1f} K"
-    return str(num)
 
 
 def unwrap_model(accelerator: Accelerator, model: torch.nn.Module) -> torch.nn.Module:
@@ -63,20 +53,6 @@ class SDXLBatch:
     prompt_embeds_2: torch.Tensor
     prompt_embeds_pooled_2: torch.Tensor
     time_ids: torch.Tensor
-
-
-class DummyProgressBar:
-    def __init__(self, total: int) -> None:
-        pass
-
-    def __enter__(self) -> "DummyProgressBar":
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        pass
-
-    def update(self) -> None:
-        pass
 
 
 def load_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXLPipeline:
@@ -208,61 +184,30 @@ class SDXLTuner:
             n_params += sum(p.numel() for p in param["params"])
         return n_params
 
+    def prepare_params(self, lr: float, model: torch.nn.Module) -> ParamDict:
+        params = ParamDict(
+            params=list(filter(lambda p: p.requires_grad, model.parameters())),
+            lr=lr,
+        )
+        self.logger.info(
+            "%s learning rate: %s, number of parameters: %s",
+            model.__class__.__name__,
+            lr,
+            format_size(self.get_n_params([params])),
+        )
+        self.accelerator.prepare(self.unet)
+        return params
+
     def get_trainable_parameter_dicts(self) -> list[ParamDict]:
         trainable_parameters = []
         if self.unet_lr != 0 and self.mode == "full-finetune":
-            trainable_parameters.append(
-                {
-                    "params": list(filter(lambda p: p.requires_grad, self.unet.parameters())),
-                    "lr": self.unet_lr,
-                },
-            )
-            self.logger.info(
-                "UNet learning rate: %s, number of parameters: %s",
-                self.unet_lr,
-                format_size(self.get_n_params([trainable_parameters[-1]])),
-            )
-            self.accelerator.prepare(self.unet)
+            trainable_parameters.append(self.prepare_params(self.unet_lr, self.unet))
         if self.text_encoder_1_lr != 0:
-            trainable_parameters.append(
-                {
-                    "params": list(filter(lambda p: p.requires_grad, self.text_encoder_1.parameters())),
-                    "lr": self.text_encoder_1_lr,
-                },
-            )
-            self.logger.info(
-                "Text Encoder 1 learning rate: %s, number of parameters: %s",
-                self.text_encoder_1_lr,
-                format_size(self.get_n_params([trainable_parameters[-1]])),
-            )
-            self.accelerator.prepare(self.text_encoder_1)
+            trainable_parameters.append(self.prepare_params(self.text_encoder_1_lr, self.text_encoder_1))
         if self.text_encoder_2_lr != 0:
-            trainable_parameters.append(
-                {
-                    "params": list(filter(lambda p: p.requires_grad, self.text_encoder_2.parameters())),
-                    "lr": self.text_encoder_2_lr,
-                },
-            )
-            self.logger.info(
-                "Text Encoder 2 learning rate: %s, number of parameters: %s",
-                self.text_encoder_2_lr,
-                format_size(self.get_n_params([trainable_parameters[-1]])),
-            )
-            self.accelerator.prepare(self.text_encoder_2)
-        if self.mode in ("lokr", "loha") and self.lycoris_model:
-            trainable_parameters.append(
-                {
-                    "params": list(filter(lambda p: p.requires_grad, self.lycoris_model.parameters())),
-                    "lr": self.unet_lr,
-                },
-            )
-            self.logger.info(
-                "LyCORIS network learning rate: %s, number of parameters: %s",
-                self.unet_lr,
-                format_size(self.get_n_params([trainable_parameters[-1]])),
-            )
-            self.accelerator.prepare(self.unet)
-            self.unet.train()
+            trainable_parameters.append(self.prepare_params(self.text_encoder_2_lr, self.text_encoder_2))
+        if getattr(self, "lycoris_model", None):
+            trainable_parameters.append(self.prepare_params(self.unet_lr, self.lycoris_model))
         return trainable_parameters
 
     @property

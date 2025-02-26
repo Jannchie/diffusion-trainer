@@ -1,18 +1,18 @@
 seed = 47
 
-# image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
-meta_path = "demo_meta"
-skip_prepare_image = true
+image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
+meta_path = "demo_sd15_meta"
+skip_prepare_image = false
 
-vae_path = "madebyollin/sdxl-vae-fp16-fix"
+vae_path = "models/AOM3B2_orangemixs_fp16/vae/diffusion_pytorch_model.safetensors"
 vae_dtype = "fp16"
 
-model_path = "../SimpleTuner/models/creative-xl-0.9-b2"
+model_path = "models/AOM3B2_orangemixs_fp16"
 save_dir = "./out"
 
 optimizer = "adamW8bit"
 
-model_name = "creativexl-test"
+model_name = "creative-test"
 
 mode = 'lokr'
 
@@ -34,8 +34,7 @@ unet_lr = 1e-4
 optimizer_warmup_steps = 100
 optimizer_num_cycles = 10
 
-text_encoder_1_lr = 0
-text_encoder_2_lr = 0
+text_encoder_lr = 0
 
 noise_offset = 0.1
 

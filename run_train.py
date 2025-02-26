@@ -4,6 +4,9 @@ import logging
 
 from rich.logging import RichHandler
 
+from diffusion_trainer.config import SD15Config
+from diffusion_trainer.finetune.sdxl import SD15Tuner
+
 logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
 if __name__ == "__main__":
@@ -18,13 +21,19 @@ if __name__ == "__main__":
 
     parser = ArgumentParser()
     parser.add_argument("--config", type=str)
+    parser.add_argument("--model_family", type=str, default="sd15", choices=["sd15", "sdxl"])
     args = parser.parse_args()
 
     logger.info('Loading config from "%s"', args.config)
-
     config_path = Path(args.config)
-    sdxl_config_dict = tomllib.load(config_path.open("rb"))
-    sdxl_config = SDXLConfig(**sdxl_config_dict)
-    tuner = SDXLTuner(sdxl_config)
+    config_dict = tomllib.load(config_path.open("rb"))
 
-    tuner.train()
+    model_family = args.model_family
+    if model_family == "sdxl":
+        config = SDXLConfig(**config_dict)
+        tuner = SDXLTuner(config)
+        tuner.train()
+    elif model_family == "sd15":
+        config = SD15Config(**config_dict)
+        tuner = SD15Tuner(config)
+        tuner.train()
