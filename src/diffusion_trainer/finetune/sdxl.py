@@ -487,7 +487,8 @@ class SDXLTuner:
         out_path = self.save_path / f"{filename}.safetensors"
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.lycoris_model.save_weights(self.save_path / f"{filename}.safetensors", dtype=self.save_dtype, metadata={})
+        lycoris_network = next(m for m in self.models if isinstance(m, LycorisNetwork))
+        lycoris_network.save_weights(self.save_path / f"{filename}.safetensors", dtype=self.save_dtype, metadata={})
 
     def save_full_finetune_model(self, filename: str) -> None:
         self.save_path.mkdir(parents=True, exist_ok=True)
