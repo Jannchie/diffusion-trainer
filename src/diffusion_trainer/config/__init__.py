@@ -50,14 +50,10 @@ class BaseConfig:
 
     noise_offset: float = field(default=0.0, metadata={"help": "Noise offset."})
     gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
-    timestep_bias_strategy: Literal["none", "earlier", "later", "range"] = field(
-        default="none",
+    timestep_bias_strategy: Literal["uniform", "logit"] = field(
+        default="uniform",
         metadata={"help": "Timestep bias strategy."},
     )
-    timestep_bias_multiplier: float = field(default=1.0, metadata={"help": "Timestep bias multiplier."})
-    timestep_bias_portion: float = field(default=0.25, metadata={"help": "Timestep bias portion."})
-    timestep_bias_begin: int = field(default=0, metadata={"help": "Timestep bias begin."})
-    timestep_bias_end: int = field(default=1000, metadata={"help": "Timestep bias end."})
     # SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0.
     # More details here: https://arxiv.org/abs/2303.09556.
     snr_gamma: float | None = field(default=None, metadata={"help": "SNR gamma. Recommended value is 5.0."})
@@ -82,9 +78,7 @@ class BaseConfig:
 
     def __post_init__(self) -> None:
         # convert preview_sample_options to SampleOptions
-        self.preview_sample_options = [
-            item if isinstance(item, SampleOptions) else SampleOptions(**item) for item in self.preview_sample_options
-        ]
+        self.preview_sample_options = [item if isinstance(item, SampleOptions) else SampleOptions(**item) for item in self.preview_sample_options]
 
 
 @dataclass

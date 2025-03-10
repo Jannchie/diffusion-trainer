@@ -10,7 +10,7 @@ vae_dtype = "fp16"
 model_path = "../SimpleTuner/models/creative-xl-0.9-b2"
 save_dir = "./out"
 
-optimizer = "adamW8bit"
+optimizer = "adafactor"
 
 model_name = "creativexl-test"
 
@@ -43,10 +43,7 @@ snr_gamma = 5.0
 
 max_grad_norm = 1.0
 
-timestep_bias_strategy = "none"
-timestep_bias_portion = 0.25
-timestep_bias_begin = 0
-timestep_bias_end = 100
+timestep_bias_strategy = "uniform"
 
 use_ema = false
 

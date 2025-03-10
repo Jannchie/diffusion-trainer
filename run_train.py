@@ -4,9 +4,6 @@ import logging
 
 from rich.logging import RichHandler
 
-from diffusion_trainer.config import SD15Config
-from diffusion_trainer.finetune.sdxl import SD15Tuner
-
 logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
 if __name__ == "__main__":

@@ -3,8 +3,10 @@
 import datetime
 import hashlib
 import os
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict
 from logging import getLogger
+from os import PathLike
 from pathlib import Path
 from typing import Literal
 
@@ -12,6 +14,7 @@ import torch
 import wandb
 from accelerate import Accelerator, DeepSpeedPlugin, DistributedDataParallelKwargs, InitProcessGroupKwargs
 from accelerate.utils import PrecisionType, ProfileKwargs
+from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 
 from diffusion_trainer.config import SampleOptions
 
@@ -147,3 +150,20 @@ class DummyProgressBar:
 
     def update(self) -> None:
         pass
+
+
+def load_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXLPipeline:
+    path = Path(path)
+
+    logger.info('Loading models from "%s" (%s)', path, dtype)
+    with Path(os.devnull).open("w") as fnull, redirect_stdout(fnull), redirect_stderr(fnull):
+        if path.suffix == ".safetensors":
+            pipe = StableDiffusionXLPipeline.from_single_file(path.as_posix(), torch_dtype=dtype)
+        else:
+            pipe = StableDiffusionXLPipeline.from_pretrained(path.as_posix(), torch_dtype=dtype)
+    logger.info("Models loaded successfully.")
+    if isinstance(pipe, StableDiffusionXLPipeline):
+        pipe.progress_bar = DummyProgressBar  # type: ignore
+        return pipe
+    msg = "Failed to load models."
+    raise ValueError(msg)
