@@ -8,17 +8,42 @@ from dataclasses import asdict
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple, Protocol, TypedDict, TypeVar
 
 import torch
 import wandb
 from accelerate import Accelerator, DeepSpeedPlugin, DistributedDataParallelKwargs, InitProcessGroupKwargs
 from accelerate.utils import PrecisionType, ProfileKwargs
+from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 
 from diffusion_trainer.config import SampleOptions
 
 logger = getLogger("diffusion_trainer")
+
+
+class ParamDict(TypedDict):
+    lr: float
+    params: list[torch.Tensor]
+
+
+class TrainableModel(NamedTuple):
+    model: torch.nn.Module
+    lr: float
+
+
+class PipelineProtocol(Protocol):
+    @classmethod
+    def from_single_file(cls, pretrained_model_link_or_path: str, **kwargs) -> "PipelineProtocol": ...  # noqa: ANN003
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: str | PathLike | None, **kwargs) -> "PipelineProtocol": ...  # noqa: ANN003
+
+    @property
+    def progress_bar(self) -> object: ...
+
+
+T = TypeVar("T", bound=PipelineProtocol)
 
 
 def format_size(num: int) -> str:
@@ -152,18 +177,71 @@ class DummyProgressBar:
         pass
 
 
-def load_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXLPipeline:
+def load_sdxl_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXLPipeline:
+    return load_pipeline(path, dtype, StableDiffusionXLPipeline)
+
+
+def load_sd15_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionPipeline:
+    return load_pipeline(path, dtype, StableDiffusionPipeline)
+
+
+def load_pipeline(path: PathLike | str, dtype: torch.dtype, pipe_type: type[T]) -> T:
     path = Path(path)
 
     logger.info('Loading models from "%s" (%s)', path, dtype)
     with Path(os.devnull).open("w") as fnull, redirect_stdout(fnull), redirect_stderr(fnull):
         if path.suffix == ".safetensors":
-            pipe = StableDiffusionXLPipeline.from_single_file(path.as_posix(), torch_dtype=dtype)
+            pipe = pipe_type.from_single_file(path.as_posix(), torch_dtype=dtype)
         else:
-            pipe = StableDiffusionXLPipeline.from_pretrained(path.as_posix(), torch_dtype=dtype)
+            pipe = pipe_type.from_pretrained(path.as_posix(), torch_dtype=dtype)
     logger.info("Models loaded successfully.")
-    if isinstance(pipe, StableDiffusionXLPipeline):
+    if isinstance(pipe, pipe_type):
         pipe.progress_bar = DummyProgressBar  # type: ignore
         return pipe
     msg = "Failed to load models."
     raise ValueError(msg)
+
+
+def unwrap_model(accelerator: Accelerator, model: torch.nn.Module) -> torch.nn.Module:
+    model = accelerator.unwrap_model(model)
+    return model._orig_mod if is_compiled_module(model) else model  # type: ignore # noqa: SLF001
+
+
+def get_n_params(trainable_parameters: list[ParamDict]) -> int:
+    n_params = 0
+    for param in trainable_parameters:
+        n_params += sum(p.numel() for p in param["params"])
+    return n_params
+
+
+def prepare_params(accelerator: Accelerator, model: torch.nn.Module, lr: float) -> ParamDict:
+    params = ParamDict(
+        params=list(filter(lambda p: p.requires_grad, model.parameters())),
+        lr=lr,
+    )
+    logger.info("%s learning rate: %s, number of parameters: %s", model.__class__.__name__, lr, format_size(get_n_params([params])))
+    accelerator.prepare(model)
+    return params
+
+
+def get_trainable_parameter_dicts(accelerator: Accelerator, trainable_mdels: list[TrainableModel]) -> list[ParamDict]:
+    return [prepare_params(accelerator, model.model, model.lr) for model in trainable_mdels]
+
+
+def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[ParamDict]) -> torch.optim.Optimizer:
+    if optimizer_str == "adamW8bit":
+        import bitsandbytes as bnb
+
+        optimizer = bnb.optim.AdamW8bit(
+            trainable_parameters_dicts,
+            # lr=self.unet_lr,
+            betas=(0.9, 0.999),
+            weight_decay=1e-2,
+            eps=1e-6,
+        )
+    else:
+        optimizer = torch.optim.Adafactor(
+            trainable_parameters_dicts,  # type: ignore
+            # lr=self.unet_lr,
+        )
+    return optimizer

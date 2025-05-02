@@ -35,7 +35,7 @@ class WorkerArgs:
 
     image_paths: list[Path]
     image_base_path: Path
-    meta_base_path: Path
+    target_path: Path
     task_queue: Queue
     result_queue: Queue
     i: int
@@ -102,11 +102,11 @@ def worker(args: WorkerArgs) -> None:  # noqa: C901
             with lock:
                 try:
                     meta_key = get_meta_key_from_path(image_path, base_path=args.image_base_path)
-                    before_tags = read_tags(args.meta_base_path, meta_key)
+                    before_tags = read_tags(args.target_path, meta_key)
                     more_tags = result.general_tags_string.split(", ")
                     more_tags_not_in_before = [tag for tag in more_tags if tag not in before_tags]
                     final_tags = before_tags + more_tags_not_in_before
-                    write_tags(args.meta_base_path, meta_key, final_tags)
+                    write_tags(args.target_path, meta_key, final_tags)
                 except Exception:
                     logger.exception('Error processing metadata "%s"', image_path)
         result_queue.put(len(batch_files))
@@ -120,7 +120,7 @@ class TaggingProcessor:
     def __init__(  # noqa: PLR0913
         self,
         img_path: str | PathLike,
-        meta_path: str | PathLike | None = None,
+        target_path: str | PathLike | None = None,
         *,
         num_workers: int = 4,
         batch_size: int = 16,
@@ -129,12 +129,12 @@ class TaggingProcessor:
         recursive: bool = True,
     ) -> None:
         """Initialize."""
-        self.img_path = Path(img_path)
-        if not meta_path:
+        self.img_path = Path(img_path).absolute()
+        if not target_path:
             logger.info("Metadata path not set. Using %s as metadata path.", self.img_path / "metadata")
-            self.meta_path = self.img_path / "metadata"
+            self.target_path = self.img_path / "metadata"
         else:
-            self.meta_path = Path(meta_path)
+            self.target_path = Path(target_path).absolute()
 
         self.num_workers = num_workers
         self.skip_existing = skip_existing
@@ -144,13 +144,11 @@ class TaggingProcessor:
         logger.info(f"Found {len(self.image_paths)} images in {self.img_path}")
         self.skip_count = 0
         if skip_existing:
-            tags_base_path = self.meta_path / "tags"
+            tags_base_path = self.target_path / "tags"
             already_exists = retrieve_text_path(tags_base_path)
             already_exists_relative_path = {p.relative_to(tags_base_path) for p in already_exists}
             before_count = len(self.image_paths)
-            self.image_paths = [
-                p for p in self.image_paths if p.relative_to(self.img_path).with_suffix(".txt") not in already_exists_relative_path
-            ]
+            self.image_paths = [p for p in self.image_paths if p.relative_to(self.img_path).with_suffix(".txt") not in already_exists_relative_path]
             after_count = len(self.image_paths)
             self.skip_count = before_count - after_count
             logger.info("Skipping %s - %s = %s existing files", f"{before_count:,}", f"{after_count:,}", f"{self.skip_count:,}")
@@ -185,7 +183,7 @@ class TaggingProcessor:
                 target=worker,
                 args=(
                     WorkerArgs(
-                        meta_base_path=self.meta_path,
+                        target_path=self.target_path,
                         image_paths=self.image_paths,
                         task_queue=self.task_queue,
                         result_queue=self.result_queue,

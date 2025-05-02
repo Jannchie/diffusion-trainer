@@ -4,7 +4,7 @@ import logging
 
 from rich.logging import RichHandler
 
-logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
+logging.basicConfig(level=logging.INFO, format="%(name)s :: %(message)s", datefmt="[%X]", handlers=[RichHandler()])
 
 if __name__ == "__main__":
     import tomllib
@@ -16,8 +16,15 @@ if __name__ == "__main__":
 
     logger = logging.getLogger(__name__)
 
+    diffusers_logger = logging.getLogger("diffusers")
+    diffusers_logger.setLevel(logging.ERROR)
+
+    lycoris_logger = logging.getLogger("LyCORIS")
+    lycoris_logger.setLevel(logging.ERROR)
+
     parser = ArgumentParser()
-    parser.add_argument("--config", type=str)
+
+    parser.add_argument("--config", type=str, default="configs/sd15.toml", help="Path to the config file.")
     parser.add_argument("--model_family", type=str, default="sd15", choices=["sd15", "sdxl"])
     args = parser.parse_args()
 
@@ -31,6 +38,9 @@ if __name__ == "__main__":
         tuner = SDXLTuner(config)
         tuner.train()
     elif model_family == "sd15":
+        from diffusion_trainer.config import SD15Config
+        from diffusion_trainer.finetune.sd15 import SD15Tuner
+
         config = SD15Config(**config_dict)
         tuner = SD15Tuner(config)
         tuner.train()

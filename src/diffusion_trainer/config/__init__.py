@@ -14,10 +14,10 @@ class SampleOptions:
 @dataclass
 class BaseConfig:
     model_path: str = field(metadata={"help": "Path to the model."})
+    meta_path: str = field(metadata={"help": "Path to the metadata."})
     image_path: str | None = field(default=None, metadata={"help": "Path to the images."})
     skip_prepare_image: bool = field(default=False, metadata={"help": "Skip preparing the images."})
 
-    meta_path: str | None = field(default=None, metadata={"help": "Path to the metadata."})
     vae_path: str | None = field(default=None, metadata={"help": "Path to the VAE."})
     vae_dtype: str = field(default="fp32", metadata={"help": "the VAE dtype."})
 

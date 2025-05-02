@@ -24,7 +24,7 @@ from diffusion_trainer.shared import get_progress, logger
 class Args:
     """Dataclass to store arguments for the script."""
 
-    ds_path: str
+    img_path: str
     target_path: str
     vae_path: str
     meta_path: str
@@ -67,12 +67,14 @@ class SimpleLatentsProcessor:
 
     def load_vae_model(self) -> AutoencoderKL:
         """Load the VAE model."""
-        logger.info("Loading vae")
         path = Path(self.model_name_or_path)
-        if path.is_file():
-            vae = AutoencoderKL.from_single_file(self.model_name_or_path, torch_dtype=self.dtype)  # type: ignore
+
+        if path.suffix == ".safetensors":
+            logger.info("Loading vae from file %s", path)
+            vae = AutoencoderKL.from_single_file(self.model_name_or_path, torch_dtype=self.dtype)
         else:
-            vae = AutoencoderKL.from_pretrained(self.model_name_or_path, torch_dtype=self.dtype)  # type: ignore
+            logger.info("Loading vae from folder %s", path)
+            vae = AutoencoderKL.from_pretrained(self.model_name_or_path, torch_dtype=self.dtype)
         vae = vae.to(self.device).eval()  # type: ignore
         logger.info("Loaded vae (%s) - dtype = %s, device = %s", self.model_name_or_path, vae.dtype, vae.device)
         return vae
@@ -94,9 +96,7 @@ class SimpleLatentsProcessor:
             bucket_reso[0] / bucket_reso[1],
             image_size[0] / image_size[1],
         )
-        resized_width, resized_height = (
-            (bucket_reso[1] * image_ar, bucket_reso[1]) if bucket_ar > image_ar else (bucket_reso[0], bucket_reso[0] / image_ar)
-        )
+        resized_width, resized_height = (bucket_reso[1] * image_ar, bucket_reso[1]) if bucket_ar > image_ar else (bucket_reso[0], bucket_reso[0] / image_ar)
         crop_left, crop_top = (bucket_reso[0] - int(resized_width)) // 2, (bucket_reso[1] - int(resized_height)) // 2
         return (
             crop_left,
@@ -188,16 +188,17 @@ class LatentsGenerateProcessor:
 
     def __init__(  # noqa: PLR0913
         self,
+        *,
         vae_path: str,
         img_path: str,
-        meta_path: str,
+        target_path: str,
         vae_dtype: torch.dtype | None = None,
         num_reader: int = 4,
         num_writer: int = 4,
     ) -> None:
         """Initialize the ImageProcessingPipeline class."""
-        self.ds_path = Path(img_path)
-        self.meta_path = Path(meta_path)
+        self.ds_path = Path(img_path).absolute()
+        self.meta_path = Path(target_path).absolute()
         self.num_reader = num_reader
         self.num_writer = num_writer
 
@@ -215,9 +216,7 @@ class LatentsGenerateProcessor:
         self.progress_lock = threading.Lock()
 
         self.gpu_count = torch.cuda.device_count()
-        self.processor_list = [
-            SimpleLatentsProcessor(model_name_or_path=vae_path, dtype=vae_dtype, device=f"cuda:{i}") for i in range(self.gpu_count)
-        ]
+        self.processor_list = [SimpleLatentsProcessor(model_name_or_path=vae_path, dtype=vae_dtype, device=f"cuda:{i}") for i in range(self.gpu_count)]
 
         self.lock = threading.Lock()
 
@@ -401,19 +400,19 @@ class LatentsGenerateProcessor:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ds_path", type=str, required=True)
+    parser.add_argument("--img_path", type=str, required=True)
     parser.add_argument("--target_path", type=str, required=True)
     parser.add_argument("--vae_path", type=str, required=True)
     parser.add_argument("--meta_path", type=str, required=True)
     args = parser.parse_args()
     args = Args(**vars(args))
 
-    ds_path = args.ds_path
+    img_path = args.img_path
     meta_path = args.meta_path
     vae_path = args.vae_path
     target_path = args.target_path
 
-    pipeline = LatentsGenerateProcessor(vae_path, ds_path, target_path)
+    pipeline = LatentsGenerateProcessor(vae_path=vae_path, img_path=img_path, target_path=target_path)
 
     pipeline.__call__()
     pipeline.process_ss_meta(meta_path)

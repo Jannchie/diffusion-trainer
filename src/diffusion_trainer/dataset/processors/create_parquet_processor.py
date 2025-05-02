@@ -7,17 +7,22 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from rich import get_console
+from rich.console import Console
 
 from diffusion_trainer.dataset.utils import retrieve_npz_path
 from diffusion_trainer.shared import get_progress
 
+console = get_console()
+
 
 class CreateParquetProcessor:
-    def __init__(self, meta_dir: str | PathLike) -> None:
-        self.meta_dir = Path(meta_dir)
-        self.latents_dir = (self.meta_dir / "latents").resolve()
-        self.tags_dir = (self.meta_dir / "tags").resolve()
-        self.captions_dir = (self.meta_dir / "captions").resolve()
+    def __init__(self, target_dir: str | PathLike, console: Console = console) -> None:
+        self.target_dir = Path(target_dir)
+        self.latents_dir = (self.target_dir / "latents").resolve()
+        self.tags_dir = (self.target_dir / "tags").resolve()
+        self.captions_dir = (self.target_dir / "captions").resolve()
+        self.console = console
 
     lock = threading.Lock()
 
@@ -27,7 +32,8 @@ class CreateParquetProcessor:
     def process(self, max_workers: int) -> None:
         items = defaultdict(list)
         progress = get_progress()
-        npz_path_list = list(retrieve_npz_path(Path(self.meta_dir)))
+        npz_path_list = list(retrieve_npz_path(self.target_dir))
+        self.console.log(self.target_dir)
         task = progress.add_task("Processing metadata files", total=len(npz_path_list))
 
         def process_metadata_files(
@@ -35,8 +41,8 @@ class CreateParquetProcessor:
         ) -> None:
             key = npz_path.relative_to(self.latents_dir).with_suffix("")
             npz = np.load(npz_path)
-            tag_file = self.meta_dir / "tags" / f"{key}.txt"
-            caption_file = self.meta_dir / "caption" / f"{key}.txt"
+            tag_file = self.target_dir / "tags" / f"{key}.txt"
+            caption_file = self.target_dir / "captions" / f"{key}.txt"
 
             caption = caption_file.read_text() if caption_file.exists() else ""
             tags = tag_file.read_text().split(",") if tag_file.exists() else []
@@ -55,4 +61,4 @@ class CreateParquetProcessor:
                 executor.submit(process_metadata_files, npz_path)
 
         table = pa.table(items)
-        pq.write_table(table, self.meta_dir / "metadata.parquet")
+        pq.write_table(table, self.target_dir / "metadata.parquet")

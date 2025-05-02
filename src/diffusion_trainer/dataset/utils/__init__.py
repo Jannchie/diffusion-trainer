@@ -41,8 +41,7 @@ def retrieve_image_paths(dir_path: Path | str, *, ignore_hidden: bool = True, re
                 if path.suffix[1:].lower() in IMAGE_EXTENSIONS:
                     yield path
     else:
-        for file in os.listdir(dir_path):
-            path = dir_path / file
+        for path in dir_path.iterdir():
             if ignore_hidden and is_hidden_file(path):
                 continue
             if path.suffix[1:].lower() in IMAGE_EXTENSIONS:
@@ -61,8 +60,7 @@ def retrieve_npz_path(dir_path: Path | str, *, ignore_hidden: bool = True, recur
                 if path.suffix[1:].lower() in NPZ_EXTENSIONS:
                     yield path
     else:
-        for file in os.listdir(dir_path):
-            path = dir_path / file
+        for path in dir_path.iterdir():
             if ignore_hidden and is_hidden_file(path):
                 continue
             if path.suffix[1:].lower() in NPZ_EXTENSIONS:
@@ -81,8 +79,7 @@ def retrieve_text_path(dir_path: Path | str, *, ignore_hidden: bool = True, recu
                 if path.suffix[1:].lower() in ("txt",):
                     yield path
     else:
-        for file in os.listdir(dir_path):
-            path = dir_path / file
+        for path in dir_path.iterdir():
             if ignore_hidden and is_hidden_file(path):
                 continue
             if path.suffix[1:].lower() in ("txt",):

@@ -8,3 +8,6 @@ diffusers_training_scripts/
 out/
 demo_meta/
 models/
+
+cache
+test_dataset
