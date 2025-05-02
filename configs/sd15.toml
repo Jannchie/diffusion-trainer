@@ -14,19 +14,19 @@ optimizer = "adamW8bit"
 
 model_name = "creative-test"
 
-mode = 'lokr'
+mode = 'full-finetune'
 
 n_epochs = 50
-batch_size = 1
-gradient_accumulation_steps = 1
+batch_size = 8
+gradient_accumulation_steps = 4 # 增加梯度累积步数
 
-save_every_n_epochs = 1
-save_every_n_steps = 5
+save_every_n_epochs = 999
+save_every_n_steps = 500
 
-preview_every_n_epochs = 1
-preview_every_n_steps = 100
+preview_every_n_epochs = 999
+preview_every_n_steps = 500
 
-mixed_precision = "fp16"
+mixed_precision = "bf16"
 weight_dtype = "fp32"
 save_dtype = "fp16"
 
@@ -48,6 +48,10 @@ use_ema = false
 
 gradient_checkpointing = true
 
+zero_grad_set_to_none = true # 设置为true以减少内存使用
+
+# # 增加lokr_factor以减少训练参数
+# lokr_factor = 32  # 从16增加到32
 
 [[preview_sample_options]]
 prompt = "1girl, blonde_hair, armor, weapon, blood, gauntlets, sword, rain, blue_eyes, blood_on_face, excalibur_(fate/stay_night), lips, armored_dress, holding, holding_weapon, realistic, solo"

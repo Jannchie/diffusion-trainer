@@ -66,6 +66,10 @@ class SD15Tuner(BaseTuner):
 
         self.accelerator = prepare_accelerator(self.config.gradient_accumulation_steps, self.mixed_precision, self.config.log_with)
 
+        # 使用 torch.cuda.empty_cache() 确保在加载模型前清理GPU内存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         self.models = SD15Models(
             unet=self.pipeline.unet,
             text_encoder=self.pipeline.text_encoder,
@@ -73,6 +77,10 @@ class SD15Tuner(BaseTuner):
         self.models.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.models.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         self.lycoris_model: LycorisNetwork | None = None
+
+        # 确认梯度检查点启用
+        if self.config.gradient_checkpointing:
+            self.init_gradient_checkpointing(self.accelerator, list(self.models))
 
         for key, value in config.__dict__.items():
             self.logger.info("%s: %s", key, value)
@@ -88,6 +96,8 @@ class SD15Tuner(BaseTuner):
 
         trainable_models_with_lr = self.configure_trainable_models(self.models)
         trainable_models = [model.model for model in trainable_models_with_lr]
+        for model in trainable_models:
+            model.train()
         freeze_models = [model for model in self.models if model not in trainable_models]
         self.freeze_model(self.accelerator, freeze_models)
 
@@ -126,6 +136,7 @@ class SD15Tuner(BaseTuner):
         )
         self.lr_scheduler = self.accelerator.prepare(lr_scheduler)
         self.accelerator.init_trackers(f"diffusion-trainer-{self.config.mode}", config=self.config.__dict__)
+
         self.execute_training_epoch(
             self.accelerator,
             data_loader,
@@ -166,24 +177,37 @@ class SD15Tuner(BaseTuner):
         )
 
     def train_each_batch(self, batch: SD15Batch) -> None:
+        # 使用统一的精度
         img_latents = self.pipeline.vae.config.get("scaling_factor", 0) * batch.img_latents.to(self.accelerator.device)
         prompt_embeds = batch.prompt_embeds.to(self.accelerator.device)
+
+        # 只保留必须的变量，及时释放不再需要的内存
         noise = self.sample_noise(img_latents)
         timesteps = self.sample_timesteps(img_latents.shape[0])
-        img_noisy_latents = self.noise_scheduler.add_noise(img_latents.float(), noise.float(), timesteps).to(self.weight_dtype)
+
+        # 统一使用指定的dtype，避免精度转换消耗额外内存
+        img_noisy_latents = self.noise_scheduler.add_noise(
+            img_latents.to(self.weight_dtype),
+            noise.to(self.weight_dtype),
+            timesteps,
+        )
+
+        # 释放不再需要的变量
+        del noise
 
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds)
-        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)
+        target = self.get_pred_target(img_latents, self.sample_noise(img_latents), timesteps, model_pred)
+
+        # 释放不再需要的变量
+        del img_latents, img_noisy_latents
+
         loss = self.get_loss(timesteps, model_pred, target)
 
+        # 释放不再需要的变量
+        del model_pred, target, timesteps
+
         if torch.isnan(loss):
-            self.logger.info("img_latents: %s %s", img_latents.shape, img_latents.mean())
-            self.logger.info("prompt_embeds: %s %s", prompt_embeds.shape, prompt_embeds.mean())
-            self.logger.info("noise: %s %s", noise.shape, noise.mean())
-            self.logger.info("timesteps: %s %s", timesteps.shape, timesteps)
-            self.logger.info("img_noisy_latents: %s %s", img_noisy_latents.shape, img_noisy_latents.mean())
-            self.logger.info("model_pred: %s %s", model_pred.shape, model_pred.mean())
-            self.logger.info("target: %s %s", target.shape, target.mean())
+            self.logger.info("Loss is NaN.")
             msg = "Loss is NaN."
             raise ValueError(msg)
 
@@ -191,6 +215,9 @@ class SD15Tuner(BaseTuner):
         self.train_loss += avg_loss.item() / self.config.gradient_accumulation_steps
 
         self.accelerator.backward(loss)
+
+        # 释放不再需要的变量
+        del loss, avg_loss
 
         if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
             params_to_clip = self.pipeline.unet.parameters()
@@ -200,6 +227,10 @@ class SD15Tuner(BaseTuner):
         self.lr_scheduler.step()
         # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
         self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
+
+        # 定期清理缓存
+        if self.accelerator.sync_gradients and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def get_model_pred(
         self,

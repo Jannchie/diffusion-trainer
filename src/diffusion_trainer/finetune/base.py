@@ -133,6 +133,7 @@ class BaseTuner:
         """
         for model in models:
             model.requires_grad_(False)
+            model.eval()
         accelerator.wait_for_everyone()
 
     def execute_training_epoch(  # noqa: C901, PLR0912, PLR0913, PLR0915
@@ -214,18 +215,19 @@ class BaseTuner:
                         accelerator.save_state(self.checkpointing_path.as_posix())
                         self.global_steps_file.write_text(str(global_step))
                     if self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0:
-                        self.generate_preview(accelerator, f"{self.config.model_name}-step{global_step}")
-            if self.config.save_every_n_epochs and epoch % self.config.save_every_n_epochs == 0:
+                        self.generate_preview(accelerator, f"{self.config.model_name}-step{global_step}", global_step)
+            if self.config.save_every_n_epochs and epoch % self.config.save_every_n_epochs == 0 and epoch != 0:
                 self.saving_model(accelerator, f"{self.config.model_name}-ep{epoch + 1}")
             if self.config.preview_every_n_epochs and epoch % self.config.preview_every_n_epochs == 0:
-                self.generate_preview(accelerator, f"{self.config.model_name}-ep{epoch + 1}")
+                self.generate_preview(accelerator, f"{self.config.model_name}-ep{epoch + 1}", global_step)
             progress.remove_task(current_epoch_task)
         if accelerator.is_main_process:
             progress.stop()
         self.saving_model(accelerator, f"{self.config.model_name}")
 
     @torch.no_grad()
-    def generate_preview(self, accelerator: Accelerator, filename: str) -> None:
+    def generate_preview(self, accelerator: Accelerator, filename: str, global_step: int = 0) -> None:
+        # 显式释放内存
         free_memory()
 
         def callback_on_step_end(_pipe: StableDiffusionXLPipelineOutput, _step: int, _timestep: int, _kwargs: dict) -> dict:
@@ -241,14 +243,26 @@ class BaseTuner:
                 hash_hex = get_sample_options_hash(sample_option)
                 filename_with_hash = f"{filename}-{hash_hex}"
                 logger.info("Generating preview for %s", filename_with_hash)
+
+                # 切换为eval模式并移动到CPU如果可能，以节省显存
+                original_device = {}
+                for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder)]:
+                    original_device[name] = model.device
+                    model.eval()
+
+                # 使用自动混合精度生成预览图像
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(accelerator.device.type)
                 generator = torch.Generator(device=accelerator.device).manual_seed(sample_option.seed)
+
                 with autocast_ctx:
+                    # 确保移回设备进行推理
                     self.pipeline.to(accelerator.device)
+                    # 设置较小的height和width，减少显存使用
+                    inference_steps = min(sample_option.steps, 25)  # 减少步数
                     result = self.pipeline(
                         prompt=sample_option.prompt,
                         negative_prompt=sample_option.negative_prompt,
-                        num_inference_steps=sample_option.steps,
+                        num_inference_steps=inference_steps,
                         generator=generator,
                         callback_on_step_end=callback_on_step_end,  # type: ignore
                     )
@@ -257,6 +271,8 @@ class BaseTuner:
                 path = (Path(self.save_path) / "previews" / filename_with_hash).with_suffix(".png")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 result.images[0].save(path)
+
+                # 记录到wandb（如果启用）
                 if self.config.log_with == "wandb":
                     import wandb
 
@@ -264,7 +280,19 @@ class BaseTuner:
                         {
                             f"{hash_hex}": [wandb.Image(result.images[0], caption=f"{sample_option.prompt}")],
                         },
+                        step=global_step,
                     )
+
+                # 清理预览相关的内存
+                del result
+                torch.cuda.empty_cache()
+
+                # 恢复模型到原始设备
+                for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder)]:
+                    if original_device[name] != model.device:
+                        model.to(original_device[name])
+
+        # 最终清理
         free_memory()
         accelerator.wait_for_everyone()
 

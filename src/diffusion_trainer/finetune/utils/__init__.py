@@ -16,6 +16,7 @@ from accelerate import Accelerator, DeepSpeedPlugin, DistributedDataParallelKwar
 from accelerate.utils import PrecisionType, ProfileKwargs
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
+from diffusers.utils.torch_utils import is_compiled_module
 
 from diffusion_trainer.config import SampleOptions
 
@@ -117,11 +118,14 @@ def prepare_accelerator(
         msg = f"Unsupported dtype: {dtype}"
         raise ValueError(msg)
 
+    # 启用torch.compile (PyTorch 2.0+)
     dynamo_backend = None
-    torch_compile = False
+    torch_compile = torch.__version__ >= "2.0.0"
 
     if torch_compile:
+        # 使用inductor后端，这是PyTorch 2.0中最快的后端
         dynamo_backend = "inductor"
+        logger.info("Torch compile enabled with %s backend", dynamo_backend)
 
     deepspeed_plugin = prepare_deepspeed_plugin()
     ddp_kwargs = prepare_ddp_kwargs()
@@ -204,7 +208,7 @@ def load_pipeline(path: PathLike | str, dtype: torch.dtype, pipe_type: type[T]) 
 
 def unwrap_model(accelerator: Accelerator, model: torch.nn.Module) -> torch.nn.Module:
     model = accelerator.unwrap_model(model)
-    return model._orig_mod if is_compiled_module(model) else model  # type: ignore # noqa: SLF001
+    return model._orig_mod if is_compiled_module(model) else model  # type: ignore
 
 
 def get_n_params(trainable_parameters: list[ParamDict]) -> int:
