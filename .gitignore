@@ -9,5 +9,5 @@ out/
 demo_meta/
 models/
 
-cache
+datasets
 test_dataset
