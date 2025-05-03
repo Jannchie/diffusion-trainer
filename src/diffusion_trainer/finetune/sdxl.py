@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from accelerate.logging import get_logger
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel, compute_snr
 from torch.utils.data import DataLoader
@@ -27,7 +28,6 @@ from diffusion_trainer.finetune.utils import (
     initialize_optimizer,
     load_sdxl_pipeline,
     prepare_accelerator,
-    str_to_dtype,
 )
 from diffusion_trainer.finetune.utils.lora import apply_lora_config
 from diffusion_trainer.utils.timestep_weights import logit_timestep_weights
@@ -63,6 +63,7 @@ class SDXLTuner(BaseTuner):
 
     def __init__(self, config: SDXLConfig) -> None:
         """Initialize."""
+        super().__init__(config)
         self.config = config
         self.apply_seed_settings(self.config.seed)
 
@@ -70,9 +71,6 @@ class SDXLTuner(BaseTuner):
         self.save_dir = config.save_dir
 
         self.save_path = Path(self.save_dir) / self.model_name
-
-        self.save_dtype = str_to_dtype(config.save_dtype)
-        self.weight_dtype = str_to_dtype(config.weight_dtype)
 
         self.batch_size = config.batch_size
         self.gradient_accumulation_steps = config.gradient_accumulation_steps
@@ -87,16 +85,9 @@ class SDXLTuner(BaseTuner):
 
         self.use_ema = config.use_ema
 
-        self.save_every_n_epochs = config.save_every_n_epochs
-        self.save_every_n_steps = config.save_every_n_steps
-
-        self.mixed_precision = str_to_dtype(config.mixed_precision)
-
         self.accelerator = prepare_accelerator(self.gradient_accumulation_steps, self.mixed_precision, self.config.log_with)
         self.logger = get_logger("diffusion_trainer.finetune.sdxl")
         self.device = self.accelerator.device
-
-        self.pipeline = load_sdxl_pipeline(self.config.model_path, self.weight_dtype)
 
         sdxl_models = SDXLModels(
             unet=self.pipeline.unet.to(self.device, dtype=self.weight_dtype),
@@ -113,6 +104,9 @@ class SDXLTuner(BaseTuner):
         for key, value in config.__dict__.items():
             self.logger.info("%s: %s", key, value)
 
+    def get_pipeline(self) -> DiffusionPipeline:
+        return load_sdxl_pipeline(self.config.model_path, self.weight_dtype)
+
     def configure_trainable_models(self, config: SDXLConfig, sdxl_models: SDXLModels) -> None:
         self.trainable_models_with_lr: list[TrainableModel] = []
         if config.mode == "full-finetune":
@@ -126,9 +120,9 @@ class SDXLTuner(BaseTuner):
 
         elif config.mode in ("lora", "lokr", "loha"):
             # 如果是高效微调，则模型本身无需训练，只需训练Lora模型。
-            lycoris_model = apply_lora_config(config.mode, sdxl_models.unet)
-            self.trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=config.unet_lr))
-            self.models.append(lycoris_model)
+            self.lycoris_model = apply_lora_config(config.mode, sdxl_models.unet)
+            self.trainable_models_with_lr.append(TrainableModel(model=self.lycoris_model, lr=config.unet_lr))
+            self.models.append(self.lycoris_model)
         else:
             msg = f"Unknown mode {config.mode}"
             raise ValueError(msg)
@@ -198,13 +192,14 @@ class SDXLTuner(BaseTuner):
         self.log_training_parameters()
 
         self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
-        self.execute_training_epoch(num_update_steps_per_epoch, n_total_steps)
-
-    def save_full_finetune_model(self, filename: str) -> None:
-        self.save_path.mkdir(parents=True, exist_ok=True)
-        self.pipeline.to(self.save_dtype)
-        self.pipeline.save_pretrained(self.save_path / f"{filename}")
-        self.pipeline.to(self.weight_dtype)
+        self.execute_training_epoch(
+            self.accelerator,
+            self.data_loader,
+            self.lr_scheduler,
+            self.training_models,
+            num_update_steps_per_epoch,
+            n_total_steps,
+        )
 
     def log_training_parameters(self) -> None:
         if self.accelerator.is_main_process:
@@ -400,3 +395,7 @@ class SDXLTuner(BaseTuner):
             msg = f"Unknown timestep bias strategy {self.timestep_bias_strategy}"
             raise ValueError(msg)
         return timesteps  # type: ignore
+
+    def sample_noise(self, latents: torch.Tensor) -> torch.Tensor:
+        """Sample noise that will be added to the latents."""
+        return torch.randn_like(latents)
