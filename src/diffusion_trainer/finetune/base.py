@@ -313,7 +313,7 @@ class BaseTuner:
 
                     if accelerator.is_main_process:
                         current_completed = global_step % num_update_steps_per_epoch
-                        progress.update(total_task, completed=global_step, description=f"Epoch: {epoch + 1}")
+                        progress.update(total_task, completed=global_step, description=f"Epoch: {epoch}")
                         progress.update(current_epoch_task, completed=current_completed, description=f"Lr: {current_lr:.2e}")
 
                     if self.config.save_every_n_steps and global_step % self.config.save_every_n_steps == 0 and global_step != 0:
@@ -324,9 +324,9 @@ class BaseTuner:
                     if self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0:
                         self.generate_preview(accelerator, f"{self.config.model_name}-step{global_step}", global_step)
             if self.config.save_every_n_epochs and epoch % self.config.save_every_n_epochs == 0 and epoch != 0:
-                self.saving_model(accelerator, f"{self.config.model_name}-ep{epoch + 1}")
+                self.saving_model(accelerator, f"{self.config.model_name}-ep{epoch}")
             if self.config.preview_every_n_epochs and epoch % self.config.preview_every_n_epochs == 0:
-                self.generate_preview(accelerator, f"{self.config.model_name}-ep{epoch + 1}", global_step)
+                self.generate_preview(accelerator, f"{self.config.model_name}-ep{epoch}", global_step)
             progress.remove_task(current_epoch_task)
         if accelerator.is_main_process:
             progress.stop()
