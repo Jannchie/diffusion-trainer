@@ -299,8 +299,18 @@ class BaseTuner:
                     raise TypeError(msg)
                 batch = self.process_batch(orig_batch)
 
+                # Free up memory from original batch if it contains large tensors
+                del orig_batch
+
                 with accelerator.accumulate(training_models):
                     self.train_each_batch(batch)
+
+                    # Free up processed batch memory
+                    del batch
+
+                    # Manually trigger garbage collection after each batch
+                    if hasattr(torch.cuda, "empty_cache") and accelerator.sync_gradients:
+                        torch.cuda.empty_cache()
 
                 if accelerator.sync_gradients:
                     current_lr = lr_scheduler.get_last_lr()[0]

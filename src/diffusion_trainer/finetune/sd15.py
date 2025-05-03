@@ -158,34 +158,31 @@ class SD15Tuner(BaseTuner):
         )
 
     def train_each_batch(self, batch: SD15Batch) -> None:
-        # 使用统一的精度
-        img_latents = self.pipeline.vae.config.get("scaling_factor", 0) * batch.img_latents.to(self.accelerator.device)
-        prompt_embeds = batch.prompt_embeds.to(self.accelerator.device)
+        # Convert all tensors to correct precision at once to reduce memory overhead
+        img_latents = self.pipeline.vae.config.get("scaling_factor", 0) * batch.img_latents.to(self.accelerator.device, dtype=self.weight_dtype)
+        prompt_embeds = batch.prompt_embeds.to(self.accelerator.device, dtype=self.weight_dtype)
 
-        # 只保留必须的变量，及时释放不再需要的内存
+        # Generate noise and timesteps
         noise = self.sample_noise(img_latents)
         timesteps = self.sample_timesteps(img_latents.shape[0])
 
-        # 统一使用指定的dtype，避免精度转换消耗额外内存
-        img_noisy_latents = self.noise_scheduler.add_noise(
-            img_latents.to(self.weight_dtype),
-            noise.to(self.weight_dtype),
-            timesteps,
-        )
+        # Apply noise directly with the correct dtype
+        img_noisy_latents = self.noise_scheduler.add_noise(img_latents, noise, timesteps)
 
-        # 释放不再需要的变量
-        del noise
-
+        # Get model prediction
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds)
-        target = self.get_pred_target(img_latents, self.sample_noise(img_latents), timesteps, model_pred)
 
-        # 释放不再需要的变量
-        del img_latents, img_noisy_latents
+        # Calculate target and free memory we no longer need
+        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)
 
+        # Free intermediate tensors to save memory
+        del noise, img_noisy_latents
+
+        # Calculate loss
         loss = self.get_loss(timesteps, model_pred, target)
 
-        # 释放不再需要的变量
-        del model_pred, target, timesteps
+        # Free more memory
+        del model_pred, target, img_latents
 
         if torch.isnan(loss):
             self.logger.info("Loss is NaN.")
@@ -197,7 +194,7 @@ class SD15Tuner(BaseTuner):
 
         self.accelerator.backward(loss)
 
-        # 释放不再需要的变量
+        # Free memory after backward pass
         del loss, avg_loss
 
         if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:

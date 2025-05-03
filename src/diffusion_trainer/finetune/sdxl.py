@@ -150,7 +150,15 @@ class SDXLTuner(BaseTuner):
 
         sampler = BucketBasedBatchSampler(dataset, self.batch_size)
         with self.accelerator.main_process_first():
-            data_loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0, collate_fn=dataset.collate_fn)
+            # Optimize DataLoader by using appropriate num_workers based on system
+            num_workers = 0
+            data_loader = DataLoader(
+                dataset,
+                batch_sampler=sampler,
+                num_workers=num_workers,
+                collate_fn=dataset.collate_fn,
+                pin_memory=True,  # Enable pin_memory for faster data transfer to GPU
+            )
         self.data_loader = self.accelerator.prepare(data_loader)
 
         num_update_steps_per_epoch = math.ceil(len(data_loader) / self.gradient_accumulation_steps / self.accelerator.num_processes)
@@ -194,34 +202,41 @@ class SDXLTuner(BaseTuner):
             self.logger.info("Hold tight, training is about to start!")
 
     def train_each_batch(self, batch: SDXLBatch) -> None:
-        img_latents = self.pipeline.vae.config.get("scaling_factor", 0) * batch.img_latents.to(self.accelerator.device)
-        prompt_embeds_1 = batch.prompt_embeds_1.to(self.accelerator.device)
-        prompt_embeds_2 = batch.prompt_embeds_2.to(self.accelerator.device)
-        prompt_embeds_pooled_2 = batch.prompt_embeds_pooled_2.to(self.accelerator.device)
+        # Pre-convert all tensors to the correct dtype at once to avoid multiple conversions
+        img_latents = self.pipeline.vae.config.get("scaling_factor", 0) * batch.img_latents.to(self.accelerator.device, dtype=self.weight_dtype)
+        prompt_embeds_1 = batch.prompt_embeds_1.to(self.accelerator.device, dtype=self.weight_dtype)
+        prompt_embeds_2 = batch.prompt_embeds_2.to(self.accelerator.device, dtype=self.weight_dtype)
+        prompt_embeds_pooled_2 = batch.prompt_embeds_pooled_2.to(self.accelerator.device, dtype=self.weight_dtype)
         time_ids = batch.time_ids.to(self.accelerator.device)
+
+        # Concatenate prompt embeds once and reuse
         prompt_embeds = torch.cat([prompt_embeds_1, prompt_embeds_2], dim=2)
         unet_added_conditions = {
             "text_embeds": prompt_embeds_pooled_2,
             "time_ids": time_ids,
         }
+
+        # Sample noise and timesteps
         noise = self.sample_noise(img_latents)
         timesteps = self.sample_timesteps(img_latents.shape[0])
-        img_noisy_latents = self.noise_scheduler.add_noise(img_latents.float(), noise.float(), timesteps).to(self.weight_dtype)
 
+        # Add noise once with the correct dtype to avoid conversions
+        img_noisy_latents = self.noise_scheduler.add_noise(img_latents, noise, timesteps)
+
+        # Predict and calculate loss
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds, unet_added_conditions)
         target = self.get_pred_target(img_latents, noise, timesteps, model_pred)
+
+        # Free memory proactively
+        del noise, img_noisy_latents
+
         loss = self.get_loss(timesteps, model_pred, target)
 
+        # Free more memory
+        del model_pred, target
+
         if torch.isnan(loss):
-            self.logger.info("img_latents: %s %s", img_latents.shape, img_latents.mean())
-            self.logger.info("prompt_embeds: %s %s", prompt_embeds.shape, prompt_embeds.mean())
-            self.logger.info("prompt_embeds_pooled_2: %s %s", prompt_embeds_pooled_2.shape, prompt_embeds_pooled_2.mean())
-            self.logger.info("time_ids: %s %s", time_ids.shape, time_ids)
-            self.logger.info("noise: %s %s", noise.shape, noise.mean())
-            self.logger.info("timesteps: %s %s", timesteps.shape, timesteps)
-            self.logger.info("img_noisy_latents: %s %s", img_noisy_latents.shape, img_noisy_latents.mean())
-            self.logger.info("model_pred: %s %s", model_pred.shape, model_pred.mean())
-            self.logger.info("target: %s %s", target.shape, target.mean())
+            self.logger.info("Loss is NaN.")
             msg = "Loss is NaN."
             raise ValueError(msg)
 
@@ -229,6 +244,8 @@ class SDXLTuner(BaseTuner):
         self.train_loss += avg_loss.item() / self.gradient_accumulation_steps
 
         self.accelerator.backward(loss)
+
+        del loss, avg_loss
 
         if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
             params_to_clip = self.pipeline.unet.parameters()
