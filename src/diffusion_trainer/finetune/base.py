@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.nn.functional as F
 from accelerate import Accelerator, PartialState
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
-from diffusers.training_utils import free_memory
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from diffusers.training_utils import compute_snr, free_memory
 
 from diffusion_trainer.config import BaseConfig, SampleOptions
 from diffusion_trainer.dataset.dataset import DiffusionBatch, DiffusionDataset
@@ -20,10 +22,12 @@ from diffusion_trainer.dataset.processors.latents_generate_processor import Late
 from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
 from diffusion_trainer.finetune.utils import (
     get_sample_options_hash,
+    prepare_accelerator,
     str_to_dtype,
     unwrap_model,
 )
 from diffusion_trainer.shared import get_progress
+from diffusion_trainer.utils.timestep_weights import logit_timestep_weights
 
 if TYPE_CHECKING:
     from lycoris import LycorisNetwork
@@ -47,8 +51,18 @@ class BaseTuner:
         self.mixed_precision = str_to_dtype(config.mixed_precision)
         self.weight_dtype = str_to_dtype(config.weight_dtype)
         self.save_dtype = str_to_dtype(config.save_dtype)
+
+        self.accelerator = prepare_accelerator(
+            config.gradient_accumulation_steps,
+            self.mixed_precision,
+            config.log_with,
+        )
+        self.device = self.accelerator.device
+
         self.pipeline = self.get_pipeline()
         self.lycoris_model: LycorisNetwork | None = None
+        self.noise_scheduler: DDPMScheduler = self.get_noise_scheduler()
+        self.train_loss = 0.0
 
     @abstractmethod
     def train(self) -> None:
@@ -72,6 +86,77 @@ class BaseTuner:
     def train_each_batch(self, batch: Any) -> None:  # noqa: ANN401
         msg = "This method should be implemented in subclasses."
         raise NotImplementedError(msg)
+
+    def get_loss(self, timesteps: torch.Tensor, model_pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if self.config.snr_gamma is None:
+            loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
+            loss = loss.mean()
+        else:
+            # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
+            # Since we predict the noise instead of x_0, the original formulation is slightly changed.
+            # This is discussed in Section 4.2 of the same paper.
+            snr = compute_snr(self.noise_scheduler, timesteps)
+            mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
+            if self.noise_scheduler.config.get("prediction_type") == "epsilon":
+                epsilon = 1e-8
+                snr_safe = snr + epsilon
+                mse_loss_weights = mse_loss_weights / (snr_safe + epsilon)
+            elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
+                mse_loss_weights = mse_loss_weights / (snr + 1)
+
+            loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
+            loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
+            loss = loss.mean()
+        return loss
+
+    def get_pred_target(
+        self,
+        img_latents: torch.Tensor,
+        noise: torch.Tensor,
+        timesteps: torch.IntTensor,
+        model_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        noise_scheduler = self.noise_scheduler
+        if noise_scheduler.config.get("prediction_type") == "epsilon":
+            target = noise
+        elif noise_scheduler.config.get("prediction_type") == "v_prediction":
+            target = noise_scheduler.get_velocity(img_latents, noise, timesteps)
+        elif noise_scheduler.config.get("prediction_type") == "sample":
+            # We set the target to latents here, but the model_pred will return the noise sample prediction.
+            target = img_latents
+            # We will have to subtract the noise residual from the prediction to get the target sample.
+            model_pred = model_pred - noise
+        else:
+            msg = f"Unknown prediction type {noise_scheduler.config.get('prediction_type')}"
+            raise ValueError(msg)
+        return target
+
+    def sample_noise(self, latents: torch.Tensor) -> torch.Tensor:
+        """Sample noise that will be added to the latents."""
+        noise = torch.randn_like(latents)
+        if hasattr(self.config, "noise_offset") and self.config.noise_offset:
+            # Add noise to the image latents
+            # https://www.crosslabs.org//blog/diffusion-with-offset-noise
+            noise += self.config.noise_offset * torch.randn(
+                (latents.shape[0], latents.shape[1], 1, 1),
+                device=latents.device,
+            )
+        return noise
+
+    def sample_timesteps(self, batch_size: int) -> torch.IntTensor:
+        num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
+        if self.config.timestep_bias_strategy == "uniform":
+            # Sample a random timestep for each image without bias.
+            timesteps = torch.randint(0, num_timesteps, (batch_size,), device=self.accelerator.device)
+        elif self.config.timestep_bias_strategy == "logit":
+            # Sample a random timestep for each image, potentially biased by the timestep weights.
+            # Biasing the timestep weights allows us to spend less time training irrelevant timesteps.
+            weights = logit_timestep_weights(num_timesteps, device=self.accelerator.device)
+            timesteps = torch.multinomial(weights, batch_size, replacement=True).int()
+        else:
+            msg = f"Unknown timestep bias strategy {self.config.timestep_bias_strategy}"
+            raise ValueError(msg)
+        return timesteps  # type: ignore
 
     def apply_seed_settings(self, seed: int) -> None:
         logger.info("Setting seed to %s", seed)
@@ -135,6 +220,28 @@ class BaseTuner:
             model.requires_grad_(False)
             model.eval()
         accelerator.wait_for_everyone()
+
+    def get_noise_scheduler(self) -> DDPMScheduler:
+        """设置噪声调度器"""
+        # 如果配置中指定了预测类型，则使用该类型
+        if hasattr(self.config, "prediction_type") and self.config.prediction_type == "v_prediction":
+            self.pipeline.scheduler.register_to_config(
+                rescale_betas_zero_snr=True,
+                timestep_spacing="trailing",
+                prediction_type="v_prediction",
+            )
+
+        # 从pipeline的调度器配置中创建噪声调度器
+        noise_scheduler = DDPMScheduler.from_config(
+            self.pipeline.scheduler.config,
+        )
+        if type(noise_scheduler) is not DDPMScheduler:
+            msg = "Scheduler is not DDPMScheduler"
+            raise TypeError(msg)
+        logger.info("Noise scheduler config:")
+        for key, value in noise_scheduler.config.items():
+            logger.info("- %s: %s", key, value)
+        return noise_scheduler  # type: ignore
 
     def execute_training_epoch(  # noqa: C901, PLR0912, PLR0913, PLR0915
         self,

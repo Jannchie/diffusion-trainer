@@ -7,13 +7,11 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 import torch
-import torch.nn.functional as F
 from accelerate.logging import get_logger
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from diffusers.training_utils import EMAModel, compute_snr
+from diffusers.training_utils import EMAModel
 from torch.utils.data import DataLoader
 from transformers.models.clip import CLIPTextModel, CLIPTextModelWithProjection
 
@@ -27,10 +25,8 @@ from diffusion_trainer.finetune.utils import (
     get_trainable_parameter_dicts,
     initialize_optimizer,
     load_sdxl_pipeline,
-    prepare_accelerator,
 )
 from diffusion_trainer.finetune.utils.lora import apply_lora_config
-from diffusion_trainer.utils.timestep_weights import logit_timestep_weights
 
 logger = getLogger("diffusion_trainer.finetune.sdxl")
 
@@ -85,9 +81,7 @@ class SDXLTuner(BaseTuner):
 
         self.use_ema = config.use_ema
 
-        self.accelerator = prepare_accelerator(self.gradient_accumulation_steps, self.mixed_precision, self.config.log_with)
         self.logger = get_logger("diffusion_trainer.finetune.sdxl")
-        self.device = self.accelerator.device
 
         sdxl_models = SDXLModels(
             unet=self.pipeline.unet.to(self.device, dtype=self.weight_dtype),
@@ -151,21 +145,8 @@ class SDXLTuner(BaseTuner):
 
         self.trainable_parameters: list[list[torch.Tensor]] = [param["params"] for param in self.trainable_parameters_dicts]
 
-        if self.config.prediction_type == "v_prediction":
-            self.pipeline.scheduler.register_to_config(
-                rescale_betas_zero_snr=True,
-                timestep_spacing="trailing",
-                prediction_type="v_prediction",
-            )
-
-        # https://huggingface.co/docs/diffusers/api/schedulers/ddim
-        self.noise_scheduler: DDPMScheduler = DDPMScheduler.from_config(
-            self.pipeline.scheduler.config,
-        )  # type: ignore
-
-        self.logger.info("Noise scheduler config:")
-        for key, value in self.noise_scheduler.config.items():
-            self.logger.info("- %s: %s", key, value)
+        # 设置噪声调度器
+        self.get_noise_scheduler()
 
         sampler = BucketBasedBatchSampler(dataset, self.batch_size)
         with self.accelerator.main_process_first():
@@ -273,50 +254,6 @@ class SDXLTuner(BaseTuner):
             return_dict=False,
         )[0]
 
-    def get_loss(self, timesteps: torch.Tensor, model_pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        if self.config.snr_gamma is None:
-            loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
-            loss = loss.mean()
-        else:
-            # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
-            # Since we predict the noise instead of x_0, the original formulation is slightly changed.
-            # This is discussed in Section 4.2 of the same paper.
-            snr = compute_snr(self.noise_scheduler, timesteps)
-            mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
-            if self.noise_scheduler.config.get("prediction_type") == "epsilon":
-                epsilon = 1e-8
-                snr_safe = snr + epsilon
-                mse_loss_weights = mse_loss_weights / (snr_safe + epsilon)
-            elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
-                mse_loss_weights = mse_loss_weights / (snr + 1)
-
-            loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
-            loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
-            loss = loss.mean()
-        return loss
-
-    def get_pred_target(
-        self,
-        img_latents: torch.Tensor,
-        noise: torch.Tensor,
-        timesteps: torch.IntTensor,
-        model_pred: torch.Tensor,
-    ) -> torch.Tensor:
-        noise_scheduler = self.noise_scheduler
-        if noise_scheduler.config.get("prediction_type") == "epsilon":
-            target = noise
-        elif noise_scheduler.config.get("prediction_type") == "v_prediction":
-            target = noise_scheduler.get_velocity(img_latents, noise, timesteps)
-        elif noise_scheduler.config.get("prediction_type") == "sample":
-            # We set the target to latents here, but the model_pred will return the noise sample prediction.
-            target = img_latents
-            # We will have to subtract the noise residual from the prediction to get the target sample.
-            model_pred = model_pred - noise
-        else:
-            msg = f"Unknown prediction type {noise_scheduler.config.get('prediction_type')}"
-            raise ValueError(msg)
-        return target
-
     @torch.no_grad()
     def process_batch(self, batch: DiffusionBatch) -> SDXLBatch:
         prompts_str = self.create_prompts_str(batch)
@@ -380,22 +317,3 @@ class SDXLTuner(BaseTuner):
         # use the second to last hidden state as the prompt embedding
         prompt_embeds = prompt_embeds_output_2.hidden_states[-2]
         return prompt_embeds, prompt_embeds_pooled_2
-
-    def sample_timesteps(self, batch_size: int) -> torch.IntTensor:
-        num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
-        if self.timestep_bias_strategy == "uniform":
-            # Sample a random timestep for each image without bias.
-            timesteps = torch.randint(0, num_timesteps, (batch_size,), device=self.accelerator.device)
-        elif self.timestep_bias_strategy == "logit":
-            # Sample a random timestep for each image, potentially biased by the timestep weights.
-            # Biasing the timestep weights allows us to spend less time training irrelevant timesteps.
-            weights = logit_timestep_weights(num_timesteps, device=self.accelerator.device)
-            timesteps = torch.multinomial(weights, batch_size, replacement=True).int()
-        else:
-            msg = f"Unknown timestep bias strategy {self.timestep_bias_strategy}"
-            raise ValueError(msg)
-        return timesteps  # type: ignore
-
-    def sample_noise(self, latents: torch.Tensor) -> torch.Tensor:
-        """Sample noise that will be added to the latents."""
-        return torch.randn_like(latents)
