@@ -166,10 +166,20 @@ class SimpleLatentsProcessor:
         np.savez_compressed(payload.save_path, **new_npz)
 
     @torch.no_grad()
-    def process_image(self, image_path: Path, save_npz_path: Path, save_img_path: str | None = None) -> None:
+    def process_by_pil(self, image_pil: Image.Image, save_npz_path: Path, save_img_path: str | None = None) -> None:
+        """Process the image and save the latent vectors."""
+        image_np = np.array(image_pil.convert("RGB"))
+        self.process_by_np(image_np, save_npz_path, save_img_path)
+
+    @torch.no_grad()
+    def process_by_path(self, image_path: Path, save_npz_path: Path, save_img_path: str | None = None) -> None:
         """Process the image and save the latent vectors."""
         image_np = SimpleLatentsProcessor.load_image(image_path.as_posix())
+        self.process_by_np(image_np, save_npz_path, save_img_path)
 
+    @torch.no_grad()
+    def process_by_np(self, image_np: np.ndarray, save_npz_path: Path, save_img_path: str | None = None) -> None:
+        """Process the image and save the latent vectors."""
         original_size = image_np.shape[1], image_np.shape[0]
         reso, resized_size = self.select_reso(*original_size)
         image_np = self.resize_and_trim_image(image_np, reso, resized_size)
