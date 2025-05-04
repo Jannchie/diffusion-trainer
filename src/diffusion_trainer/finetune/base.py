@@ -333,9 +333,9 @@ class BaseTuner:
                         self.global_steps_file.write_text(str(global_step))
                     if self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0:
                         self.generate_preview(accelerator, f"{self.config.model_name}-step{global_step}", global_step)
-            if self.config.save_every_n_epochs and epoch % self.config.save_every_n_epochs == 0 and epoch != 0:
+            if self.config.save_every_n_epochs and (epoch % self.config.save_every_n_epochs == 0) and epoch != 0:
                 self.saving_model(accelerator, f"{self.config.model_name}-ep{epoch}")
-            if self.config.preview_every_n_epochs and epoch % self.config.preview_every_n_epochs == 0:
+            if self.config.preview_every_n_epochs and (epoch % self.config.preview_every_n_epochs == 0) and epoch != 0:
                 self.generate_preview(accelerator, f"{self.config.model_name}-ep{epoch}", global_step)
             progress.remove_task(current_epoch_task)
         if accelerator.is_main_process:
@@ -382,6 +382,8 @@ class BaseTuner:
                         num_inference_steps=inference_steps,
                         generator=generator,
                         callback_on_step_end=callback_on_step_end,  # type: ignore
+                        width=sample_option.width,
+                        height=sample_option.height,
                     )
                 logger.info("Preview generated for %s", filename_with_hash)
 
