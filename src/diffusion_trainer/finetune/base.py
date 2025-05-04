@@ -1,5 +1,4 @@
 import logging
-import math
 import random
 from abc import abstractmethod
 from collections.abc import Sequence
@@ -99,8 +98,8 @@ class BaseTuner:
             mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
             if self.noise_scheduler.config.get("prediction_type") == "epsilon":
                 epsilon = 1e-8
-                snr_safe = snr + epsilon
-                mse_loss_weights = mse_loss_weights / snr_safe
+                # For numerical stability, add epsilon directly to SNR for the denominator
+                mse_loss_weights = mse_loss_weights / (snr + epsilon)
             elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
                 mse_loss_weights = mse_loss_weights / (snr + 1)
 
@@ -263,25 +262,44 @@ class BaseTuner:
         self.checkpointing_path = self.save_path / "state"
         self.global_steps_file = self.checkpointing_path / "global_steps"
 
+        # Attempt to load previous state for resuming training
         try:
             self.accelerator.load_state(self.checkpointing_path.as_posix())
             global_step = int(self.global_steps_file.read_text())
         except Exception:
             global_step = 0
 
-        skiped_epoch = math.floor(global_step / num_update_steps_per_epoch)
-        # no need to divide by gradient_accumulation_steps
-        skiped_batch = global_step * self.accelerator.num_processes * self.config.batch_size
+        # 1. 计算已完成的完整 epoch 数
+        skipped_epoch = global_step // num_update_steps_per_epoch if num_update_steps_per_epoch > 0 else 0
+
+        # 2. 计算在当前 epoch 内需要跳过的 dataloader 批次数
+        num_batches_to_skip_in_current_epoch = 0
+        if global_step > 0 and num_update_steps_per_epoch > 0:
+            # 计算当前 epoch 内已完成的优化器步数
+            steps_in_current_epoch = global_step % num_update_steps_per_epoch
+            # 计算这些优化器步数对应的 dataloader 批次数
+            num_batches_to_skip_in_current_epoch = steps_in_current_epoch * self.config.gradient_accumulation_steps
+
         if global_step != 0:
+            # 修正日志信息
             logger.info(
-                "skiping %d global steps (%d batches)",
+                "Resuming from global step %d (Epoch %d, skipping %d dataloader batches in current epoch)",
                 global_step,
-                skiped_batch,
+                skipped_epoch,
+                num_batches_to_skip_in_current_epoch,
             )
-        skiped_data_loader = self.accelerator.skip_first_batches(data_loader, skiped_batch % len(data_loader))
+            # （可选）计算并记录总处理样本数
+            total_samples_processed = global_step * self.config.gradient_accumulation_steps * self.accelerator.num_processes * self.config.batch_size
+            logger.info("Approximately %d total samples processed before resuming.", total_samples_processed)
+
+        # 3. 使用正确的批次数调用 skip_first_batches
+        skipped_data_loader = self.accelerator.skip_first_batches(
+            data_loader,
+            num_batches_to_skip_in_current_epoch,  # 使用正确计算的值
+        )
 
         logger.info("full_loader_length: %d", len(data_loader))
-        logger.info("skiped_loader_length: %d", len(skiped_data_loader))
+        logger.info("skipped_loader_length: %d", len(skipped_data_loader))
 
         total_task = progress.add_task(
             "Total Progress",
@@ -291,14 +309,14 @@ class BaseTuner:
 
         if self.accelerator.is_main_process:
             progress.start()
-        for epoch in range(skiped_epoch, self.config.n_epochs):
+        for epoch in range(skipped_epoch, self.config.n_epochs):
             self.train_loss = 0.0
             current_epoch_task = progress.add_task(
                 f"Epoch {epoch + 1}",
                 total=num_update_steps_per_epoch,
                 completed=global_step % num_update_steps_per_epoch,
             )
-            dl = skiped_data_loader if epoch == skiped_epoch else data_loader
+            dl = skipped_data_loader if epoch == skipped_epoch else data_loader
             for _step, orig_batch in enumerate(dl):
                 if not isinstance(orig_batch, DiffusionBatch):
                     msg = f"Expected DiffusionBatch, got something else. Got: {type(orig_batch)}"
@@ -359,14 +377,17 @@ class BaseTuner:
 
     @torch.no_grad()
     def generate_preview(self, filename: str, global_step: int = 0) -> None:
-        # 显式释放内存
+        # 释放内存以确保有足够的显存用于预览生成
         free_memory()
 
+        # 简单的回调函数，满足pipeline接口需求
         def callback_on_step_end(_pipe: StableDiffusionXLPipelineOutput, _step: int, _timestep: int, _kwargs: dict) -> dict:
             return {}
 
         state = PartialState()
         self.accelerator.wait_for_everyone()
+
+        # 在进程间拆分预览样本选项
         with state.split_between_processes(self.config.preview_sample_options) as sample_options:
             for sample_option in sample_options:
                 if not isinstance(sample_option, SampleOptions):
@@ -376,13 +397,13 @@ class BaseTuner:
                 filename_with_hash = f"{filename}-{hash_hex}"
                 logger.info("Generating preview for %s", filename_with_hash)
 
-                # 切换为eval模式并移动到CPU如果可能，以节省显存
+                # 保存原始训练相关设置和设备信息，后续会恢复
+                original_training_mode = {}
                 original_device = {}
                 for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder), ("vae", self.pipeline.vae)]:
-                    original_device[name] = model.device
-                    model.eval()
-
-                # 设置VAE的数据类型
+                    original_training_mode[name] = model.training
+                    original_device[name] = next(model.parameters()).device
+                    model.eval()  # 切换到评估模式以用于推理
                 vae_dtype = str_to_dtype(self.config.vae_dtype)
                 self.pipeline.vae.to(dtype=vae_dtype)
 
@@ -391,10 +412,8 @@ class BaseTuner:
                 generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
 
                 with autocast_ctx:
-                    # 确保移回设备进行推理
                     self.pipeline.to(self.accelerator.device)
-                    # 设置较小的height和width，减少显存使用
-                    inference_steps = min(sample_option.steps, 25)  # 减少步数
+                    inference_steps = min(sample_option.steps, 25)
                     result = self.pipeline(
                         prompt=sample_option.prompt,
                         negative_prompt=sample_option.negative_prompt,
@@ -404,13 +423,13 @@ class BaseTuner:
                         width=sample_option.width,
                         height=sample_option.height,
                     )
+
                 logger.info("Preview generated for %s", filename_with_hash)
 
                 path = (Path(self.save_path) / "previews" / filename_with_hash).with_suffix(".png")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 result.images[0].save(path)
 
-                # 记录到wandb（如果启用）
                 if self.config.log_with == "wandb":
                     import wandb
 
@@ -421,16 +440,18 @@ class BaseTuner:
                         step=global_step,
                     )
 
-                # 清理预览相关的内存
+                # 及时释放生成的结果，减少内存占用
                 del result
                 torch.cuda.empty_cache()
 
-                # 恢复模型到原始设备
+                # 恢复模型的训练模式
                 for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder), ("vae", self.pipeline.vae)]:
-                    if original_device[name] != model.device:
+                    if model.training != original_training_mode[name]:
+                        model.train(original_training_mode[name])
+                    if next(model.parameters()).device != original_device[name]:
                         model.to(original_device[name])
 
-        # 最终清理
+        # 确保所有进程完成预览生成
         free_memory()
         self.accelerator.wait_for_everyone()
 
