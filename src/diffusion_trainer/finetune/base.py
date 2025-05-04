@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator, PartialState
+from accelerate import PartialState
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
@@ -163,9 +163,9 @@ class BaseTuner:
         random.seed(seed)
         torch.manual_seed(seed)
 
-    def init_gradient_checkpointing(self, accelerator: Accelerator, models: list[torch.nn.Module]) -> None:
+    def init_gradient_checkpointing(self, models: list[torch.nn.Module]) -> None:
         for model in models:
-            m: Any = unwrap_model(accelerator, model)
+            m: Any = unwrap_model(self.accelerator, model)
             if hasattr(m, "enable_gradient_checkpointing"):
                 m.enable_gradient_checkpointing()
             elif hasattr(m, "gradient_checkpointing_enable"):
@@ -173,7 +173,7 @@ class BaseTuner:
             else:
                 logger.warning("cannot checkpointing!")
 
-    def prepare_dataset(self, accelerator: Accelerator, config: BaseConfig) -> DiffusionDataset:
+    def prepare_dataset(self, config: BaseConfig) -> DiffusionDataset:
         if config.meta_path:
             meta_path = Path(config.meta_path)
         elif config.image_path:
@@ -182,8 +182,8 @@ class BaseTuner:
             msg = "Please specify the meta path in the config file."
             raise ValueError(msg)
         parquet_path = meta_path / "metadata.parquet"
-        with accelerator.main_process_first():
-            if not accelerator.is_main_process:
+        with self.accelerator.main_process_first():
+            if not self.accelerator.is_main_process:
                 # Wait for the main process to finish preparing, then load the dataset.
                 return DiffusionDataset.from_parquet(parquet_path)
             if config.image_path and config.skip_prepare_image is False:
@@ -212,14 +212,14 @@ class BaseTuner:
                 logger.info('found parquet file at "%s"', parquet_path)
         return DiffusionDataset.from_parquet(parquet_path)
 
-    def freeze_model(self, accelerator: Accelerator, models: Sequence[torch.nn.Module]) -> None:
+    def freeze_model(self, models: Sequence[torch.nn.Module]) -> None:
         """
         Freeze all models except the ones in training_models.
         """
         for model in models:
             model.requires_grad_(False)
             model.eval()
-        accelerator.wait_for_everyone()
+        self.accelerator.wait_for_everyone()
 
     def get_noise_scheduler(self) -> DDPMScheduler:
         """设置噪声调度器"""
@@ -243,9 +243,8 @@ class BaseTuner:
             logger.info("- %s: %s", key, value)
         return noise_scheduler  # type: ignore
 
-    def execute_training_epoch(  # noqa: C901, PLR0912, PLR0913, PLR0915
+    def execute_training_epoch(  # noqa: C901, PLR0912, PLR0915
         self,
-        accelerator: Accelerator,
         data_loader: torch.utils.data.DataLoader,
         lr_scheduler: torch.optim.lr_scheduler.LambdaLR,
         training_models: Sequence[torch.nn.Module],
@@ -258,21 +257,21 @@ class BaseTuner:
         self.global_steps_file = self.checkpointing_path / "global_steps"
 
         try:
-            accelerator.load_state(self.checkpointing_path.as_posix())
+            self.accelerator.load_state(self.checkpointing_path.as_posix())
             global_step = int(self.global_steps_file.read_text())
         except Exception:
             global_step = 0
 
         skiped_epoch = math.floor(global_step / num_update_steps_per_epoch)
         # no need to divide by gradient_accumulation_steps
-        skiped_batch = global_step * accelerator.num_processes * self.config.batch_size
+        skiped_batch = global_step * self.accelerator.num_processes * self.config.batch_size
         if global_step != 0:
             logger.info(
                 "skiping %d global steps (%d batches)",
                 global_step,
                 skiped_batch,
             )
-        skiped_data_loader = accelerator.skip_first_batches(data_loader, skiped_batch % len(data_loader))
+        skiped_data_loader = self.accelerator.skip_first_batches(data_loader, skiped_batch % len(data_loader))
 
         logger.info("full_loader_length: %d", len(data_loader))
         logger.info("skiped_loader_length: %d", len(skiped_data_loader))
@@ -283,7 +282,7 @@ class BaseTuner:
             completed=global_step,
         )
 
-        if accelerator.is_main_process:
+        if self.accelerator.is_main_process:
             progress.start()
         for epoch in range(skiped_epoch, self.config.n_epochs):
             self.train_loss = 0.0
@@ -302,26 +301,26 @@ class BaseTuner:
                 # Free up memory from original batch if it contains large tensors
                 del orig_batch
 
-                with accelerator.accumulate(training_models):
+                with self.accelerator.accumulate(training_models):
                     self.train_each_batch(batch)
 
                     # Free up processed batch memory
                     del batch
 
                     # Manually trigger garbage collection after each batch
-                    if hasattr(torch.cuda, "empty_cache") and accelerator.sync_gradients:
+                    if hasattr(torch.cuda, "empty_cache") and self.accelerator.sync_gradients:
                         torch.cuda.empty_cache()
 
-                if accelerator.sync_gradients:
+                if self.accelerator.sync_gradients:
                     current_lr = lr_scheduler.get_last_lr()[0]
                     # if self.ema_unet:
                     #     self.ema_unet.step(self.pipeline.unet.parameters())
 
                     global_step += 1
-                    accelerator.log({"train_loss": self.train_loss, "lr": current_lr}, step=global_step)
+                    self.accelerator.log({"train_loss": self.train_loss, "lr": current_lr}, step=global_step)
                     self.train_loss = 0.0
 
-                    if accelerator.is_main_process:
+                    if self.accelerator.is_main_process:
                         current_completed = global_step % num_update_steps_per_epoch
                         progress.update(total_task, completed=global_step, description=f"Epoch: {epoch}")
                         progress.update(current_epoch_task, completed=current_completed, description=f"Lr: {current_lr:.2e}")
@@ -332,27 +331,27 @@ class BaseTuner:
                     should_preview_step = self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0
 
                     if should_save_step:
-                        self.saving_model(accelerator, f"{self.config.model_name}-step{global_step}")
+                        self.saving_model(f"{self.config.model_name}-step{global_step}")
                     if should_checkpoint_step:
-                        accelerator.save_state(self.checkpointing_path.as_posix())
+                        self.accelerator.save_state(self.checkpointing_path.as_posix())
                         self.global_steps_file.write_text(str(global_step))
                     if should_preview_step:
-                        self.generate_preview(accelerator, f"{self.config.model_name}-step{global_step}", global_step)
+                        self.generate_preview(f"{self.config.model_name}-step{global_step}", global_step)
             # Check epoch-based conditions
             should_save_epoch = self.config.save_every_n_epochs and (epoch % self.config.save_every_n_epochs == 0) and epoch != 0
             should_preview_epoch = self.config.preview_every_n_epochs and (epoch % self.config.preview_every_n_epochs == 0) and epoch != 0
 
             if should_save_epoch:
-                self.saving_model(accelerator, f"{self.config.model_name}-ep{epoch}")
+                self.saving_model(f"{self.config.model_name}-ep{epoch}")
             if should_preview_epoch:
-                self.generate_preview(accelerator, f"{self.config.model_name}-ep{epoch}", global_step)
+                self.generate_preview(f"{self.config.model_name}-ep{epoch}", global_step)
             progress.remove_task(current_epoch_task)
-        if accelerator.is_main_process:
+        if self.accelerator.is_main_process:
             progress.stop()
-        self.saving_model(accelerator, f"{self.config.model_name}")
+        self.saving_model(f"{self.config.model_name}")
 
     @torch.no_grad()
-    def generate_preview(self, accelerator: Accelerator, filename: str, global_step: int = 0) -> None:
+    def generate_preview(self, filename: str, global_step: int = 0) -> None:
         # 显式释放内存
         free_memory()
 
@@ -360,7 +359,7 @@ class BaseTuner:
             return {}
 
         state = PartialState()
-        accelerator.wait_for_everyone()
+        self.accelerator.wait_for_everyone()
         with state.split_between_processes(self.config.preview_sample_options) as sample_options:
             for sample_option in sample_options:
                 if not isinstance(sample_option, SampleOptions):
@@ -381,12 +380,12 @@ class BaseTuner:
                 self.pipeline.vae.to(dtype=vae_dtype)
 
                 # 使用自动混合精度生成预览图像
-                autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(accelerator.device.type)
-                generator = torch.Generator(device=accelerator.device).manual_seed(sample_option.seed)
+                autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
+                generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
 
                 with autocast_ctx:
                     # 确保移回设备进行推理
-                    self.pipeline.to(accelerator.device)
+                    self.pipeline.to(self.accelerator.device)
                     # 设置较小的height和width，减少显存使用
                     inference_steps = min(sample_option.steps, 25)  # 减少步数
                     result = self.pipeline(
@@ -408,7 +407,7 @@ class BaseTuner:
                 if self.config.log_with == "wandb":
                     import wandb
 
-                    accelerator.log(
+                    self.accelerator.log(
                         {
                             f"{hash_hex}": [wandb.Image(result.images[0], caption=f"{sample_option.prompt}")],
                         },
@@ -426,11 +425,11 @@ class BaseTuner:
 
         # 最终清理
         free_memory()
-        accelerator.wait_for_everyone()
+        self.accelerator.wait_for_everyone()
 
-    def saving_model(self, accelerator: Accelerator, filename: str) -> None:
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
+    def saving_model(self, filename: str) -> None:
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
             if self.config.mode in ("lora", "lokr", "loha"):
                 self.save_lora_model(filename)
             else:

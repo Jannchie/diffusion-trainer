@@ -74,7 +74,7 @@ class SD15Tuner(BaseTuner):
 
         # 确认梯度检查点启用
         if self.config.gradient_checkpointing:
-            self.init_gradient_checkpointing(self.accelerator, list(self.models))
+            self.init_gradient_checkpointing(list(self.models))
 
         for key, value in config.__dict__.items():
             self.logger.info("%s: %s", key, value)
@@ -84,7 +84,7 @@ class SD15Tuner(BaseTuner):
         Start the training process.
         """
         self.accelerator.wait_for_everyone()
-        dataset = self.prepare_dataset(self.accelerator, self.config)
+        dataset = self.prepare_dataset(self.config)
         if self.accelerator.is_main_process:
             dataset.print_bucket_info()
 
@@ -93,7 +93,7 @@ class SD15Tuner(BaseTuner):
         for model in trainable_models:
             model.train()
         freeze_models = [model for model in self.models if model not in trainable_models]
-        self.freeze_model(self.accelerator, freeze_models)
+        self.freeze_model(freeze_models)
 
         self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, trainable_models_with_lr)
         self.optimizer = initialize_optimizer(self.config.optimizer, self.trainable_parameters_dicts)
@@ -119,7 +119,6 @@ class SD15Tuner(BaseTuner):
         self.accelerator.init_trackers(f"diffusion-trainer-{self.config.mode}", config=self.config.__dict__)
 
         self.execute_training_epoch(
-            self.accelerator,
             data_loader,
             lr_scheduler,
             training_models=trainable_models,

@@ -89,7 +89,7 @@ class SDXLTuner(BaseTuner):
 
         # Enable gradient checkpointing early if configured
         if self.config.gradient_checkpointing:
-            self.init_gradient_checkpointing(self.accelerator, self.models)
+            self.init_gradient_checkpointing(self.models)
 
         for key, value in config.__dict__.items():
             self.logger.info("%s: %s", key, value)
@@ -129,11 +129,11 @@ class SDXLTuner(BaseTuner):
 
     def train(self) -> None:
         self.accelerator.wait_for_everyone()
-        dataset = self.prepare_dataset(self.accelerator, self.config)
+        dataset = self.prepare_dataset(self.config)
         if self.accelerator.is_main_process:
             dataset.print_bucket_info()
         freeze_models = [model for model in self.models if model not in self.training_models]
-        self.freeze_model(self.accelerator, freeze_models)
+        self.freeze_model(freeze_models)
         self.init_ema(self.pipeline.unet, self.pipeline.unet.config)
 
         self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, self.trainable_models_with_lr)
@@ -172,13 +172,12 @@ class SDXLTuner(BaseTuner):
         self.lr_scheduler = self.accelerator.prepare(lr_scheduler)
 
         if self.config.gradient_checkpointing:
-            self.init_gradient_checkpointing(self.accelerator, self.models)
+            self.init_gradient_checkpointing(self.models)
 
         self.log_training_parameters()
 
         self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
         self.execute_training_epoch(
-            self.accelerator,
             self.data_loader,
             self.lr_scheduler,
             self.training_models,
