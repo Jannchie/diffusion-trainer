@@ -363,9 +363,13 @@ class BaseTuner:
 
                 # 切换为eval模式并移动到CPU如果可能，以节省显存
                 original_device = {}
-                for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder)]:
+                for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder), ("vae", self.pipeline.vae)]:
                     original_device[name] = model.device
                     model.eval()
+
+                # 设置VAE的数据类型
+                vae_dtype = str_to_dtype(self.config.vae_dtype)
+                self.pipeline.vae.to(dtype=vae_dtype)
 
                 # 使用自动混合精度生成预览图像
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(accelerator.device.type)
@@ -407,7 +411,7 @@ class BaseTuner:
                 torch.cuda.empty_cache()
 
                 # 恢复模型到原始设备
-                for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder)]:
+                for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder), ("vae", self.pipeline.vae)]:
                     if original_device[name] != model.device:
                         model.to(original_device[name])
 

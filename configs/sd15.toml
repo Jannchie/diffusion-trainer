@@ -4,7 +4,7 @@ meta_path = "datasets/cache_pictoria"
 skip_prepare_image = false
 
 vae_path = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"
-vae_dtype = "fp16"
+vae_dtype = "bf16"
 
 model_path = "models/AOM3B2_orangemixs_fp16"
 save_dir = "./out"
@@ -31,7 +31,7 @@ mixed_precision = "bf16"
 weight_dtype = "fp32"
 save_dtype = "fp16"
 
-unet_lr = 1e-4
+unet_lr = 5e-5
 optimizer_warmup_steps = 50
 optimizer_num_cycles = 2
 
