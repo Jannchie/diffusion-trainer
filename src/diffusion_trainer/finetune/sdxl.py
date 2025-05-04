@@ -272,7 +272,6 @@ class SDXLTuner(BaseTuner):
             return_dict=False,
         )[0]
 
-    @torch.no_grad()
     def process_batch(self, batch: DiffusionBatch) -> SDXLBatch:
         prompts_str = self.create_prompts_str(batch)
 

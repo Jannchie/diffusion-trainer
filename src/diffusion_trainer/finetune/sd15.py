@@ -146,7 +146,6 @@ class SD15Tuner(BaseTuner):
             raise ValueError(msg)
         return trainable_models_with_lr
 
-    @torch.no_grad()
     def process_batch(self, batch: DiffusionBatch) -> SD15Batch:
         prompts_str = self.create_prompts_str(batch)
         prompt_embeds = self.get_prompt_embeds(prompts_str)
@@ -235,5 +234,5 @@ class SD15Tuner(BaseTuner):
             text_input_ids,
             output_hidden_states=True,
         )
-        # use the second to last hidden state as the prompt embedding
-        return prompt_embeds_output.hidden_states[-2]
+        # SD1.5 use the **last** hidden state as the prompt embedding
+        return prompt_embeds_output.last_hidden_state
