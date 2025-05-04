@@ -143,6 +143,12 @@ class BaseTuner:
             )
         return noise
 
+    def get_noisy_latents(self, latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.IntTensor) -> torch.Tensor:
+        """Get the noisy latents."""
+
+        perturbation_noise = noise + self.config.input_perturbation * torch.randn_like(noise)
+        return self.noise_scheduler.add_noise(latents, perturbation_noise, timesteps)
+
     def sample_timesteps(self, batch_size: int) -> torch.IntTensor:
         num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
         if self.config.timestep_bias_strategy == "uniform":

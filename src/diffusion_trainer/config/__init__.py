@@ -51,6 +51,7 @@ class BaseConfig:
     lokr_factor: int = field(default=16, metadata={"help": "LoKr factor."})
 
     noise_offset: float = field(default=0.0, metadata={"help": "Noise offset."})
+    input_perturbation: float = field(default=0.0, metadata={"help": "Input perturbation strength for improved training stability."})
     gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
     timestep_bias_strategy: Literal["uniform", "logit"] = field(
         default="uniform",

@@ -216,7 +216,7 @@ class SDXLTuner(BaseTuner):
         timesteps = self.sample_timesteps(img_latents.shape[0])
 
         # Add noise once with the correct dtype to avoid conversions
-        img_noisy_latents = self.noise_scheduler.add_noise(img_latents, noise, timesteps)
+        img_noisy_latents = self.get_noisy_latents(img_latents, noise, timesteps)
 
         # Predict and calculate loss
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds, unet_added_conditions)

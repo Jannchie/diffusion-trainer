@@ -166,7 +166,7 @@ class SD15Tuner(BaseTuner):
         timesteps = self.sample_timesteps(img_latents.shape[0])
 
         # Apply noise directly with the correct dtype
-        img_noisy_latents = self.noise_scheduler.add_noise(img_latents, noise, timesteps)
+        img_noisy_latents = self.get_noisy_latents(img_latents, noise, timesteps)
 
         # Get model prediction
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds)
