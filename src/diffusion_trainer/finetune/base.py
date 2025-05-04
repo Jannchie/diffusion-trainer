@@ -100,7 +100,7 @@ class BaseTuner:
             if self.noise_scheduler.config.get("prediction_type") == "epsilon":
                 epsilon = 1e-8
                 snr_safe = snr + epsilon
-                mse_loss_weights = mse_loss_weights / (snr_safe + epsilon)
+                mse_loss_weights = mse_loss_weights / snr_safe
             elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
                 mse_loss_weights = mse_loss_weights / (snr + 1)
 
@@ -144,10 +144,11 @@ class BaseTuner:
         return noise
 
     def get_noisy_latents(self, latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.IntTensor) -> torch.Tensor:
-        """Get the noisy latents."""
-
-        perturbation_noise = noise + self.config.input_perturbation * torch.randn_like(noise)
-        return self.noise_scheduler.add_noise(latents, perturbation_noise, timesteps)
+        """获取带噪的潜变量"""
+        if hasattr(self.config, "input_perturbation") and self.config.input_perturbation > 0:
+            # 仅当配置存在且值非零时应用扰动
+            noise = noise + self.config.input_perturbation * torch.randn_like(noise)
+        return self.noise_scheduler.add_noise(latents, noise, timesteps)
 
     def sample_timesteps(self, batch_size: int) -> torch.IntTensor:
         num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
