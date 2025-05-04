@@ -326,16 +326,25 @@ class BaseTuner:
                         progress.update(total_task, completed=global_step, description=f"Epoch: {epoch}")
                         progress.update(current_epoch_task, completed=current_completed, description=f"Lr: {current_lr:.2e}")
 
-                    if self.config.save_every_n_steps and global_step % self.config.save_every_n_steps == 0 and global_step != 0:
+                    # Check step-based conditions
+                    should_save_step = self.config.save_every_n_steps and global_step % self.config.save_every_n_steps == 0 and global_step != 0
+                    should_checkpoint_step = self.config.checkpoint_every_n_steps and global_step % self.config.checkpoint_every_n_steps == 0
+                    should_preview_step = self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0
+
+                    if should_save_step:
                         self.saving_model(accelerator, f"{self.config.model_name}-step{global_step}")
-                    if self.config.checkpoint_every_n_steps and global_step % self.config.checkpoint_every_n_steps == 0:
+                    if should_checkpoint_step:
                         accelerator.save_state(self.checkpointing_path.as_posix())
                         self.global_steps_file.write_text(str(global_step))
-                    if self.config.preview_every_n_steps and global_step % self.config.preview_every_n_steps == 0:
+                    if should_preview_step:
                         self.generate_preview(accelerator, f"{self.config.model_name}-step{global_step}", global_step)
-            if self.config.save_every_n_epochs and (epoch % self.config.save_every_n_epochs == 0) and epoch != 0:
+            # Check epoch-based conditions
+            should_save_epoch = self.config.save_every_n_epochs and (epoch % self.config.save_every_n_epochs == 0) and epoch != 0
+            should_preview_epoch = self.config.preview_every_n_epochs and (epoch % self.config.preview_every_n_epochs == 0) and epoch != 0
+
+            if should_save_epoch:
                 self.saving_model(accelerator, f"{self.config.model_name}-ep{epoch}")
-            if self.config.preview_every_n_epochs and (epoch % self.config.preview_every_n_epochs == 0) and epoch != 0:
+            if should_preview_epoch:
                 self.generate_preview(accelerator, f"{self.config.model_name}-ep{epoch}", global_step)
             progress.remove_task(current_epoch_task)
         if accelerator.is_main_process:
