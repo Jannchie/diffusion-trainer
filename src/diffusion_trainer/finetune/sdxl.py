@@ -63,23 +63,11 @@ class SDXLTuner(BaseTuner):
         self.config = config
         self.apply_seed_settings(self.config.seed)
 
-        self.model_name = config.model_name
-        self.save_dir = config.save_dir
+        # Only convert to Path when needed
+        self.save_path = Path(config.save_dir) / config.model_name
 
-        self.save_path = Path(self.save_dir) / self.model_name
-
-        self.batch_size = config.batch_size
-        self.gradient_accumulation_steps = config.gradient_accumulation_steps
-
+        # Keep mode as it needs type conversion
         self.mode: Literal["full-finetune", "lora", "lokr", "loha"] = config.mode
-
-        self.lora_rank = config.lora_rank
-        self.lora_alpha = config.lora_alpha
-        self.lokr_factor = config.lokr_factor
-
-        self.timestep_bias_strategy = config.timestep_bias_strategy
-
-        self.use_ema = config.use_ema
 
         self.logger = get_logger("diffusion_trainer.finetune.sdxl")
 
@@ -124,7 +112,7 @@ class SDXLTuner(BaseTuner):
     def init_ema(self, model: torch.nn.Module, config: dict) -> None:
         # Create EMA for the unet.
         self.ema_unet: None | EMAModel = None
-        if self.use_ema:
+        if self.config.use_ema:
             self.ema_unet = EMAModel(
                 parameters=model.parameters(),
                 model_cls=UNet2DConditionModel,
@@ -148,7 +136,7 @@ class SDXLTuner(BaseTuner):
         # 设置噪声调度器
         self.get_noise_scheduler()
 
-        sampler = BucketBasedBatchSampler(dataset, self.batch_size)
+        sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
         with self.accelerator.main_process_first():
             # Optimize DataLoader by using appropriate num_workers based on system
             num_workers = 0
@@ -161,7 +149,7 @@ class SDXLTuner(BaseTuner):
             )
         self.data_loader = self.accelerator.prepare(data_loader)
 
-        num_update_steps_per_epoch = math.ceil(len(data_loader) / self.gradient_accumulation_steps / self.accelerator.num_processes)
+        num_update_steps_per_epoch = math.ceil(len(data_loader) / self.config.gradient_accumulation_steps / self.accelerator.num_processes)
         n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
 
         lr_scheduler = get_scheduler(
@@ -195,7 +183,7 @@ class SDXLTuner(BaseTuner):
             n_params = get_n_params(self.trainable_parameters_dicts)
             self.logger.info("Number of epochs: %s", self.config.n_epochs)
             num_processes = self.accelerator.num_processes
-            effective_batch_size = self.batch_size * num_processes * self.gradient_accumulation_steps
+            effective_batch_size = self.config.batch_size * num_processes * self.config.gradient_accumulation_steps
             self.logger.info("Effective batch size: %s", effective_batch_size)
             self.logger.info("Prediction type: %s", self.noise_scheduler.config.get("prediction_type"))
             self.logger.info("Number of trainable parameters: %s (%s)", f"{n_params:,}", format_size(n_params))
@@ -240,8 +228,8 @@ class SDXLTuner(BaseTuner):
             msg = "Loss is NaN."
             raise ValueError(msg)
 
-        avg_loss = self.accelerator.gather(loss.repeat(self.batch_size)).mean()  # type: ignore
-        self.train_loss += avg_loss.item() / self.gradient_accumulation_steps
+        avg_loss = self.accelerator.gather(loss.repeat(self.config.batch_size)).mean()  # type: ignore
+        self.train_loss += avg_loss.item() / self.config.gradient_accumulation_steps
 
         self.accelerator.backward(loss)
 
