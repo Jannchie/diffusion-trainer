@@ -63,6 +63,10 @@ class SDXLTuner(BaseTuner):
         self.config = config
         self.apply_seed_settings(self.config.seed)
 
+        # Clear CUDA cache before loading models to ensure maximum available memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         # Only convert to Path when needed
         self.save_path = Path(config.save_dir) / config.model_name
 
@@ -82,6 +86,10 @@ class SDXLTuner(BaseTuner):
         self.configure_trainable_models(config, sdxl_models)
 
         self.training_models = [m.model for m in self.trainable_models_with_lr]
+
+        # Enable gradient checkpointing early if configured
+        if self.config.gradient_checkpointing:
+            self.init_gradient_checkpointing(self.accelerator, self.models)
 
         for key, value in config.__dict__.items():
             self.logger.info("%s: %s", key, value)
@@ -221,7 +229,8 @@ class SDXLTuner(BaseTuner):
         loss = self.get_loss(timesteps, model_pred, target)
 
         # Free more memory
-        del model_pred, target
+        del model_pred, target, img_latents
+        del prompt_embeds, prompt_embeds_1, prompt_embeds_2, prompt_embeds_pooled_2
 
         if torch.isnan(loss):
             self.logger.info("Loss is NaN.")
@@ -233,6 +242,7 @@ class SDXLTuner(BaseTuner):
 
         self.accelerator.backward(loss)
 
+        # Free memory after backward pass
         del loss, avg_loss
 
         if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
@@ -243,6 +253,10 @@ class SDXLTuner(BaseTuner):
         self.lr_scheduler.step()
         # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
         self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
+
+        # Periodically clear CUDA cache to prevent memory fragmentation
+        if self.accelerator.sync_gradients and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def get_model_pred(
         self,
@@ -262,9 +276,12 @@ class SDXLTuner(BaseTuner):
     @torch.no_grad()
     def process_batch(self, batch: DiffusionBatch) -> SDXLBatch:
         prompts_str = self.create_prompts_str(batch)
+
+        # Process prompt embeddings efficiently
         prompt_embeds_1 = self.get_prompt_embeds_1(prompts_str)
         prompt_embeds_2, prompt_embeds_pooled_2 = self.get_prompt_embeds_2(prompts_str)
 
+        # Create time_ids tensor once and directly with the correct device
         time_ids = torch.stack(
             [
                 batch.original_size[:, 1],
@@ -285,6 +302,7 @@ class SDXLTuner(BaseTuner):
             time_ids=time_ids,
         )
 
+    @torch.no_grad()
     def get_prompt_embeds_1(self, prompts_str: list[str]) -> torch.Tensor:
         text_inputs = self.pipeline.tokenizer(
             prompts_str,
@@ -294,14 +312,20 @@ class SDXLTuner(BaseTuner):
             return_tensors="pt",
         )
         text_input_ids = text_inputs["input_ids"].to(self.accelerator.device)
+
+        # Use no_grad for inference to save memory
         prompt_embeds_output = self.pipeline.text_encoder(
             text_input_ids,
             output_hidden_states=True,
         )
 
-        # use the second to last hidden state as the prompt embedding
-        return prompt_embeds_output.hidden_states[-2]
+        # Extract only what we need and free the rest
+        hidden_states = prompt_embeds_output.hidden_states[-2]
+        del prompt_embeds_output, text_input_ids, text_inputs
 
+        return hidden_states
+
+    @torch.no_grad()
     def get_prompt_embeds_2(self, prompts_str: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         text_inputs_2 = self.pipeline.tokenizer_2(
             prompts_str,
@@ -310,15 +334,19 @@ class SDXLTuner(BaseTuner):
             truncation=True,
             return_tensors="pt",
         )
-        text_input_ids_2 = text_inputs_2["input_ids"]
+        text_input_ids_2 = text_inputs_2["input_ids"].to(self.accelerator.device)
+
+        # Use no_grad for inference to save memory
         prompt_embeds_output_2 = self.pipeline.text_encoder_2(
-            text_input_ids_2.to(self.accelerator.device),
+            text_input_ids_2,
             output_hidden_states=True,
         )
 
-        # We are only interested in the pooled output of the final text encoder
+        # Extract only what we need and free the rest
         prompt_embeds_pooled_2 = prompt_embeds_output_2[0]
-
-        # use the second to last hidden state as the prompt embedding
         prompt_embeds = prompt_embeds_output_2.hidden_states[-2]
+
+        # Clean up to save memory
+        del prompt_embeds_output_2, text_input_ids_2, text_inputs_2
+
         return prompt_embeds, prompt_embeds_pooled_2
