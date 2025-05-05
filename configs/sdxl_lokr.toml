@@ -15,8 +15,7 @@ optimizer = "adafactor"
 
 model_name = "creativexl-test-xl"
 
-mode = 'full-finetune'
-# mode = 'lokr'
+mode = 'lokr'
 
 n_epochs = 50
 batch_size = 1

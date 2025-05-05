@@ -50,7 +50,7 @@ use_ema = false
 
 gradient_checkpointing = true
 
-zero_grad_set_to_none = true # 设置为true以减少内存使用
+zero_grad_set_to_none = true
 
 # # 增加lokr_factor以减少训练参数
 # lokr_factor = 32  # 从16增加到32

@@ -6,10 +6,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import pandas as pd
 import torch
 import torch.nn.functional as F
-import wandb
 from accelerate import PartialState
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
@@ -382,27 +380,6 @@ class BaseTuner:
                     log_data = {"train_loss": self.train_loss, "lr": current_lr}
                     self.accelerator.log(log_data, step=global_step)
 
-                    # 每10步记录一次 timesteps 柱状图
-                    if global_step % 10 == 0 and self.timesteps_counter and self.config.log_with == "wandb" and len(self.timesteps_counter) > 0:
-                        # 创建柱状图数据
-                        timesteps = list(self.timesteps_counter.keys())
-                        counts = list(self.timesteps_counter.values())
-
-                        # 创建 DataFrame 用于柱状图
-                        dataframe = pd.DataFrame({"timestep": timesteps, "count": counts})
-                        dataframe = dataframe.sort_values("timestep")  # 按 timestep 排序
-
-                        # 创建wandb表格并使用单独的调用记录
-                        wandb_table = wandb.Table(dataframe=dataframe)
-                        bar_chart = wandb.plot.bar(
-                            wandb_table,
-                            "count",
-                            "timestep",
-                            title="Timesteps Distribution",
-                        )
-
-                        # 使用单独的wandb.log调用记录图表
-                        wandb.log({"timesteps_distribution": bar_chart}, step=global_step)
                     self.train_loss = 0.0
 
                     if self.accelerator.is_main_process:
