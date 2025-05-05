@@ -80,6 +80,7 @@ class BaseConfig:
     save_every_n_epochs: int = field(default=1, metadata={"help": "Save every n epochs."})
     preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
     preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
+    preview_before_training: bool = field(default=False, metadata={"help": "Generate preview before training starts."})
 
     log_with: Literal["wandb", "tensorboard", "none"] = field(default="wandb", metadata={"help": "Logger."})
 

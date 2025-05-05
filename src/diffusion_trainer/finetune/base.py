@@ -65,6 +65,11 @@ class BaseTuner:
         self.all_snr = compute_snr(self.noise_scheduler, torch.arange(0, self.noise_scheduler.config.num_train_timesteps, dtype=torch.long)).to(self.device)  # type: ignore
         self.train_loss = 0.0
 
+    def generate_initial_preview(self) -> None:
+        """Generate preview images before training starts if configured to do so."""
+        logger.info("Generating preview before training starts")
+        self.generate_preview(f"{self.config.model_name}-before-training", 0)
+
     @abstractmethod
     def train(self) -> None:
         """
@@ -318,7 +323,9 @@ class BaseTuner:
         )
 
         logger.info("full_loader_length: %d", len(data_loader))
-        logger.info("skipped_loader_length: %d", len(skipped_data_loader))
+
+        if global_step == 0 and self.config.preview_before_training:
+            self.generate_initial_preview()
 
         total_task = progress.add_task(
             "Total Progress",
