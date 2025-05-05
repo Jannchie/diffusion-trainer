@@ -208,7 +208,7 @@ def load_pipeline(path: PathLike | str, dtype: torch.dtype, pipe_type: type[T]) 
 
 def unwrap_model(accelerator: Accelerator, model: torch.nn.Module) -> torch.nn.Module:
     model = accelerator.unwrap_model(model)
-    return model._orig_mod if is_compiled_module(model) else model  # type: ignore
+    return model._orig_mod if is_compiled_module(model) else model  # type: ignore  # noqa: SLF001
 
 
 def get_n_params(trainable_parameters: list[ParamDict]) -> int:
@@ -249,3 +249,12 @@ def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[Pa
             # lr=self.unet_lr,
         )
     return optimizer
+
+
+def compute_sqrt_inv_snr_weights(timesteps: torch.Tensor, all_snr: torch.Tensor) -> torch.Tensor:
+    """
+    计算 1 / sqrt(SNR) 权重。
+    """
+    snr_t = all_snr[timesteps].to(timesteps.device)  # 确保设备一致
+    snr_t = torch.clamp(snr_t, min=1e-8, max=1000)  # 同时防止除零和过大值，增加 min clamp
+    return 1.0 / torch.sqrt(snr_t)

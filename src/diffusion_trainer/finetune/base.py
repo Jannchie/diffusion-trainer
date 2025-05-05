@@ -20,6 +20,7 @@ from diffusion_trainer.dataset.processors.create_parquet_processor import Create
 from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
 from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
 from diffusion_trainer.finetune.utils import (
+    compute_sqrt_inv_snr_weights,
     get_sample_options_hash,
     prepare_accelerator,
     str_to_dtype,
@@ -61,6 +62,7 @@ class BaseTuner:
         self.pipeline = self.get_pipeline()
         self.lycoris_model: LycorisNetwork | None = None
         self.noise_scheduler: DDPMScheduler = self.get_noise_scheduler()
+        self.all_snr = compute_snr(self.noise_scheduler, torch.arange(0, self.noise_scheduler.config.num_train_timesteps, dtype=torch.long))  # type: ignore
         self.train_loss = 0.0
 
     @abstractmethod
@@ -87,26 +89,32 @@ class BaseTuner:
         raise NotImplementedError(msg)
 
     def get_loss(self, timesteps: torch.Tensor, model_pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        if self.config.snr_gamma is None:
-            loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
-            loss = loss.mean()
-        else:
-            # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
-            # Since we predict the noise instead of x_0, the original formulation is slightly changed.
-            # This is discussed in Section 4.2 of the same paper.
-            snr = compute_snr(self.noise_scheduler, timesteps)
+        # 1. 计算基础 MSE 损失 (per sample)
+        loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
+        loss_per_sample = loss.mean(dim=list(range(1, len(loss.shape))))
+
+        # 初始化权重为 1
+        weights = torch.ones_like(loss_per_sample)
+
+        # 2. 如果启用了 Debiased Estimation，计算并乘以去偏权重
+        if self.config.use_debiased_estimation:
+            debias_weights = compute_sqrt_inv_snr_weights(timesteps, self.all_snr)
+            weights = weights * debias_weights  # 乘以去偏权重
+
+        # 3. 如果启用了 SNR 加权，计算并乘以 SNR 权重
+        if self.config.snr_gamma is not None:
+            snr = self.all_snr[timesteps]
             mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
+            # 根据 prediction_type 调整权重
             if self.noise_scheduler.config.get("prediction_type") == "epsilon":
                 epsilon = 1e-8
-                # For numerical stability, add epsilon directly to SNR for the denominator
                 mse_loss_weights = mse_loss_weights / (snr + epsilon)
             elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
                 mse_loss_weights = mse_loss_weights / (snr + 1)
+            weights = weights * mse_loss_weights  # 再乘以 SNR 权重
 
-            loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
-            loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
-            loss = loss.mean()
-        return loss
+        # 4. 应用最终权重并计算平均损失
+        return (loss_per_sample * weights).mean()
 
     def get_pred_target(
         self,

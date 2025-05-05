@@ -60,6 +60,11 @@ class BaseConfig:
     # SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0.
     # More details here: https://arxiv.org/abs/2303.09556.
     snr_gamma: float | None = field(default=None, metadata={"help": "SNR gamma. Recommended value is 5.0."})
+    # 使用去偏估计技术，通过SNR权重加权损失，使得模型更关注高SNR（低噪声）区域
+    use_debiased_estimation: bool = field(
+        default=False, metadata={"help": "Use debiased estimation technique to reweight loss. Focuses learning on high SNR (low noise) regions."}
+    )
+
     max_grad_norm: float = field(default=1.0, metadata={"help": "Max gradient norm."})
     use_ema: bool = field(default=False, metadata={"help": "Use EMA."})
     save_every_n_steps: int = field(default=0, metadata={"help": "Save every n steps."})
