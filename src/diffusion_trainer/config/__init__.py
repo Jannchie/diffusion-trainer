@@ -9,8 +9,8 @@ class SampleOptions:
     negative_prompt: str
     steps: int
     seed: int
-    width: int | None
-    height: int | None
+    width: int | None = field(default=None)
+    height: int | None = field(default=None)
 
 
 @dataclass

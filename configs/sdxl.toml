@@ -1,8 +1,9 @@
 seed = 47
 
-# image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
-meta_path = "demo_meta"
-skip_prepare_image = true
+image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
+skip_prepare_image = false
+
+meta_path = "datasets/suzume_xl"
 
 vae_path = "madebyollin/sdxl-vae-fp16-fix"
 vae_dtype = "fp16"
@@ -12,9 +13,10 @@ save_dir = "./out"
 
 optimizer = "adafactor"
 
-model_name = "creativexl-test"
+model_name = "creativexl-test-xl"
 
-mode = 'lokr'
+mode = 'full-finetune'
+# mode = 'lokr'
 
 n_epochs = 50
 batch_size = 1
@@ -26,7 +28,7 @@ save_every_n_steps = 5
 preview_every_n_epochs = 1
 preview_every_n_steps = 100
 
-mixed_precision = "fp16"
+mixed_precision = "bf16"
 weight_dtype = "fp32"
 save_dtype = "fp16"
 
