@@ -38,6 +38,7 @@ optimizer_num_cycles = 2
 text_encoder_lr = 0
 
 noise_offset = 0.1
+input_perturbation = 0.1
 
 snr_gamma = 5.0
 
