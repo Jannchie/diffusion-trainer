@@ -6,8 +6,10 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
 import torch
 import torch.nn.functional as F
+import wandb
 from accelerate import PartialState
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
@@ -186,6 +188,12 @@ class BaseTuner:
         else:
             msg = f"Unknown timestep bias strategy {self.config.timestep_bias_strategy}"
             raise ValueError(msg)
+
+        # 使用 Counter 统计采样的 timesteps
+        if hasattr(self, "timesteps_counter"):
+            for t in timesteps.cpu().numpy().tolist():
+                self.timesteps_counter[t] += 1
+
         return timesteps  # type: ignore
 
     def apply_seed_settings(self, seed: int) -> None:
@@ -286,6 +294,11 @@ class BaseTuner:
         self.checkpointing_path = self.save_path / "state"
         self.global_steps_file = self.checkpointing_path / "global_steps"
 
+        # 使用 Counter 替代列表来统计 timesteps
+        from collections import Counter
+
+        self.timesteps_counter = Counter()
+
         # Attempt to load previous state for resuming training
         try:
             self.accelerator.load_state(self.checkpointing_path.as_posix())
@@ -364,11 +377,32 @@ class BaseTuner:
 
                 if self.accelerator.sync_gradients:
                     current_lr = lr_scheduler.get_last_lr()[0]
-                    # if self.ema_unet:
-                    #     self.ema_unet.step(self.pipeline.unet.parameters())
 
                     global_step += 1
-                    self.accelerator.log({"train_loss": self.train_loss, "lr": current_lr}, step=global_step)
+                    log_data = {"train_loss": self.train_loss, "lr": current_lr}
+                    self.accelerator.log(log_data, step=global_step)
+
+                    # 每10步记录一次 timesteps 柱状图
+                    if global_step % 10 == 0 and self.timesteps_counter and self.config.log_with == "wandb" and len(self.timesteps_counter) > 0:
+                        # 创建柱状图数据
+                        timesteps = list(self.timesteps_counter.keys())
+                        counts = list(self.timesteps_counter.values())
+
+                        # 创建 DataFrame 用于柱状图
+                        dataframe = pd.DataFrame({"timestep": timesteps, "count": counts})
+                        dataframe = dataframe.sort_values("timestep")  # 按 timestep 排序
+
+                        # 创建wandb表格并使用单独的调用记录
+                        wandb_table = wandb.Table(dataframe=dataframe)
+                        bar_chart = wandb.plot.bar(
+                            wandb_table,
+                            "count",
+                            "timestep",
+                            title="Timesteps Distribution",
+                        )
+
+                        # 使用单独的wandb.log调用记录图表
+                        wandb.log({"timesteps_distribution": bar_chart}, step=global_step)
                     self.train_loss = 0.0
 
                     if self.accelerator.is_main_process:

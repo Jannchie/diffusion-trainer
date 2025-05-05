@@ -23,7 +23,8 @@ save_every_n_epochs = 0
 save_every_n_steps = 500
 
 preview_every_n_epochs = 0
-preview_every_n_steps = 100
+preview_every_n_steps = 50
+preview_before_training = true
 
 checkpoint_every_n_steps = 500
 
@@ -31,9 +32,9 @@ mixed_precision = "bf16"
 weight_dtype = "fp32"
 save_dtype = "fp16"
 
-unet_lr = 5e-5
+unet_lr = 2e-5
 optimizer_warmup_steps = 50
-optimizer_num_cycles = 2
+optimizer_num_cycles = 4
 
 text_encoder_lr = 0
 
@@ -44,8 +45,7 @@ snr_gamma = 5.0
 
 max_grad_norm = 1.0
 
-timestep_bias_strategy = "uniform"
-
+timestep_bias_strategy = "logit"
 use_ema = false
 
 gradient_checkpointing = true
