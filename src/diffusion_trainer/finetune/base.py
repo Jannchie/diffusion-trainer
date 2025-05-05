@@ -62,7 +62,7 @@ class BaseTuner:
         self.pipeline = self.get_pipeline()
         self.lycoris_model: LycorisNetwork | None = None
         self.noise_scheduler: DDPMScheduler = self.get_noise_scheduler()
-        self.all_snr = compute_snr(self.noise_scheduler, torch.arange(0, self.noise_scheduler.config.num_train_timesteps, dtype=torch.long))  # type: ignore
+        self.all_snr = compute_snr(self.noise_scheduler, torch.arange(0, self.noise_scheduler.config.num_train_timesteps, dtype=torch.long)).to(self.device)  # type: ignore
         self.train_loss = 0.0
 
     @abstractmethod
@@ -164,8 +164,19 @@ class BaseTuner:
             timesteps = torch.randint(0, num_timesteps, (batch_size,), device=self.accelerator.device)
         elif self.config.timestep_bias_strategy == "logit":
             # Sample a random timestep for each image, potentially biased by the timestep weights.
-            # Biasing the timestep weights allows us to spend less time training irrelevant timesteps.
-            weights = logit_timestep_weights(num_timesteps, device=self.accelerator.device)
+            # Biasing the timestep weights allows us to spend less time training irrelevant timesteps
+
+            # Get m and s parameters from config or use defaults
+            m = self.config.timestep_bias_m
+            s = self.config.timestep_bias_s
+
+            # Use these parameters for the logit distribution
+            weights = logit_timestep_weights(
+                num_timesteps,
+                m=m,
+                s=s,
+                device=self.accelerator.device,
+            )
             timesteps = torch.multinomial(weights, batch_size, replacement=True).int()
         else:
             msg = f"Unknown timestep bias strategy {self.config.timestep_bias_strategy}"
