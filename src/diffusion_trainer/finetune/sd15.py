@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
+from diffusers.training_utils import EMAModel
 from torch.utils.data import DataLoader
 from transformers.models.clip import CLIPTextModel
 
@@ -94,6 +95,12 @@ class SD15Tuner(BaseTuner):
             model.train()
         freeze_models = [model for model in self.models if model not in trainable_models]
         self.freeze_model(freeze_models)
+
+        # Initialize EMA model if enabled
+        if self.config.use_ema:
+            self.ema_unet = self.get_ema(self.pipeline.unet, self.pipeline.unet.config)
+        else:
+            self.ema_unet = None
 
         self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, trainable_models_with_lr)
         self.optimizer = initialize_optimizer(self.config.optimizer, self.trainable_parameters_dicts)
@@ -200,6 +207,11 @@ class SD15Tuner(BaseTuner):
             self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
 
         self.optimizer.step()
+
+        # Update EMA model if enabled
+        if self.accelerator.sync_gradients and self.ema_unet is not None:
+            self.ema_unet.step(self.pipeline.unet.parameters())
+
         self.lr_scheduler.step()
         # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
         self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
@@ -236,3 +248,13 @@ class SD15Tuner(BaseTuner):
         )
         # SD1.5 use the **last** hidden state as the prompt embedding
         return prompt_embeds_output.last_hidden_state
+
+    def get_ema(self, model: torch.nn.Module, config: dict) -> EMAModel:
+        """Initialize Exponential Moving Average for the model if enabled in config."""
+        ema_model = EMAModel(
+            parameters=model.parameters(),
+            model_cls=UNet2DConditionModel,
+            model_config=config,
+        )
+        ema_model.to(self.device)
+        return ema_model
