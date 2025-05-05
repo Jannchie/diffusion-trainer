@@ -144,7 +144,7 @@ class BaseTuner:
 
     def get_noisy_latents(self, latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.IntTensor) -> torch.Tensor:
         """获取带噪的潜变量"""
-        if hasattr(self.config, "input_perturbation") and self.config.input_perturbation > 0:
+        if self.config.input_perturbation > 0:
             # 仅当配置存在且值非零时应用扰动
             noise = noise + self.config.input_perturbation * torch.randn_like(noise)
         return self.noise_scheduler.add_noise(latents, noise, timesteps)
