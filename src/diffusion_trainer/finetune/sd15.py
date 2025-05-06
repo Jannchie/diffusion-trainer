@@ -105,9 +105,6 @@ class SD15Tuner(BaseTuner):
         self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, trainable_models_with_lr)
         self.optimizer = initialize_optimizer(self.config.optimizer, self.trainable_parameters_dicts)
 
-        # 设置噪声调度器
-        self.get_noise_scheduler()
-
         sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
         with self.accelerator.main_process_first():
             data_loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0, collate_fn=dataset.collate_fn)

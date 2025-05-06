@@ -141,9 +141,6 @@ class SDXLTuner(BaseTuner):
 
         self.trainable_parameters: list[list[torch.Tensor]] = [param["params"] for param in self.trainable_parameters_dicts]
 
-        # 设置噪声调度器
-        self.get_noise_scheduler()
-
         sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
         with self.accelerator.main_process_first():
             # Optimize DataLoader by using appropriate num_workers based on system
