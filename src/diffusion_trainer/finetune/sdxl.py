@@ -11,6 +11,7 @@ from accelerate.logging import get_logger
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from sd_embed.embedding_funcs import get_weighted_text_embeddings_sdxl
 from torch.utils.data import DataLoader
 from transformers.models.clip import CLIPTextModel, CLIPTextModelWithProjection
 
@@ -333,3 +334,6 @@ class SDXLTuner(BaseTuner):
         del prompt_embeds_output_2, text_input_ids_2, text_inputs_2
 
         return prompt_embeds, prompt_embeds_pooled_2
+
+    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
+        return get_weighted_text_embeddings_sdxl(self.pipeline, prompt, neg_prompt, clip_skip=2)  # type: ignore
