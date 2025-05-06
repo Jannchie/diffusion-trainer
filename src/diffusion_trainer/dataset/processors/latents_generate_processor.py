@@ -193,12 +193,12 @@ class SimpleLatentsProcessor:
         SimpleLatentsProcessor.save_encoded_image(WritePayload(save_npz_path, latents, crop_ltrb, original_size, reso))
 
 
-from inch.processor import InchProcessor
+# from inch.processor import InchProcessor
 
 
-class Processor:
-    def process(self):
-        InchProcessor()
+# class Processor:
+#     def process(self):
+#         InchProcessor()
 
 
 class LatentsGenerateProcessor:

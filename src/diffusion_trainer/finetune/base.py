@@ -393,7 +393,7 @@ class BaseTuner:
                     if should_save_step:
                         self.saving_model(f"{self.config.model_name}-step{global_step}")
                     if should_checkpoint_step:
-                        self.accelerator.save_state(self.checkpointing_path.asposix())
+                        self.accelerator.save_state(self.checkpointing_path.as_posix())
                         self.global_steps_file.write_text(str(global_step))
                     if should_preview_step:
                         self.generate_preview(f"{self.config.model_name}-step{global_step}", global_step)
