@@ -11,7 +11,6 @@ from accelerate.logging import get_logger
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.training_utils import EMAModel
 from torch.utils.data import DataLoader
 from transformers.models.clip import CLIPTextModel, CLIPTextModelWithProjection
 
@@ -117,16 +116,6 @@ class SDXLTuner(BaseTuner):
             msg = f"Unknown mode {config.mode}"
             raise ValueError(msg)
 
-    def init_ema(self, model: torch.nn.Module, config: dict) -> None:
-        # Create EMA for the unet.
-        self.ema_unet: None | EMAModel = None
-        if self.config.use_ema:
-            self.ema_unet = EMAModel(
-                parameters=model.parameters(),
-                model_cls=UNet2DConditionModel,
-                model_config=config,
-            ).to(self.device)
-
     def train(self) -> None:
         self.accelerator.wait_for_everyone()
         dataset = self.prepare_dataset(self.config)
@@ -134,7 +123,6 @@ class SDXLTuner(BaseTuner):
             dataset.print_bucket_info()
         freeze_models = [model for model in self.models if model not in self.training_models]
         self.freeze_model(freeze_models)
-        self.init_ema(self.pipeline.unet, self.pipeline.unet.config)
 
         self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, self.trainable_models_with_lr)
         optimizer = initialize_optimizer(self.config.optimizer, self.trainable_parameters_dicts)

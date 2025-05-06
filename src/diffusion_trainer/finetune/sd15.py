@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
-from diffusers.training_utils import EMAModel
 from torch.utils.data import DataLoader
 from transformers.models.clip import CLIPTextModel
 
@@ -245,13 +244,3 @@ class SD15Tuner(BaseTuner):
         )
         # SD1.5 use the **last** hidden state as the prompt embedding
         return prompt_embeds_output.last_hidden_state
-
-    def get_ema(self, model: torch.nn.Module, config: dict) -> EMAModel:
-        """Initialize Exponential Moving Average for the model if enabled in config."""
-        ema_model = EMAModel(
-            parameters=model.parameters(),
-            model_cls=UNet2DConditionModel,
-            model_config=config,
-        )
-        ema_model.to(self.device)
-        return ema_model

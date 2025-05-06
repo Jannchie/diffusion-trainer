@@ -9,10 +9,11 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn.functional as F
 from accelerate import PartialState
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from diffusers.training_utils import compute_snr, free_memory
+from diffusers.training_utils import EMAModel, compute_snr, free_memory
 
 from diffusion_trainer.config import BaseConfig, SampleOptions
 from diffusion_trainer.dataset.dataset import DiffusionBatch, DiffusionDataset
@@ -548,3 +549,13 @@ class BaseTuner:
             prompts.append(prompt)
 
         return prompts
+
+    def get_ema(self, model: torch.nn.Module, config: dict) -> EMAModel:
+        """Initialize Exponential Moving Average for the model if enabled in config."""
+        ema_model = EMAModel(
+            parameters=model.parameters(),
+            model_cls=UNet2DConditionModel,
+            model_config=config,
+        )
+        ema_model.to(self.device)
+        return ema_model
