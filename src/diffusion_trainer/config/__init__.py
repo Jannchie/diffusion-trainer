@@ -11,6 +11,7 @@ class SampleOptions:
     seed: int
     width: int | None = field(default=None)
     height: int | None = field(default=None)
+    clip_skip: int = field(default=2)
 
 
 @dataclass

@@ -234,17 +234,15 @@ class SD15Tuner(BaseTuner):
         return get_weighted_text_embeddings_sd15(self.pipeline, prompt, neg_prompt, clip_skip=clip_skip)  # type: ignore
 
     def get_prompt_embeds(self, prompts_str: list[str]) -> torch.Tensor:
-        text_inputs = self.pipeline.tokenizer(
-            prompts_str,
-            padding="max_length",
-            max_length=self.pipeline.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        text_input_ids = text_inputs["input_ids"].to(self.accelerator.device)
-        prompt_embeds_output = self.pipeline.text_encoder(
-            text_input_ids,
-            output_hidden_states=True,
-        )
-        # SD1.5 use the **last** hidden state as the prompt embedding
-        return prompt_embeds_output.last_hidden_state
+        # 使用 sd_embed 的 get_weighted_text_embeddings_sd15 支持任意长度和权重
+        # 训练时 neg_prompt 传空字符串，行为与推理一致
+        prompt_embeds_list = []
+        for prompt in prompts_str:
+            prompt_embeds, _ = get_weighted_text_embeddings_sd15(
+                self.pipeline,  # type: ignore
+                prompt,
+                pad_last_block=False,
+            )
+            prompt_embeds_list.append(prompt_embeds)
+        # 按 batch 拼接
+        return torch.cat(prompt_embeds_list, dim=0)
