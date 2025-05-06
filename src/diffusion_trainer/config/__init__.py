@@ -31,6 +31,7 @@ class BaseConfig:
     single_tag_dropout: float = field(default=0.0, metadata={"help": "Single tag dropout."})
     all_tags_dropout: float = field(default=0.0, metadata={"help": "All tags dropout."})
     caption_dropout: float = field(default=0.0, metadata={"help": "Caption dropout."})
+    use_enhanced_embeddings: bool = field(default=False, metadata={"help": "Whether to use enhanced preview prompt embeddings for training."})
 
     seed: int = field(default_factory=lambda: random.randint(0, 1_000_000_000), metadata={"help": "Seed for reproducibility."})
     model_name: str = field(default="my_model", metadata={"help": "Model name."})

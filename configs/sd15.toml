@@ -1,4 +1,5 @@
 seed = 47
+use_enhanced_embeddings = true
 
 meta_path = "datasets/cache_pictoria"
 skip_prepare_image = false

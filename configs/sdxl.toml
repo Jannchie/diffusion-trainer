@@ -1,4 +1,5 @@
 seed = 47
+use_enhanced_embeddings = false
 
 image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
 skip_prepare_image = false
