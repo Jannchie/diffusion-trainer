@@ -100,7 +100,7 @@ class SDXLTuner(BaseTuner):
     def configure_trainable_models(self, config: SDXLConfig, sdxl_models: SDXLModels) -> None:
         self.trainable_models_with_lr: list[TrainableModel] = []
         if config.mode == "full-finetune":
-            # 如果是全量微调，根据配置文件中的学习率，将模型的参数设置为可训练
+            # For full fine-tuning, set model parameters as trainable according to the learning rates in the config file
             if config.unet_lr:
                 self.trainable_models_with_lr.append(TrainableModel(model=sdxl_models.unet, lr=config.unet_lr))
             if config.text_encoder_1_lr:
@@ -109,7 +109,7 @@ class SDXLTuner(BaseTuner):
                 self.trainable_models_with_lr.append(TrainableModel(model=sdxl_models.text_encoder_2, lr=config.text_encoder_2_lr))
 
         elif config.mode in ("lora", "lokr", "loha"):
-            # 如果是高效微调，则模型本身无需训练，只需训练Lora模型。
+            # For efficient fine-tuning, only the Lora model needs to be trained; the base model itself does not require training
             self.lycoris_model = apply_lora_config(config.mode, sdxl_models.unet)
             self.trainable_models_with_lr.append(TrainableModel(model=self.lycoris_model, lr=config.unet_lr))
             self.models.append(self.lycoris_model)

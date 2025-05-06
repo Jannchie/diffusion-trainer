@@ -92,31 +92,31 @@ class BaseTuner:
         raise NotImplementedError(msg)
 
     def get_loss(self, timesteps: torch.Tensor, model_pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        # 1. 计算基础 MSE 损失 (per sample)
+        # 1. Compute the basic MSE loss (per sample)
         loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
         loss_per_sample = loss.mean(dim=list(range(1, len(loss.shape))))
 
-        # 初始化权重为 1
+        # Initialize weights to 1
         weights = torch.ones_like(loss_per_sample)
 
-        # 2. 如果启用了 Debiased Estimation，计算并乘以去偏权重
+        # 2. If Debiased Estimation is enabled, compute and apply debiasing weights
         if self.config.use_debiased_estimation:
             debias_weights = compute_sqrt_inv_snr_weights(timesteps, self.all_snr)
-            weights = weights * debias_weights  # 乘以去偏权重
+            weights = weights * debias_weights  # Multiply by debiasing weights
 
-        # 3. 如果启用了 SNR 加权，计算并乘以 SNR 权重
+        # 3. If SNR weighting is enabled, compute and apply SNR weights
         if self.config.snr_gamma is not None:
             snr = self.all_snr[timesteps]
             mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
-            # 根据 prediction_type 调整权重
+            # Adjust weights according to prediction_type
             if self.noise_scheduler.config.get("prediction_type") == "epsilon":
                 epsilon = 1e-8
                 mse_loss_weights = mse_loss_weights / (snr + epsilon)
             elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
                 mse_loss_weights = mse_loss_weights / (snr + 1)
-            weights = weights * mse_loss_weights  # 再乘以 SNR 权重
+            weights = weights * mse_loss_weights  # Further multiply by SNR weights
 
-        # 4. 应用最终权重并计算平均损失
+        # 4. Apply the final weights and compute the mean loss
         return (loss_per_sample * weights).mean()
 
     def get_pred_target(
@@ -154,9 +154,9 @@ class BaseTuner:
         return noise
 
     def get_noisy_latents(self, latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.IntTensor) -> torch.Tensor:
-        """获取带噪的潜变量"""
+        """Get noisy latents"""
         if self.config.input_perturbation > 0:
-            # 仅当配置存在且值非零时应用扰动
+            # Apply perturbation only if the configuration exists and the value is non-zero
             noise = noise + self.config.input_perturbation * torch.randn_like(noise)
         return self.noise_scheduler.add_noise(latents, noise, timesteps)
 
@@ -185,7 +185,7 @@ class BaseTuner:
             msg = f"Unknown timestep bias strategy {self.config.timestep_bias_strategy}"
             raise ValueError(msg)
 
-        # 使用 Counter 统计采样的 timesteps
+        # Use Counter to count sampled timesteps
         if hasattr(self, "timesteps_counter"):
             for t in timesteps.cpu().numpy().tolist():
                 self.timesteps_counter[t] += 1
@@ -256,8 +256,8 @@ class BaseTuner:
         self.accelerator.wait_for_everyone()
 
     def get_noise_scheduler(self) -> DDPMScheduler:
-        """设置噪声调度器"""
-        # 如果配置中指定了预测类型，则使用该类型
+        """Set up the noise scheduler"""
+        # Use the specified prediction type from the configuration if provided
         if hasattr(self.config, "prediction_type") and self.config.prediction_type == "v_prediction":
             self.pipeline.scheduler.register_to_config(
                 rescale_betas_zero_snr=True,
@@ -265,7 +265,7 @@ class BaseTuner:
                 prediction_type="v_prediction",
             )
 
-        # 从pipeline的调度器配置中创建噪声调度器
+        # Create the noise scheduler from the pipeline's scheduler configuration
         noise_scheduler = DDPMScheduler.from_config(
             self.pipeline.scheduler.config,
         )
@@ -290,7 +290,7 @@ class BaseTuner:
         self.checkpointing_path = self.save_path / "state"
         self.global_steps_file = self.checkpointing_path / "global_steps"
 
-        # 使用 Counter 替代列表来统计 timesteps
+        # Use Counter instead of a list to count timesteps
         from collections import Counter
 
         self.timesteps_counter = Counter()
@@ -302,33 +302,33 @@ class BaseTuner:
         except Exception:
             global_step = 0
 
-        # 1. 计算已完成的完整 epoch 数
+        # 1. Calculate the number of completed full epochs
         skipped_epoch = global_step // num_update_steps_per_epoch if num_update_steps_per_epoch > 0 else 0
 
-        # 2. 计算在当前 epoch 内需要跳过的 dataloader 批次数
+        # 2. Calculate the number of dataloader batches to skip in the current epoch
         num_batches_to_skip_in_current_epoch = 0
         if global_step > 0 and num_update_steps_per_epoch > 0:
-            # 计算当前 epoch 内已完成的优化器步数
+            # Calculate the number of optimizer steps completed in the current epoch
             steps_in_current_epoch = global_step % num_update_steps_per_epoch
-            # 计算这些优化器步数对应的 dataloader 批次数
+            # Calculate the number of dataloader batches corresponding to these optimizer steps
             num_batches_to_skip_in_current_epoch = steps_in_current_epoch * self.config.gradient_accumulation_steps
 
         if global_step != 0:
-            # 修正日志信息
+            # Adjust log information
             logger.info(
                 "Resuming from global step %d (Epoch %d, skipping %d dataloader batches in current epoch)",
                 global_step,
                 skipped_epoch,
                 num_batches_to_skip_in_current_epoch,
             )
-            # （可选）计算并记录总处理样本数
+            # (Optional) Calculate and record the total number of processed samples
             total_samples_processed = global_step * self.config.gradient_accumulation_steps * self.accelerator.num_processes * self.config.batch_size
             logger.info("Approximately %d total samples processed before resuming.", total_samples_processed)
 
         # 3. 使用正确的批次数调用 skip_first_batches
         skipped_data_loader = self.accelerator.skip_first_batches(
             data_loader,
-            num_batches_to_skip_in_current_epoch,  # 使用正确计算的值
+            num_batches_to_skip_in_current_epoch,  # Use the correctly calculated value
         )
 
         logger.info("full_loader_length: %d", len(data_loader))
@@ -415,17 +415,17 @@ class BaseTuner:
 
     @torch.no_grad()
     def generate_preview(self, filename: str, global_step: int = 0) -> None:
-        # 释放内存以确保有足够的显存用于预览生成
+        # Release memory to ensure sufficient VRAM for preview generation
         free_memory()
 
-        # 简单的回调函数，满足pipeline接口需求
+        # Simple callback function to meet the pipeline interface requirements
         def callback_on_step_end(_pipe: StableDiffusionXLPipelineOutput, _step: int, _timestep: int, _kwargs: dict) -> dict:
             return {}
 
         state = PartialState()
         self.accelerator.wait_for_everyone()
 
-        # 在进程间拆分预览样本选项
+        # Split preview sample options across processes
         with state.split_between_processes(self.config.preview_sample_options) as sample_options:
             for sample_option in sample_options:
                 if not isinstance(sample_option, SampleOptions):
@@ -435,17 +435,17 @@ class BaseTuner:
                 filename_with_hash = f"{filename}-{hash_hex}"
                 logger.info("Generating preview for %s", filename_with_hash)
 
-                # 保存原始训练相关设置和设备信息，后续会恢复
+                # Save original training-related settings and device information for later restoration
                 original_training_mode = {}
                 original_device = {}
                 for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder), ("vae", self.pipeline.vae)]:
                     original_training_mode[name] = model.training
                     original_device[name] = next(model.parameters()).device
-                    model.eval()  # 切换到评估模式以用于推理
+                    model.eval()  # Switch to evaluation mode for inference
                 vae_dtype = str_to_dtype(self.config.vae_dtype)
                 self.pipeline.vae.to(dtype=vae_dtype)
 
-                # 使用自动混合精度生成预览图像
+                # Use automatic mixed precision to generate preview images
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
                 generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
 
@@ -495,18 +495,18 @@ class BaseTuner:
                         step=global_step,
                     )
 
-                # 及时释放生成的结果，减少内存占用
+                # Release generated results promptly to reduce memory usage
                 del result
                 torch.cuda.empty_cache()
 
-                # 恢复模型的训练模式
+                # Restore the training mode of the models
                 for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder), ("vae", self.pipeline.vae)]:
                     if model.training != original_training_mode[name]:
                         model.train(original_training_mode[name])
                     if next(model.parameters()).device != original_device[name]:
                         model.to(original_device[name])
 
-        # 确保所有进程完成预览生成
+        # Ensure all processes have completed preview generation
         free_memory()
         self.accelerator.wait_for_everyone()
 

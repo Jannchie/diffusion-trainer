@@ -106,7 +106,7 @@ class SimpleLatentsProcessor:
         )
 
     @staticmethod
-    def load_image(image_path: str) -> np.ndarray:
+    def process(image_path: str) -> np.ndarray:
         """Load the image from the path."""
         image = Image.open(image_path, "r").convert("RGB")
         return np.array(image)
@@ -174,7 +174,7 @@ class SimpleLatentsProcessor:
     @torch.no_grad()
     def process_by_path(self, image_path: Path, save_npz_path: Path, save_img_path: str | None = None) -> None:
         """Process the image and save the latent vectors."""
-        image_np = SimpleLatentsProcessor.load_image(image_path.as_posix())
+        image_np = SimpleLatentsProcessor.process(image_path.as_posix())
         self.process_by_np(image_np, save_npz_path, save_img_path)
 
     @torch.no_grad()
@@ -191,6 +191,14 @@ class SimpleLatentsProcessor:
         image_tensor = self.prepare_image_tensor(image_np)
         latents = self.encode_image(image_tensor)
         SimpleLatentsProcessor.save_encoded_image(WritePayload(save_npz_path, latents, crop_ltrb, original_size, reso))
+
+
+from inch.processor import InchProcessor
+
+
+class Processor:
+    def process(self):
+        InchProcessor()
 
 
 class LatentsGenerateProcessor:
@@ -246,15 +254,15 @@ class LatentsGenerateProcessor:
                     if reso is not None:
                         # TypeError: Object of type int64 is not JSON serializable
                         reso = reso.tolist()
-                        with self.lock:  # 使用锁来保证线程安全
+                        with self.lock:  # Use a lock to ensure thread safety
                             self.progress_counter += 1
                         continue
                 except Exception as e:
-                    # 读取失败，重新处理
+                    # Failed to read, reprocessing
                     logger.error(f"Failed to load {npz_save_path}, reprocessing...")
                     logger.exception(e)
             try:
-                image_np = SimpleLatentsProcessor.load_image(image_path.as_posix())
+                image_np = SimpleLatentsProcessor.process(image_path.as_posix())
             except Exception as e:
                 logger.exception(e)
                 with self.lock:
@@ -278,7 +286,7 @@ class LatentsGenerateProcessor:
         while True:
             data = self.process_queue.get()
             if data is None:
-                break  # 退出信号
+                break  # Exit signal
             npz_save_path, image_np = data
             original_size = image_np.shape[1], image_np.shape[0]
             reso, resized_size = processor.select_reso(*original_size)
@@ -303,10 +311,10 @@ class LatentsGenerateProcessor:
         while True:
             data = self.write_queue.get()
             if data is None:
-                break  # 退出信号
+                break  # Exit signal
 
             SimpleLatentsProcessor.save_encoded_image(data)
-            with self.lock:  # 使用锁来保证线程安全
+            with self.lock:  # Use a lock to ensure thread safety
                 self.progress_counter += 1
 
     def _setup_threads(self) -> None:

@@ -62,7 +62,7 @@ class SD15Tuner(BaseTuner):
 
         self.accelerator = prepare_accelerator(self.config.gradient_accumulation_steps, self.mixed_precision, self.config.log_with)
 
-        # 使用 torch.cuda.empty_cache() 确保在加载模型前清理GPU内存
+        # Use torch.cuda.empty_cache() to clear GPU memory before loading the model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -73,7 +73,7 @@ class SD15Tuner(BaseTuner):
         self.models.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.models.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
 
-        # 确认梯度检查点启用
+        # Ensure gradient checkpointing is enabled
         if self.config.gradient_checkpointing:
             self.init_gradient_checkpointing(list(self.models))
 
@@ -133,14 +133,14 @@ class SD15Tuner(BaseTuner):
     def configure_trainable_models(self, models: SD15Models) -> list[TrainableModel]:
         trainable_models_with_lr = []
         if self.config.mode == "full-finetune":
-            # 如果是全量微调，根据配置文件中的学习率，将模型的参数设置为可训练
+            # For full fine-tuning, set model parameters as trainable according to the learning rates in the config file
             if self.config.unet_lr:
                 trainable_models_with_lr.append(TrainableModel(model=models.unet, lr=self.config.unet_lr))
             if self.config.text_encoder_lr:
                 trainable_models_with_lr.append(TrainableModel(model=models.text_encoder, lr=self.config.text_encoder_lr))
 
         elif self.config.mode in ("lora", "lokr", "loha"):
-            # 如果是高效微调，则模型本身无需训练，只需训练Lora模型。
+            # For efficient fine-tuning, only the Lora model needs to be trained; the base model itself does not require training
             lycoris_model = apply_lora_config(self.config.mode, models.unet)
             trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=self.config.unet_lr))
             self.lycoris_model = lycoris_model
@@ -213,7 +213,7 @@ class SD15Tuner(BaseTuner):
         # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
         self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
 
-        # 定期清理缓存
+        # Periodically clear the cache
         if self.accelerator.sync_gradients and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -230,8 +230,8 @@ class SD15Tuner(BaseTuner):
             return_dict=False,
         )[0]
 
-    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
-        return get_weighted_text_embeddings_sd15(self.pipeline, prompt, neg_prompt, clip_skip=2)  # type: ignore
+    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]:
+        return get_weighted_text_embeddings_sd15(self.pipeline, prompt, neg_prompt, clip_skip=clip_skip)  # type: ignore
 
     def get_prompt_embeds(self, prompts_str: list[str]) -> torch.Tensor:
         text_inputs = self.pipeline.tokenizer(

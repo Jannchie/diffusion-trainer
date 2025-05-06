@@ -118,12 +118,12 @@ def prepare_accelerator(
         msg = f"Unsupported dtype: {dtype}"
         raise ValueError(msg)
 
-    # 启用torch.compile (PyTorch 2.0+)
+    # Enable torch.compile (PyTorch 2.0+)
     dynamo_backend = None
     torch_compile = torch.__version__ >= "2.0.0"
 
     if torch_compile:
-        # 使用inductor后端，这是PyTorch 2.0中最快的后端
+        # Use the inductor backend, which is the fastest backend in PyTorch 2.0
         dynamo_backend = "inductor"
         logger.info("Torch compile enabled with %s backend", dynamo_backend)
 
@@ -253,8 +253,8 @@ def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[Pa
 
 def compute_sqrt_inv_snr_weights(timesteps: torch.Tensor, all_snr: torch.Tensor) -> torch.Tensor:
     """
-    计算 1 / sqrt(SNR) 权重。
+    Compute 1 / sqrt(SNR) weights.
     """
-    snr_t = all_snr[timesteps].to(timesteps.device)  # 确保设备一致
-    snr_t = torch.clamp(snr_t, min=1e-8, max=1000)  # 同时防止除零和过大值，增加 min clamp
+    snr_t = all_snr[timesteps].to(timesteps.device)  # Ensure device consistency
+    snr_t = torch.clamp(snr_t, min=1e-8, max=1000)  # Prevent both division by zero and excessively large values by adding a minimum clamp
     return 1.0 / torch.sqrt(snr_t)
