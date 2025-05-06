@@ -36,9 +36,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("diffusion_trainer")
 
 
-class BaseBatch: ...
-
-
 class BaseTuner:
     @staticmethod
     def from_config(config: BaseConfig) -> "BaseTuner":
