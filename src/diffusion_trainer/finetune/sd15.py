@@ -242,7 +242,7 @@ class SD15Tuner(BaseTuner):
                 prompt_embeds, _ = get_weighted_text_embeddings_sd15(
                     self.pipeline,  # type: ignore
                     prompt,
-                    pad_last_block=False,
+                    pad_last_block=True,
                 )
                 prompt_embeds_list.append(prompt_embeds)
             # 按 batch 拼接
