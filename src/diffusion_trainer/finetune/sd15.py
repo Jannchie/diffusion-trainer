@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
+from sd_embed.embedding_funcs import get_weighted_text_embeddings_sd15
 from torch.utils.data import DataLoader
 from transformers.models.clip import CLIPTextModel
 
@@ -228,6 +229,9 @@ class SD15Tuner(BaseTuner):
             prompt_embeds,
             return_dict=False,
         )[0]
+
+    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
+        return get_weighted_text_embeddings_sd15(self.pipeline, prompt, neg_prompt, clip_skip=2)  # type: ignore
 
     def get_prompt_embeds(self, prompts_str: list[str]) -> torch.Tensor:
         text_inputs = self.pipeline.tokenizer(

@@ -410,6 +410,9 @@ class BaseTuner:
             progress.stop()
         self.saving_model(f"{self.config.model_name}")
 
+    @abstractmethod
+    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str) -> tuple[torch.Tensor, torch.Tensor]: ...
+
     @torch.no_grad()
     def generate_preview(self, filename: str, global_step: int = 0) -> None:
         # 释放内存以确保有足够的显存用于预览生成
@@ -449,15 +452,31 @@ class BaseTuner:
                 with autocast_ctx:
                     self.pipeline.to(self.accelerator.device)
                     inference_steps = min(sample_option.steps, 25)
-                    result = self.pipeline(
-                        prompt=sample_option.prompt,
-                        negative_prompt=sample_option.negative_prompt,
-                        num_inference_steps=inference_steps,
-                        generator=generator,
-                        callback_on_step_end=callback_on_step_end,  # type: ignore
-                        width=sample_option.width,
-                        height=sample_option.height,
-                    )
+                    try:
+                        prompt_embeds, prompt_neg_embeds = self.get_preview_prompt_embeds(
+                            sample_option.prompt,
+                            sample_option.negative_prompt,
+                        )
+                        result = self.pipeline(
+                            prompt_embeds=prompt_embeds,
+                            negative_prompt_embeds=prompt_neg_embeds,
+                            num_inference_steps=inference_steps,
+                            generator=generator,
+                            callback_on_step_end=callback_on_step_end,  # type: ignore
+                            width=sample_option.width,
+                            height=sample_option.height,
+                        )
+                    except NotImplementedError:
+                        logger.info("Using prompts directly for preview generation")
+                        result = self.pipeline(
+                            prompt=sample_option.prompt,
+                            negative_prompt=sample_option.negative_prompt,
+                            num_inference_steps=inference_steps,
+                            generator=generator,
+                            callback_on_step_end=callback_on_step_end,  # type: ignore
+                            width=sample_option.width,
+                            height=sample_option.height,
+                        )
 
                 logger.info("Preview generated for %s", filename_with_hash)
 

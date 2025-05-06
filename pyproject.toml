@@ -28,6 +28,8 @@ dependencies = [
     "inch>=0.2.0",
     "httpx>=0.28.1",
     "pytest>=8.3.5",
+    "torchao>=0.9.0",
+    "sd-embed",
 ]
 
 
@@ -48,7 +50,8 @@ explicit = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 xformers = { index = "pytorch" }
-
+torchao = { index = "pytorch" }
+sd-embed = { git = "https://github.com/xhinker/sd_embed.git", rev = "main" }
 
 [tool.pyright]
 
