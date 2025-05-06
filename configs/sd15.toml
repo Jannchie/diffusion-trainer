@@ -62,3 +62,4 @@ seed = 47
 steps = 25
 width = 768
 height = 768
+clip_skip = 2

@@ -59,3 +59,4 @@ prompt = "background, cityscape, urban, city, street, road, buildings, cars, tra
 negative_prompt = "worst quality, bad quality, blurry, low resolution"
 seed = 47
 steps = 25
+clip_skip = 2

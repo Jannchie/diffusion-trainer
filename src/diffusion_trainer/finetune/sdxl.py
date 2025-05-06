@@ -335,5 +335,5 @@ class SDXLTuner(BaseTuner):
 
         return prompt_embeds, prompt_embeds_pooled_2
 
-    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
-        return get_weighted_text_embeddings_sdxl(self.pipeline, prompt, neg_prompt, clip_skip=2)  # type: ignore
+    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]:
+        return get_weighted_text_embeddings_sdxl(self.pipeline, prompt, neg_prompt, clip_skip=clip_skip)  # type: ignore

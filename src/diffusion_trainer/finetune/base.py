@@ -393,7 +393,7 @@ class BaseTuner:
                     if should_save_step:
                         self.saving_model(f"{self.config.model_name}-step{global_step}")
                     if should_checkpoint_step:
-                        self.accelerator.save_state(self.checkpointing_path.as_posix())
+                        self.accelerator.save_state(self.checkpointing_path.asposix())
                         self.global_steps_file.write_text(str(global_step))
                     if should_preview_step:
                         self.generate_preview(f"{self.config.model_name}-step{global_step}", global_step)
@@ -411,7 +411,7 @@ class BaseTuner:
         self.saving_model(f"{self.config.model_name}")
 
     @abstractmethod
-    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]: ...
 
     @torch.no_grad()
     def generate_preview(self, filename: str, global_step: int = 0) -> None:
@@ -456,6 +456,7 @@ class BaseTuner:
                         prompt_embeds, prompt_neg_embeds = self.get_preview_prompt_embeds(
                             sample_option.prompt,
                             sample_option.negative_prompt,
+                            getattr(sample_option, "clip_skip", 2),
                         )
                         result = self.pipeline(
                             prompt_embeds=prompt_embeds,
