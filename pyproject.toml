@@ -29,7 +29,7 @@ dependencies = [
     "httpx>=0.28.1",
     "pytest>=8.3.5",
     "torchao>=0.9.0",
-    "sd-embed",
+    "diffusion-prompt-embedder>=0.2.0",
 ]
 
 

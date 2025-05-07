@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
-from sd_embed.embedding_funcs import get_weighted_text_embeddings_sd15
+from diffusion_prompt_embedder import get_embeddings_sd15, get_embeddings_sd15_batch
 from torch.utils.data import DataLoader
 from transformers.models.clip import CLIPTextModel
 
@@ -231,22 +231,24 @@ class SD15Tuner(BaseTuner):
         )[0]
 
     def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]:
-        return get_weighted_text_embeddings_sd15(self.pipeline, prompt, neg_prompt, clip_skip=clip_skip)  # type: ignore
+        return get_embeddings_sd15(
+            self.pipeline.tokenizer,
+            self.pipeline.text_encoder,
+            prompt=prompt,
+            neg_prompt=neg_prompt,
+            clip_skip=clip_skip,
+        )
 
     def get_prompt_embeds(self, prompts_str: list[str]) -> torch.Tensor:
         # 使用 sd_embed 的 get_weighted_text_embeddings_sd15 支持任意长度和权重
         # 训练时 neg_prompt 传空字符串，行为与推理一致
         if self.config.use_enhanced_embeddings:
-            prompt_embeds_list = []
-            for prompt in prompts_str:
-                prompt_embeds, _ = get_weighted_text_embeddings_sd15(
-                    self.pipeline,  # type: ignore
-                    prompt,
-                    pad_last_block=True,
-                )
-                prompt_embeds_list.append(prompt_embeds)
-            # 按 batch 拼接
-            return torch.cat(prompt_embeds_list, dim=0)
+            return get_embeddings_sd15_batch(
+                self.pipeline.tokenizer,
+                self.pipeline.text_encoder,
+                prompts=prompts_str,
+                pad_last_block=True,
+            )
 
         # 使用原生的 CLIPTextModel
         text_inputs = self.pipeline.tokenizer(

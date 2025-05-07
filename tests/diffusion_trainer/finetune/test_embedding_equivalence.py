@@ -1,6 +1,6 @@
 import torch
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipeline
-from sd_embed.embedding_funcs import get_weighted_text_embeddings_sd15
+from diffusion_prompt_embedder import get_embeddings_sd15
 
 
 def get_native_embedding(
@@ -29,10 +29,10 @@ def get_sd_embed_embedding(
     device: torch.device | str,
 ) -> torch.Tensor:
     # 类型忽略，兼容所有 diffusers pipeline
-    prompt_embeds, _ = get_weighted_text_embeddings_sd15(  # type: ignore
-        pipe,
-        prompt,
-        "",
+    prompt_embeds, _ = get_embeddings_sd15(  # type: ignore
+        pipe.tokenizer,
+        pipe.text_encoder,
+        prompt=prompt,
         pad_last_block=True,
     )
     return prompt_embeds.to(device)
