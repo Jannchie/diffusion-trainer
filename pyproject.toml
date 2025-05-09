@@ -68,11 +68,11 @@ ignore = [
     "TD002",
     "TD003",
     "D",
-    "PLR2004", # Allow Magic Numbers 
-    "INP001",  # Allow without __init__.py
-    "N812",    # Allow aliased to non-lowercase names (e.g. `import torch.nn.functional as F`)
-    "FBT003",  # Allow boolean positional values in function calls
-    "S311",    # Allow use random
+    "PLR2004",
+    "INP001",
+    "N812",
+    "FBT003",
+    "S311",
 ]
 exclude = ["scripts/from_diffusers/**/*"]
 

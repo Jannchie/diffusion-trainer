@@ -104,6 +104,7 @@ class SD15Tuner(BaseTuner):
 
         self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, trainable_models_with_lr)
         self.optimizer = initialize_optimizer(self.config.optimizer, self.trainable_parameters_dicts)
+        self.accelerator.prepare(self.optimizer)
 
         sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
         with self.accelerator.main_process_first():
@@ -240,8 +241,6 @@ class SD15Tuner(BaseTuner):
         )
 
     def get_prompt_embeds(self, prompts_str: list[str]) -> torch.Tensor:
-        # 使用 sd_embed 的 get_weighted_text_embeddings_sd15 支持任意长度和权重
-        # 训练时 neg_prompt 传空字符串，行为与推理一致
         if self.config.use_enhanced_embeddings:
             return get_embeddings_sd15_batch(
                 self.pipeline.tokenizer,

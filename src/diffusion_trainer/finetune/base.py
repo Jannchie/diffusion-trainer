@@ -49,6 +49,7 @@ class BaseTuner:
         self.mixed_precision = str_to_dtype(config.mixed_precision)
         self.weight_dtype = str_to_dtype(config.weight_dtype)
         self.save_dtype = str_to_dtype(config.save_dtype)
+        self.vae_dtype = str_to_dtype(config.vae_dtype)
 
         self.accelerator = prepare_accelerator(
             config.gradient_accumulation_steps,
@@ -226,12 +227,11 @@ class BaseTuner:
                     msg = "Please specify the vae_path in the config file."
                     raise ValueError(msg)
 
-                vae_dtype = str_to_dtype(config.vae_dtype)
                 latents_processor = LatentsGenerateProcessor(
                     vae_path=config.vae_path,
                     img_path=config.image_path,
                     target_path=config.meta_path,
-                    vae_dtype=vae_dtype,
+                    vae_dtype=self.vae_dtype,
                 )
 
                 latents_processor()
@@ -296,10 +296,21 @@ class BaseTuner:
         self.timesteps_counter = Counter()
 
         # Attempt to load previous state for resuming training
+        global_step = 0
         try:
-            self.accelerator.load_state(self.checkpointing_path.as_posix())
-            global_step = int(self.global_steps_file.read_text())
-        except Exception:
+            logger.info("Attempting to load checkpoint from: %s", self.checkpointing_path.as_posix())
+            if not self.checkpointing_path.exists():
+                logger.warning("Checkpoint directory does not exist: %s", self.checkpointing_path)
+            elif not (self.checkpointing_path / "optimizer.bin").exists():
+                logger.warning("Optimizer state file does not exist in checkpoint directory")
+            elif not self.global_steps_file.exists():
+                logger.warning("Global steps file does not exist: %s", self.global_steps_file)
+            else:
+                self.accelerator.load_state(self.checkpointing_path.as_posix())
+                global_step = int(self.global_steps_file.read_text())
+                logger.info("Successfully loaded checkpoint at global step: %d", global_step)
+        except Exception as e:
+            logger.warning("Failed to load checkpoint: %s", e)
             global_step = 0
 
         # 1. Calculate the number of completed full epochs
@@ -393,8 +404,22 @@ class BaseTuner:
                     if should_save_step:
                         self.saving_model(f"{self.config.model_name}-step{global_step}")
                     if should_checkpoint_step:
+                        # 确保优化器状态能被正确保存
+                        if not hasattr(self, "optimizer"):
+                            logger.warning("Optimizer not found in self. Using optimizer from SDXL class.")
+                            # 在没有 self.optimizer 的情况下，我们假设优化器已经被传递给了 accelerator
+
+                        # 创建 checkpoint 目录
+                        self.checkpointing_path.mkdir(parents=True, exist_ok=True)
+                        # 保存状态
                         self.accelerator.save_state(self.checkpointing_path.as_posix())
+                        # 保存当前步数
                         self.global_steps_file.write_text(str(global_step))
+                        # 验证保存结果
+                        if not (self.checkpointing_path / "optimizer.bin").exists():
+                            logger.warning("Failed to save optimizer state. Please make sure the optimizer is correctly prepared with accelerator.")
+                        else:
+                            logger.info("Successfully saved checkpoint at global step: %d", global_step)
                     if should_preview_step:
                         self.generate_preview(f"{self.config.model_name}-step{global_step}", global_step)
             # Check epoch-based conditions
@@ -442,8 +467,6 @@ class BaseTuner:
                     original_training_mode[name] = model.training
                     original_device[name] = next(model.parameters()).device
                     model.eval()  # Switch to evaluation mode for inference
-                vae_dtype = str_to_dtype(self.config.vae_dtype)
-                self.pipeline.vae.to(dtype=vae_dtype)
 
                 # Use automatic mixed precision to generate preview images
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
@@ -451,6 +474,7 @@ class BaseTuner:
 
                 with autocast_ctx:
                     self.pipeline.to(self.accelerator.device)
+                    self.pipeline.vae.to(dtype=self.vae_dtype)
                     inference_steps = min(sample_option.steps, 25)
                     try:
                         prompt_embeds, prompt_neg_embeds = self.get_preview_prompt_embeds(
@@ -481,8 +505,9 @@ class BaseTuner:
 
                 logger.info("Preview generated for %s", filename_with_hash)
 
-                path = (Path(self.save_path) / "previews" / filename_with_hash).with_suffix(".png")
+                path = self.save_path / "previews" / f"{filename_with_hash}.png"
                 path.parent.mkdir(parents=True, exist_ok=True)
+
                 result.images[0].save(path)
 
                 if self.config.log_with == "wandb":
