@@ -1,4 +1,5 @@
 import logging
+import math
 import random
 from abc import abstractmethod
 from collections.abc import Sequence
@@ -10,19 +11,24 @@ import torch
 import torch.nn.functional as F
 from accelerate import PartialState
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
+from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel, compute_snr, free_memory
+from torch.utils.data import DataLoader
 
 from diffusion_trainer.config import BaseConfig, SampleOptions
-from diffusion_trainer.dataset.dataset import DiffusionBatch, DiffusionDataset
+from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset
 from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
 from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
 from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
 from diffusion_trainer.finetune.utils import (
+    TrainableModel,
     compute_sqrt_inv_snr_weights,
     get_sample_options_hash,
+    get_trainable_parameter_dicts,
+    initialize_optimizer,
     prepare_accelerator,
     str_to_dtype,
     unwrap_model,
@@ -63,19 +69,133 @@ class BaseTuner:
         self.noise_scheduler: DDPMScheduler = self.get_noise_scheduler()
         self.all_snr = compute_snr(self.noise_scheduler, torch.arange(0, self.noise_scheduler.config.num_train_timesteps, dtype=torch.long)).to(self.device)  # type: ignore
         self.train_loss = 0.0
+        self.trainable_models_with_lr: list[TrainableModel] = []
+        self.training_models: list[torch.nn.Module] = []
+
+    def prepare_training(self, data_loader: torch.utils.data.DataLoader) -> tuple[int, int]:
+        """
+        Prepares the training process including dataset, trainable models, optimizer and scheduler.
+        Returns a tuple containing dataloader, number of update steps per epoch, and total steps.
+        """
+        self.accelerator.wait_for_everyone()
+
+        # Configure trainable models (subclass-specific implementation)
+        self._configure_models()
+
+        # Set models to training mode and freeze non-trainable models
+        self.training_models = [model.model for model in self.trainable_models_with_lr]
+        for model in self.training_models:
+            model.train()
+        freeze_models = [model for model in getattr(self, "models", []) if model not in self.training_models]
+        self.freeze_model(freeze_models)
+
+        # Initialize EMA model if enabled
+        if self.config.use_ema:
+            self.ema_unet = self.get_ema(self.pipeline.unet, self.pipeline.unet.config)
+        else:
+            self.ema_unet = None
+
+        # Prepare optimizer
+        self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, self.trainable_models_with_lr)
+        self.optimizer = initialize_optimizer(self.config.optimizer, self.trainable_parameters_dicts)
+        self.optimizer = self.accelerator.prepare(self.optimizer)
+
+        num_update_steps_per_epoch = math.ceil(len(data_loader) / self.config.gradient_accumulation_steps / self.accelerator.num_processes)
+        n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
+
+        # Initialize learning rate scheduler
+        self.lr_scheduler = get_scheduler(
+            SchedulerType.COSINE_WITH_RESTARTS,
+            optimizer=self.optimizer,
+            num_warmup_steps=self.config.optimizer_warmup_steps * self.accelerator.num_processes,
+            num_training_steps=n_total_steps * self.accelerator.num_processes,
+            num_cycles=self.config.optimizer_num_cycles,
+        )
+        self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
+
+        # Initialize trackers
+        self.accelerator.init_trackers(f"diffusion-trainer-{self.config.mode}", config=self.config.__dict__)
+
+        return num_update_steps_per_epoch, n_total_steps
+
+    def prepare_data_loader(self) -> torch.utils.data.DataLoader:
+        dataset = self.prepare_dataset(self.config)
+        if self.accelerator.is_main_process:
+            dataset.print_bucket_info()
+        sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
+        with self.accelerator.main_process_first():
+            data_loader = DataLoader(
+                dataset,
+                batch_sampler=sampler,
+                num_workers=0,
+                collate_fn=dataset.collate_fn,
+                pin_memory=True,
+            )
+        return self.accelerator.prepare(data_loader)
+
+    def train(self) -> None:
+        # Prepare data loader
+        data_loader = self.prepare_data_loader()
+
+        num_update_steps_per_epoch, n_total_steps = self.prepare_training(data_loader)
+        self.execute_training_epoch(
+            data_loader,
+            self.lr_scheduler,
+            self.training_models,
+            num_update_steps_per_epoch,
+            n_total_steps,
+        )
+
+    def _configure_models(self) -> None:
+        """Configure which models should be trainable with their learning rates.
+        This method must be implemented by subclasses or called from the subclass's
+        configure_trainable_models method."""
+
+    def optimizer_step(self, loss: torch.Tensor) -> None:
+        """
+        Performs backward pass, gradient clipping, optimizer step,
+        learning rate scheduling and optimizer zero_grad.
+        """
+        if torch.isnan(loss):
+            logger.info("Loss is NaN.")
+            msg = "Loss is NaN."
+            raise ValueError(msg)
+
+        avg_loss = self.accelerator.gather(loss.repeat(self.config.batch_size)).mean()  # type: ignore
+        self.train_loss += avg_loss.item() / self.config.gradient_accumulation_steps
+
+        # Backpropagate
+        self.accelerator.backward(loss)
+
+        # Free memory
+        del loss, avg_loss
+
+        # Apply gradient clipping if configured
+        if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
+            params_to_clip = self.pipeline.unet.parameters()
+            self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
+
+        # Optimizer step
+        self.optimizer.step()
+
+        # Update EMA model if enabled
+        if self.accelerator.sync_gradients and hasattr(self, "ema_unet") and self.ema_unet is not None:
+            self.ema_unet.step(self.pipeline.unet.parameters())
+
+        # LR scheduler step
+        self.lr_scheduler.step()
+
+        # Zero gradients
+        self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
+
+        # Clear CUDA cache if necessary
+        if self.accelerator.sync_gradients and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def generate_initial_preview(self) -> None:
         """Generate preview images before training starts if configured to do so."""
         logger.info("Generating preview before training starts")
         self.generate_preview(f"{self.config.model_name}-before-training", 0)
-
-    @abstractmethod
-    def train(self) -> None:
-        """
-        Start the training process.
-        """
-        msg = "This method should be implemented in subclasses."
-        raise NotImplementedError(msg)
 
     @abstractmethod
     def get_pipeline(self) -> DiffusionPipeline:
@@ -475,7 +595,6 @@ class BaseTuner:
                 with autocast_ctx:
                     self.pipeline.to(self.accelerator.device)
                     self.pipeline.vae.to(dtype=self.vae_dtype)
-                    inference_steps = min(sample_option.steps, 25)
                     try:
                         prompt_embeds, prompt_neg_embeds = self.get_preview_prompt_embeds(
                             sample_option.prompt,
@@ -485,7 +604,7 @@ class BaseTuner:
                         result = self.pipeline(
                             prompt_embeds=prompt_embeds,
                             negative_prompt_embeds=prompt_neg_embeds,
-                            num_inference_steps=inference_steps,
+                            num_inference_steps=sample_option.steps,
                             generator=generator,
                             callback_on_step_end=callback_on_step_end,  # type: ignore
                             width=sample_option.width,
@@ -496,7 +615,7 @@ class BaseTuner:
                         result = self.pipeline(
                             prompt=sample_option.prompt,
                             negative_prompt=sample_option.negative_prompt,
-                            num_inference_steps=inference_steps,
+                            num_inference_steps=sample_option.steps,
                             generator=generator,
                             callback_on_step_end=callback_on_step_end,  # type: ignore
                             width=sample_option.width,

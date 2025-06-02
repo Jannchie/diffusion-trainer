@@ -1,6 +1,5 @@
 """Fintunner for Stable Diffusion XL model."""
 
-import math
 from dataclasses import dataclass
 from logging import getLogger
 from pathlib import Path
@@ -9,20 +8,16 @@ from typing import Any, Literal, NamedTuple
 import torch
 from accelerate.logging import get_logger
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
-from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from torch.utils.data import DataLoader
 from transformers.models.clip import CLIPTextModel, CLIPTextModelWithProjection
 
 from diffusion_trainer.config import BaseConfig, SDXLConfig
-from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch
+from diffusion_trainer.dataset.dataset import DiffusionBatch
 from diffusion_trainer.finetune.base import BaseTuner
 from diffusion_trainer.finetune.utils import (
     TrainableModel,
     format_size,
     get_n_params,
-    get_trainable_parameter_dicts,
-    initialize_optimizer,
     load_sdxl_pipeline,
 )
 from diffusion_trainer.finetune.utils.lora import apply_lora_config
@@ -74,17 +69,13 @@ class SDXLTuner(BaseTuner):
 
         self.logger = get_logger("diffusion_trainer.finetune.sdxl")
 
-        sdxl_models = SDXLModels(
+        self.sdxl_models = SDXLModels(
             unet=self.pipeline.unet.to(self.device, dtype=self.weight_dtype),
             text_encoder_1=self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype),
             text_encoder_2=self.pipeline.text_encoder_2.to(self.device, dtype=self.weight_dtype),
         )
 
-        self.models: list[Any] = list(sdxl_models)
-
-        self.configure_trainable_models(config, sdxl_models)
-
-        self.training_models = [m.model for m in self.trainable_models_with_lr]
+        self.models: list[Any] = list(self.sdxl_models)
 
         # Enable gradient checkpointing early if configured
         if self.config.gradient_checkpointing:
@@ -96,79 +87,25 @@ class SDXLTuner(BaseTuner):
     def get_pipeline(self) -> DiffusionPipeline:
         return load_sdxl_pipeline(self.config.model_path, self.weight_dtype)
 
-    def configure_trainable_models(self, config: SDXLConfig, sdxl_models: SDXLModels) -> None:
-        self.trainable_models_with_lr: list[TrainableModel] = []
-        if config.mode == "full-finetune":
+    def _configure_models(self) -> None:
+        """Configure which models should be trainable with their learning rates."""
+        if self.config.mode == "full-finetune":
             # For full fine-tuning, set model parameters as trainable according to the learning rates in the config file
-            if config.unet_lr:
-                self.trainable_models_with_lr.append(TrainableModel(model=sdxl_models.unet, lr=config.unet_lr))
-            if config.text_encoder_1_lr:
-                self.trainable_models_with_lr.append(TrainableModel(model=sdxl_models.text_encoder_1, lr=config.text_encoder_1_lr))
-            if config.text_encoder_2_lr:
-                self.trainable_models_with_lr.append(TrainableModel(model=sdxl_models.text_encoder_2, lr=config.text_encoder_2_lr))
+            if self.config.unet_lr:
+                self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.unet, lr=self.config.unet_lr))
+            if self.config.text_encoder_1_lr:
+                self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.text_encoder_1, lr=self.config.text_encoder_1_lr))
+            if self.config.text_encoder_2_lr:
+                self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.text_encoder_2, lr=self.config.text_encoder_2_lr))
 
-        elif config.mode in ("lora", "lokr", "loha"):
+        elif self.config.mode in ("lora", "lokr", "loha"):
             # For efficient fine-tuning, only the Lora model needs to be trained; the base model itself does not require training
-            self.lycoris_model = apply_lora_config(config.mode, sdxl_models.unet)
-            self.trainable_models_with_lr.append(TrainableModel(model=self.lycoris_model, lr=config.unet_lr))
+            self.lycoris_model = apply_lora_config(self.config.mode, self.sdxl_models.unet)
+            self.trainable_models_with_lr.append(TrainableModel(model=self.lycoris_model, lr=self.config.unet_lr))
             self.models.append(self.lycoris_model)
         else:
-            msg = f"Unknown mode {config.mode}"
+            msg = f"Unknown mode {self.config.mode}"
             raise ValueError(msg)
-
-    def train(self) -> None:
-        self.accelerator.wait_for_everyone()
-        dataset = self.prepare_dataset(self.config)
-        if self.accelerator.is_main_process:
-            dataset.print_bucket_info()
-        freeze_models = [model for model in self.models if model not in self.training_models]
-        self.freeze_model(freeze_models)
-
-        self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, self.trainable_models_with_lr)
-        optimizer = initialize_optimizer(self.config.optimizer, self.trainable_parameters_dicts)
-
-        self.trainable_parameters: list[list[torch.Tensor]] = [param["params"] for param in self.trainable_parameters_dicts]
-
-        sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
-        with self.accelerator.main_process_first():
-            # Optimize DataLoader by using appropriate num_workers based on system
-            num_workers = 0
-            data_loader = DataLoader(
-                dataset,
-                batch_sampler=sampler,
-                num_workers=num_workers,
-                collate_fn=dataset.collate_fn,
-                pin_memory=True,  # Enable pin_memory for faster data transfer to GPU
-            )
-        self.data_loader = self.accelerator.prepare(data_loader)
-
-        num_update_steps_per_epoch = math.ceil(len(data_loader) / self.config.gradient_accumulation_steps / self.accelerator.num_processes)
-        n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
-
-        lr_scheduler = get_scheduler(
-            SchedulerType.COSINE_WITH_RESTARTS,
-            optimizer=optimizer,
-            num_warmup_steps=self.config.optimizer_warmup_steps * self.accelerator.num_processes,
-            num_training_steps=n_total_steps * self.accelerator.num_processes,
-            num_cycles=self.config.optimizer_num_cycles,
-        )
-
-        self.optimizer = self.accelerator.prepare(optimizer)
-        self.lr_scheduler = self.accelerator.prepare(lr_scheduler)
-
-        if self.config.gradient_checkpointing:
-            self.init_gradient_checkpointing(self.models)
-
-        self.log_training_parameters()
-
-        self.accelerator.init_trackers(f"diffusion-trainer-{self.mode}", config=self.config.__dict__)
-        self.execute_training_epoch(
-            self.data_loader,
-            self.lr_scheduler,
-            self.training_models,
-            num_update_steps_per_epoch,
-            n_total_steps,
-        )
 
     def log_training_parameters(self) -> None:
         if self.accelerator.is_main_process:
@@ -216,31 +153,8 @@ class SDXLTuner(BaseTuner):
         del model_pred, target, img_latents
         del prompt_embeds, prompt_embeds_1, prompt_embeds_2, prompt_embeds_pooled_2
 
-        if torch.isnan(loss):
-            self.logger.info("Loss is NaN.")
-            msg = "Loss is NaN."
-            raise ValueError(msg)
-
-        avg_loss = self.accelerator.gather(loss.repeat(self.config.batch_size)).mean()  # type: ignore
-        self.train_loss += avg_loss.item() / self.config.gradient_accumulation_steps
-
-        self.accelerator.backward(loss)
-
-        # Free memory after backward pass
-        del loss, avg_loss
-
-        if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
-            params_to_clip = self.pipeline.unet.parameters()
-            self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
-
-        self.optimizer.step()
-        self.lr_scheduler.step()
-        # ref: https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html
-        self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
-
-        # Periodically clear CUDA cache to prevent memory fragmentation
-        if self.accelerator.sync_gradients and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Use base class optimizer step method
+        self.optimizer_step(loss)
 
     def get_model_pred(
         self,

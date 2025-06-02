@@ -57,6 +57,8 @@ sd-embed = { git = "https://github.com/xhinker/sd_embed.git", rev = "main" }
 
 [tool.ruff]
 line-length = 160
+
+[tool.ruff.lint]
 select = ["ALL"]
 
 ignore = [
