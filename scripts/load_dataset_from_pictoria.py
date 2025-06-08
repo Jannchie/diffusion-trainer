@@ -19,52 +19,52 @@ def load_pictoria_dataset(
     Path(output_dir).joinpath("tags").mkdir(parents=True, exist_ok=True)
     latents_dir = Path(output_dir).joinpath("latents")
     tags_dir = Path(output_dir).joinpath("tags")
-    resp = httpx.post(
-        f"{base_url}/v2/posts/search",
-        params={
-            "limit": 999999999,
-        },
-        json={
-            "score": [
-                4,
-                5,
-            ],
-        },
-    )
-    posts = resp.json()
-    post_ids = [post["id"] for post in posts]
-
-    for post_id in track(post_ids, description="Downloading posts..."):
+    start = 0
+    while start is not None:
         resp = httpx.get(
-            f"{base_url}/v2/posts/{post_id}",
+            f"{base_url}/v2/posts",
+            params={
+                "limit": 1,
+                "start": start,
+            },
         )
-        post = resp.json()
-        post_info = {
-            "id": post["id"],
-            "file_path": post["filePath"],
-            "file_name": post["fileName"],
-            "extension": post["extension"],
-            "width": post["width"],
-            "height": post["height"],
-            "aspect_ratio": post["aspectRatio"],
-            "score": post["score"],
-            "source": post["source"],
-            "caption": post["caption"] or "",
-            "tags": [tag["tagInfo"]["name"] for tag in post["tags"]],
-            "md5": post["md5"],
-        }
+        data = resp.json()
+        start = data["nextCursor"]
+        posts = data["items"]
+        post_ids = [post["id"] for post in posts]
+        for post_id in track(post_ids, description="Downloading posts..."):
+            resp = httpx.get(
+                f"{base_url}/v2/posts/{post_id}",
+            )
+            post = resp.json()
+            post_info = {
+                "id": post["id"],
+                "file_path": post["filePath"],
+                "file_name": post["fileName"],
+                "extension": post["extension"],
+                "width": post["width"],
+                "height": post["height"],
+                "aspect_ratio": post["aspectRatio"],
+                "score": post["score"],
+                "source": post["source"],
+                "caption": post["caption"] or "",
+                "tags": [tag["tagInfo"]["name"] for tag in post["tags"]],
+                "md5": post["md5"],
+            }
 
-        with tags_dir.joinpath(f"{post_info['md5']}.txt").open("w", encoding="utf-8") as f:
-            f.write(", ".join(post_info["tags"]))
+            with tags_dir.joinpath(f"{post_info['md5']}.txt").open("w", encoding="utf-8") as f:
+                f.write(", ".join(post_info["tags"]))
 
-        img_resp = httpx.get(
-            f"{base_url}/v2/images/original/id/{post_info['id']}",
-        )
-        img = Image.open(io.BytesIO(img_resp.content))
-        save_path = latents_dir / f"{post_info['md5']}.npz"
-        if save_path.exists():
-            continue
-        processor.process_by_pil(img, save_npz_path=save_path)
+            img_resp = httpx.get(
+                f"{base_url}/v2/images/original/id/{post_info['id']}",
+            )
+            if img_resp.status_code != 200:
+                continue
+            img = Image.open(io.BytesIO(img_resp.content))
+            save_path = latents_dir / f"{post_info['md5']}.npz"
+            if save_path.exists():
+                continue
+            processor.process_by_pil(img, save_npz_path=save_path)
 
     create_parquet_processor = CreateParquetProcessor(output_dir)
     create_parquet_processor()
