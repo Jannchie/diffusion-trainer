@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
@@ -14,10 +14,10 @@ from diffusion_trainer.finetune.utils import (
     TrainableModel,
     load_sd15_pipeline,
 )
-from diffusion_trainer.finetune.utils.lora import apply_lora_config
 
 if TYPE_CHECKING:
     from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipeline
+    from lycoris import LycorisNetwork
 
 
 class SD15Models(NamedTuple):
@@ -48,47 +48,36 @@ class SD15Tuner(BaseTuner):
         return load_sd15_pipeline(self.config.model_path, self.weight_dtype)
 
     def __init__(self, config: SD15Config) -> None:
-        super().__init__(config)
         self.config = config
+        super().__init__(config)
         self.logger = logging.getLogger(__name__)
 
-        self.apply_seed_settings(config.seed)
-
-        # Use torch.cuda.empty_cache() to clear GPU memory before loading the model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        self.models = SD15Models(
+    def _setup_models(self) -> None:
+        """Setup SD1.5-specific models."""
+        self.sd15_models = SD15Models(
             unet=self.pipeline.unet,
             text_encoder=self.pipeline.text_encoder,
         )
-        self.models.unet.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.models.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.sd15_models.unet.to(self.device, dtype=self.weight_dtype)
+        self.sd15_models.text_encoder.to(self.device, dtype=self.weight_dtype)
 
-        # Ensure gradient checkpointing is enabled
-        if self.config.gradient_checkpointing:
-            self.init_gradient_checkpointing(list(self.models))
+        # Create models list for BaseTuner compatibility
+        self.models: list[Any] = list(self.sd15_models)
 
-        for key, value in config.__dict__.items():
-            self.logger.info("%s: %s", key, value)
+    def _configure_full_finetune(self) -> None:
+        """Configure models for full fine-tuning."""
+        if self.config.unet_lr:
+            self.trainable_models_with_lr.append(TrainableModel(model=self.sd15_models.unet, lr=self.config.unet_lr))
+        if self.config.text_encoder_lr:
+            self.trainable_models_with_lr.append(TrainableModel(model=self.sd15_models.text_encoder, lr=self.config.text_encoder_lr))
 
-    def _configure_models(self) -> None:
-        """Configure which models should be trainable with their learning rates."""
-        if self.config.mode == "full-finetune":
-            # For full fine-tuning, set model parameters as trainable according to the learning rates in the config file
-            if self.config.unet_lr:
-                self.trainable_models_with_lr.append(TrainableModel(model=self.models.unet, lr=self.config.unet_lr))
-            if self.config.text_encoder_lr:
-                self.trainable_models_with_lr.append(TrainableModel(model=self.models.text_encoder, lr=self.config.text_encoder_lr))
+    def _get_unet_model(self) -> torch.nn.Module:
+        """Get the UNet model for LoRA configuration."""
+        return self.sd15_models.unet
 
-        elif self.config.mode in ("lora", "lokr", "loha"):
-            # For efficient fine-tuning, only the Lora model needs to be trained; the base model itself does not require training
-            lycoris_model = apply_lora_config(self.config.mode, self.models.unet)
-            self.trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=self.config.unet_lr))
-            self.lycoris_model = lycoris_model
-        else:
-            msg = f"Unknown mode {self.config.mode}"
-            raise ValueError(msg)
+    def _post_lora_setup(self, lycoris_model: "LycorisNetwork") -> None:
+        """Add lycoris model to the models list for SD15."""
+        self.models.append(lycoris_model)
 
     def process_batch(self, batch: DiffusionBatch) -> SD15Batch:
         prompts_str = self.create_prompts_str(batch)
@@ -100,31 +89,31 @@ class SD15Tuner(BaseTuner):
         )
 
     def train_each_batch(self, batch: SD15Batch) -> None:
-        # Convert all tensors to correct precision at once to reduce memory overhead
-        img_latents = self.pipeline.vae.config.get("scaling_factor", 0) * batch.img_latents.to(self.accelerator.device, dtype=self.weight_dtype)
-        prompt_embeds = batch.prompt_embeds.to(self.accelerator.device, dtype=self.weight_dtype)
+        # Move tensors to device and dtype efficiently
+        tensors = self._move_tensors_to_device_and_dtype(
+            img_latents=batch.img_latents,
+            prompt_embeds=batch.prompt_embeds,
+        )
 
-        # Generate noise and timesteps
-        noise = self.sample_noise(img_latents)
-        timesteps = self.sample_timesteps(img_latents.shape[0])
+        # Apply VAE scaling
+        img_latents = self._apply_vae_scaling(tensors["img_latents"])
 
-        # Apply noise directly with the correct dtype
-        img_noisy_latents = self.get_noisy_latents(img_latents, noise, timesteps)
+        # Prepare training tensors
+        img_latents, noise, timesteps, img_noisy_latents = self._prepare_training_tensors(img_latents)
 
         # Get model prediction
-        model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds)
+        model_pred = self.get_model_pred(img_noisy_latents, timesteps, tensors["prompt_embeds"])
 
-        # Calculate target and free memory we no longer need
-        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)
-
-        # Free intermediate tensors to save memory
-        del noise, img_noisy_latents
+        # Calculate target
+        target = self.get_pred_target(img_latents, noise, timesteps, model_pred) # type: ignore
 
         # Calculate loss
         loss = self.get_loss(timesteps, model_pred, target)
 
-        # Free more memory
-        del model_pred, target, img_latents
+        # Free memory efficiently
+        self._free_tensors(
+            noise, img_noisy_latents, model_pred, target, img_latents, tensors["prompt_embeds"],
+        )
 
         # Use the base class optimizer step method
         self.optimizer_step(loss)

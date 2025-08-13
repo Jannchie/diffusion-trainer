@@ -1,11 +1,12 @@
 import logging
 import math
 import random
-from abc import abstractmethod
+from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,7 @@ from diffusion_trainer.finetune.utils import (
     str_to_dtype,
     unwrap_model,
 )
+from diffusion_trainer.finetune.utils.lora import apply_lora_config
 from diffusion_trainer.shared import get_progress
 from diffusion_trainer.utils.timestep_weights import logit_timestep_weights
 
@@ -41,10 +43,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("diffusion_trainer")
 
+# Type variable for batch types
+BatchType = TypeVar("BatchType")
+
+
+class BaseBatchProcessor(ABC):
+    """Abstract base class for batch processing logic."""
+
+    def __init__(self, tuner: "BaseTuner") -> None:
+        self.tuner = tuner
+
+    @abstractmethod
+    def process_batch_data(self, batch: "DiffusionBatch") -> object:
+        """Process raw batch data into model-specific format."""
+
+    @abstractmethod
+    def get_model_prediction(self, processed_batch: object, img_noisy_latents: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+        """Get model prediction for the batch."""
+
 
 class BaseTuner:
     @staticmethod
-    def from_config(config: BaseConfig) -> "BaseTuner":
+    def from_config(_config: BaseConfig) -> "BaseTuner":
         """Create a Tuner from a config."""
         msg = "This method should be implemented in subclasses."
         raise NotImplementedError(msg)
@@ -57,13 +77,31 @@ class BaseTuner:
         self.save_dtype = str_to_dtype(config.save_dtype)
         self.vae_dtype = str_to_dtype(config.vae_dtype)
 
+        # Common initialization steps
+        self._initialize_environment()
+        self._initialize_accelerator()
+        self._initialize_pipeline_and_models()
+        self._log_initialization_info()
+
+    def _initialize_environment(self) -> None:
+        """Initialize environment settings like seeds and CUDA cache."""
+        self.apply_seed_settings(self.config.seed)
+
+        # Clear CUDA cache before loading models to ensure maximum available memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _initialize_accelerator(self) -> None:
+        """Initialize accelerator and device settings."""
         self.accelerator = prepare_accelerator(
-            config.gradient_accumulation_steps,
+            self.config.gradient_accumulation_steps,
             self.mixed_precision,
-            config.log_with,
+            self.config.log_with,
         )
         self.device = self.accelerator.device
 
+    def _initialize_pipeline_and_models(self) -> None:
+        """Initialize pipeline, models, and training-related attributes."""
         self.pipeline = self.get_pipeline()
         self.lycoris_model: LycorisNetwork | None = None
         self.noise_scheduler: DDPMScheduler = self.get_noise_scheduler()
@@ -71,6 +109,30 @@ class BaseTuner:
         self.train_loss = 0.0
         self.trainable_models_with_lr: list[TrainableModel] = []
         self.training_models: list[torch.nn.Module] = []
+
+        # Initialize model-specific components (implemented by subclasses)
+        self._setup_models()
+
+        # Enable gradient checkpointing if configured
+        if self.config.gradient_checkpointing:
+            self._enable_gradient_checkpointing()
+
+    def _setup_models(self) -> None:
+        """Setup model-specific components. Must be implemented by subclasses."""
+        msg = "This method must be implemented by subclasses."
+        raise NotImplementedError(msg)
+
+    def _enable_gradient_checkpointing(self) -> None:
+        """Enable gradient checkpointing for models. Can be overridden by subclasses."""
+        models = getattr(self, "models", [])
+        if models:
+            self.init_gradient_checkpointing(models)
+
+    def _log_initialization_info(self) -> None:
+        """Log initialization information."""
+        logger.info("Initialized %s with config:", self.__class__.__name__)
+        for key, value in self.config.__dict__.items():
+            logger.info("  %s: %s", key, value)
 
     def prepare_training(self, data_loader: torch.utils.data.DataLoader) -> tuple[int, int]:
         """
@@ -147,9 +209,40 @@ class BaseTuner:
         )
 
     def _configure_models(self) -> None:
-        """Configure which models should be trainable with their learning rates.
-        This method must be implemented by subclasses or called from the subclass's
-        configure_trainable_models method."""
+        """Configure which models should be trainable with their learning rates."""
+        if self.config.mode == "full-finetune":
+            self._configure_full_finetune()
+        elif self.config.mode in ("lora", "lokr", "loha"):
+            self._configure_lora_finetune()
+        else:
+            msg = f"Unknown training mode: {self.config.mode}"
+            raise ValueError(msg)
+
+    @abstractmethod
+    def _configure_full_finetune(self) -> None:
+        """Configure models for full fine-tuning. Must be implemented by subclasses."""
+        msg = "This method must be implemented by subclasses."
+        raise NotImplementedError(msg)
+
+    def _configure_lora_finetune(self) -> None:
+        """Configure models for LoRA fine-tuning. Uses template method pattern."""
+        unet_model = self._get_unet_model()
+        lycoris_model = apply_lora_config(self.config.mode, unet_model)
+        self.trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=self.config.unet_lr))
+        self.lycoris_model = lycoris_model
+
+        # Allow subclasses to perform additional setup
+        self._post_lora_setup(lycoris_model)
+
+    @abstractmethod
+    def _get_unet_model(self) -> torch.nn.Module:
+        """Get the UNet model for LoRA configuration. Must be implemented by subclasses."""
+        msg = "This method must be implemented by subclasses."
+        raise NotImplementedError(msg)
+
+    def _post_lora_setup(self, lycoris_model: "LycorisNetwork") -> None:
+        """Perform additional setup after LoRA model creation. Can be overridden by subclasses."""
+        # Default implementation does nothing
 
     def optimizer_step(self, loss: torch.Tensor) -> None:
         """
@@ -318,6 +411,39 @@ class BaseTuner:
         random.seed(seed)
         torch.manual_seed(seed)
 
+    def _move_tensors_to_device_and_dtype(self, **tensors: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Move tensors to the correct device and dtype efficiently."""
+        result = {}
+        for name, tensor in tensors.items():
+            if tensor is not None:
+                result[name] = tensor.to(self.device, dtype=self.weight_dtype)
+        return result
+
+    def _free_tensors(self, *tensors: torch.Tensor | None) -> None:
+        """Free memory by deleting tensors."""
+        for tensor in tensors:
+            if tensor is not None:
+                del tensor
+        # Trigger garbage collection for CUDA tensors
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _apply_vae_scaling(self, latents: torch.Tensor) -> torch.Tensor:
+        """Apply VAE scaling factor to latents."""
+        scaling_factor = self.pipeline.vae.config.get("scaling_factor", 1.0)
+        return scaling_factor * latents
+
+    def _prepare_training_tensors(self, img_latents: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prepare tensors for training: apply scaling, sample noise and timesteps."""
+        # Sample noise and timesteps
+        noise = self.sample_noise(img_latents)
+        timesteps = self.sample_timesteps(img_latents.shape[0])
+
+        # Get noisy latents
+        img_noisy_latents = self.get_noisy_latents(img_latents, noise, timesteps)
+
+        return img_latents, noise, timesteps, img_noisy_latents
+
     def init_gradient_checkpointing(self, models: list[torch.nn.Module]) -> None:
         for model in models:
             m: Any = unwrap_model(self.accelerator, model)
@@ -411,8 +537,6 @@ class BaseTuner:
         self.global_steps_file = self.checkpointing_path / "global_steps"
 
         # Use Counter instead of a list to count timesteps
-        from collections import Counter
-
         self.timesteps_counter = Counter()
 
         # Attempt to load previous state for resuming training
@@ -565,7 +689,7 @@ class BaseTuner:
 
         # Simple callback function to meet the pipeline interface requirements
         def callback_on_step_end(_pipe: StableDiffusionXLPipelineOutput, _step: int, _timestep: int, _kwargs: dict) -> dict:
-            return {}
+            return _kwargs
 
         state = PartialState()
         self.accelerator.wait_for_everyone()

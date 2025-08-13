@@ -78,8 +78,10 @@ ignore = [
 ]
 exclude = ["scripts/from_diffusers/**/*"]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]
+"src/diffusion_trainer/finetune/base.py" = ["PLC0415"]  # Allow conditional imports for optional dependencies
+"src/diffusion_trainer/finetune/utils/__init__.py" = ["PLC0415"]  # Allow conditional imports for optional dependencies
 
 [dependency-groups]
 dev = ["ruff>=0.8.0"]

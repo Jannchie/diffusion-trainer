@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import torch
 from accelerate.logging import get_logger
@@ -20,7 +20,9 @@ from diffusion_trainer.finetune.utils import (
     get_n_params,
     load_sdxl_pipeline,
 )
-from diffusion_trainer.finetune.utils.lora import apply_lora_config
+
+if TYPE_CHECKING:
+    from lycoris import LycorisNetwork
 
 logger = getLogger("diffusion_trainer.finetune.sdxl")
 
@@ -53,59 +55,43 @@ class SDXLTuner(BaseTuner):
 
     def __init__(self, config: SDXLConfig) -> None:
         """Initialize."""
-        super().__init__(config)
         self.config = config
-        self.apply_seed_settings(self.config.seed)
-
-        # Clear CUDA cache before loading models to ensure maximum available memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # Only convert to Path when needed
+        # Update save path for model-specific naming
+        super().__init__(config)
         self.save_path = Path(config.save_dir) / config.model_name
 
         # Keep mode as it needs type conversion
         self.mode: Literal["full-finetune", "lora", "lokr", "loha"] = config.mode
-
         self.logger = get_logger("diffusion_trainer.finetune.sdxl")
 
+    def _setup_models(self) -> None:
+        """Setup SDXL-specific models."""
         self.sdxl_models = SDXLModels(
             unet=self.pipeline.unet.to(self.device, dtype=self.weight_dtype),
             text_encoder_1=self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype),
             text_encoder_2=self.pipeline.text_encoder_2.to(self.device, dtype=self.weight_dtype),
         )
-
         self.models: list[Any] = list(self.sdxl_models)
-
-        # Enable gradient checkpointing early if configured
-        if self.config.gradient_checkpointing:
-            self.init_gradient_checkpointing(self.models)
-
-        for key, value in config.__dict__.items():
-            self.logger.info("%s: %s", key, value)
 
     def get_pipeline(self) -> DiffusionPipeline:
         return load_sdxl_pipeline(self.config.model_path, self.weight_dtype)
 
-    def _configure_models(self) -> None:
-        """Configure which models should be trainable with their learning rates."""
-        if self.config.mode == "full-finetune":
-            # For full fine-tuning, set model parameters as trainable according to the learning rates in the config file
-            if self.config.unet_lr:
-                self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.unet, lr=self.config.unet_lr))
-            if self.config.text_encoder_1_lr:
-                self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.text_encoder_1, lr=self.config.text_encoder_1_lr))
-            if self.config.text_encoder_2_lr:
-                self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.text_encoder_2, lr=self.config.text_encoder_2_lr))
+    def _configure_full_finetune(self) -> None:
+        """Configure models for full fine-tuning."""
+        if self.config.unet_lr:
+            self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.unet, lr=self.config.unet_lr))
+        if self.config.text_encoder_1_lr:
+            self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.text_encoder_1, lr=self.config.text_encoder_1_lr))
+        if self.config.text_encoder_2_lr:
+            self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.text_encoder_2, lr=self.config.text_encoder_2_lr))
 
-        elif self.config.mode in ("lora", "lokr", "loha"):
-            # For efficient fine-tuning, only the Lora model needs to be trained; the base model itself does not require training
-            self.lycoris_model = apply_lora_config(self.config.mode, self.sdxl_models.unet)
-            self.trainable_models_with_lr.append(TrainableModel(model=self.lycoris_model, lr=self.config.unet_lr))
-            self.models.append(self.lycoris_model)
-        else:
-            msg = f"Unknown mode {self.config.mode}"
-            raise ValueError(msg)
+    def _post_lora_setup(self, lycoris_model: "LycorisNetwork") -> None:
+        """Add lycoris model to the models list for SDXL."""
+        self.models.append(lycoris_model)
+
+    def _get_unet_model(self) -> torch.nn.Module:
+        """Get the UNet model for LoRA configuration."""
+        return self.sdxl_models.unet
 
     def log_training_parameters(self) -> None:
         if self.accelerator.is_main_process:
@@ -119,39 +105,39 @@ class SDXLTuner(BaseTuner):
             self.logger.info("Hold tight, training is about to start!")
 
     def train_each_batch(self, batch: SDXLBatch) -> None:
-        # Pre-convert all tensors to the correct dtype at once to avoid multiple conversions
-        img_latents = self.pipeline.vae.config.get("scaling_factor", 0) * batch.img_latents.to(self.accelerator.device, dtype=self.weight_dtype)
-        prompt_embeds_1 = batch.prompt_embeds_1.to(self.accelerator.device, dtype=self.weight_dtype)
-        prompt_embeds_2 = batch.prompt_embeds_2.to(self.accelerator.device, dtype=self.weight_dtype)
-        prompt_embeds_pooled_2 = batch.prompt_embeds_pooled_2.to(self.accelerator.device, dtype=self.weight_dtype)
-        time_ids = batch.time_ids.to(self.accelerator.device)
+        # Move all tensors to device and dtype efficiently
+        tensors = self._move_tensors_to_device_and_dtype(
+            img_latents=batch.img_latents,
+            prompt_embeds_1=batch.prompt_embeds_1,
+            prompt_embeds_2=batch.prompt_embeds_2,
+            prompt_embeds_pooled_2=batch.prompt_embeds_pooled_2,
+        )
+        time_ids = batch.time_ids.to(self.device)
+
+        # Apply VAE scaling
+        img_latents = self._apply_vae_scaling(tensors["img_latents"])
 
         # Concatenate prompt embeds once and reuse
-        prompt_embeds = torch.cat([prompt_embeds_1, prompt_embeds_2], dim=2)
+        prompt_embeds = torch.cat([tensors["prompt_embeds_1"], tensors["prompt_embeds_2"]], dim=2)
         unet_added_conditions = {
-            "text_embeds": prompt_embeds_pooled_2,
+            "text_embeds": tensors["prompt_embeds_pooled_2"],
             "time_ids": time_ids,
         }
 
-        # Sample noise and timesteps
-        noise = self.sample_noise(img_latents)
-        timesteps = self.sample_timesteps(img_latents.shape[0])
-
-        # Add noise once with the correct dtype to avoid conversions
-        img_noisy_latents = self.get_noisy_latents(img_latents, noise, timesteps)
+        # Prepare training tensors
+        img_latents, noise, timesteps, img_noisy_latents = self._prepare_training_tensors(img_latents)
 
         # Predict and calculate loss
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds, unet_added_conditions)
-        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)
-
-        # Free memory proactively
-        del noise, img_noisy_latents
+        target = self.get_pred_target(img_latents, noise, timesteps, model_pred) # type: ignore
 
         loss = self.get_loss(timesteps, model_pred, target)
 
-        # Free more memory
-        del model_pred, target, img_latents
-        del prompt_embeds, prompt_embeds_1, prompt_embeds_2, prompt_embeds_pooled_2
+        # Free memory efficiently
+        self._free_tensors(
+            noise, img_noisy_latents, model_pred, target, img_latents,
+            prompt_embeds, tensors["prompt_embeds_1"], tensors["prompt_embeds_2"], tensors["prompt_embeds_pooled_2"],
+        )
 
         # Use base class optimizer step method
         self.optimizer_step(loss)
@@ -250,4 +236,5 @@ class SDXLTuner(BaseTuner):
 
     def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]:
         # return get_weighted_text_embeddings_sdxl(self.pipeline, prompt, neg_prompt, clip_skip=clip_skip)  # type: ignore
-        ...
+        msg = "get_preview_prompt_embeds not yet implemented for SDXL"
+        raise NotImplementedError(msg)

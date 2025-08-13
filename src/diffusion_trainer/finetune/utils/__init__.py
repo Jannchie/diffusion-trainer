@@ -189,7 +189,7 @@ def load_sd15_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffus
     return load_pipeline(path, dtype, StableDiffusionPipeline)
 
 
-def load_pipeline(path: PathLike | str, dtype: torch.dtype, pipe_type: type[T]) -> T:
+def load_pipeline[T: PipelineProtocol](path: PathLike | str, dtype: torch.dtype, pipe_type: type[T]) -> T:
     path = Path(path)
 
     logger.info('Loading models from "%s" (%s)', path, dtype)
