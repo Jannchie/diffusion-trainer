@@ -74,7 +74,11 @@ class SDXLTuner(BaseTuner):
         self.models: list[Any] = list(self.sdxl_models)
 
     def get_pipeline(self) -> DiffusionPipeline:
-        return load_sdxl_pipeline(self.config.model_path, self.weight_dtype)
+        return load_sdxl_pipeline(
+            self.config.model_path,
+            self.weight_dtype,
+            enable_flash_attention=getattr(self.config, "enable_flash_attention", True),
+        )
 
     def _configure_full_finetune(self) -> None:
         """Configure models for full fine-tuning."""

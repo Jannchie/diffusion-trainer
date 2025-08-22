@@ -181,15 +181,43 @@ class DummyProgressBar:
         pass
 
 
-def load_sdxl_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionXLPipeline:
-    return load_pipeline(path, dtype, StableDiffusionXLPipeline)
+def load_sdxl_pipeline(
+    path: PathLike | str,
+    dtype: torch.dtype,
+    *,
+    enable_flash_attention: bool = True,
+) -> StableDiffusionXLPipeline:
+    return load_pipeline(
+        path,
+        dtype,
+        StableDiffusionXLPipeline,
+        enable_flash_attention=enable_flash_attention,
+        flash_attention_text_encoder=False,
+    )
 
 
-def load_sd15_pipeline(path: PathLike | str, dtype: torch.dtype) -> StableDiffusionPipeline:
-    return load_pipeline(path, dtype, StableDiffusionPipeline)
+def load_sd15_pipeline(
+    path: PathLike | str,
+    dtype: torch.dtype,
+    *,
+    enable_flash_attention: bool = True,
+) -> StableDiffusionPipeline:
+    return load_pipeline(
+        path,
+        dtype,
+        StableDiffusionPipeline,
+        enable_flash_attention=enable_flash_attention,
+        flash_attention_text_encoder=False,
+    )
 
 
-def load_pipeline[T: PipelineProtocol](path: PathLike | str, dtype: torch.dtype, pipe_type: type[T]) -> T:
+def load_pipeline[T: PipelineProtocol](  # noqa: PLR0913
+    path: PathLike | str,
+    dtype: torch.dtype,
+    pipe_type: type[T],
+    *,
+    enable_flash_attention: bool = True,
+) -> T:
     path = Path(path)
 
     logger.info('Loading models from "%s" (%s)', path, dtype)
@@ -199,6 +227,16 @@ def load_pipeline[T: PipelineProtocol](path: PathLike | str, dtype: torch.dtype,
         else:
             pipe = pipe_type.from_pretrained(path.as_posix(), torch_dtype=dtype)
     logger.info("Models loaded successfully.")
+
+    # Enable Flash Attention if requested
+    if enable_flash_attention:
+        from diffusion_trainer.utils.flash_attention import enable_flash_attention_pipeline
+        enable_flash_attention_pipeline(
+            pipe,
+            enable_unet=enable_flash_attention,
+            enable_text_encoder=flash_attention_text_encoder,
+        )
+
     if isinstance(pipe, pipe_type):
         pipe.progress_bar = DummyProgressBar  # type: ignore
         return pipe

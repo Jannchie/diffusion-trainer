@@ -52,8 +52,34 @@ class BaseConfig:
     lora_alpha: int = field(default=1, metadata={"help": "Lora alpha."})
     lokr_factor: int = field(default=16, metadata={"help": "LoKr factor."})
 
-    noise_offset: float = field(default=0.0, metadata={"help": "Noise offset. 0.1 is recommended."})
-    input_perturbation: float = field(default=0.0, metadata={"help": "Input perturbation strength for improved training stability. 0.1 is recommended."})
+    noise_offset: float = field(default=0.02, metadata={"help": "Noise offset for improved training quality. 0.02-0.1 recommended."})
+    input_perturbation: float = field(default=0.01, metadata={"help": "Input perturbation strength for improved training stability. 0.01-0.1 recommended."})
+
+    # Advanced noise options
+    use_pyramid_noise: bool = field(default=True, metadata={"help": "Use pyramid noise for improved training quality. Safe to enable by default."})
+    pyramid_noise_discount: float = field(default=0.85, metadata={"help": "Discount factor for pyramid noise levels. Lower = more variation, higher quality."})
+    pyramid_noise_levels: int = field(default=3, metadata={"help": "Number of pyramid noise levels. Lower = less overhead."})
+
+    use_multi_resolution_noise: bool = field(default=False, metadata={"help": "Use multi-resolution noise."})
+    multi_res_noise_scales: list[float] = field(default_factory=lambda: [1.0, 0.5, 0.25], metadata={"help": "Scales for multi-resolution noise."})
+    multi_res_noise_weights: list[float] | None = field(default=None, metadata={"help": "Weights for multi-resolution noise scales."})
+
+
+    # Advanced SNR options
+    use_smooth_min_snr: bool = field(default=True, metadata={"help": "Use smooth Min-SNR weighting instead of hard clipping when SNR gamma is set."})
+    smooth_min_snr_mode: Literal["clip", "sigmoid", "tanh"] = field(default="sigmoid", metadata={"help": "Smoothing mode for Min-SNR."})
+    smooth_min_snr_factor: float = field(default=0.15, metadata={"help": "Smoothing factor for Min-SNR (higher = less smooth, more stable)."})
+
+    # Adaptive noise scheduling
+    use_adaptive_noise: bool = field(default=False, metadata={"help": "Use adaptive noise scheduling based on timesteps."})
+    adaptive_noise_type: Literal["linear", "cosine", "exponential"] = field(default="cosine", metadata={"help": "Type of adaptive noise schedule."})
+    adaptive_noise_strength: float = field(default=1.0, metadata={"help": "Strength factor for adaptive noise."})
+
+    # Flash Attention (xformers) support
+    enable_flash_attention: bool = field(
+        default=True,
+        metadata={"help": "Enable Flash Attention (xformers) for memory efficiency. Reduces VRAM usage by 30-50%."},
+    )
     gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
     timestep_bias_strategy: Literal["uniform", "logit"] = field(
         default="uniform",

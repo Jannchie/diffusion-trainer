@@ -36,6 +36,12 @@ from diffusion_trainer.finetune.utils import (
 )
 from diffusion_trainer.finetune.utils.lora import apply_lora_config
 from diffusion_trainer.shared import get_progress
+from diffusion_trainer.utils.advanced_noise import (
+    adaptive_noise_schedule,
+    multi_resolution_noise,
+    pyramid_noise,
+    smooth_min_snr_weights,
+)
 from diffusion_trainer.utils.timestep_weights import logit_timestep_weights
 
 if TYPE_CHECKING:
@@ -320,14 +326,26 @@ class BaseTuner:
 
         # 3. If SNR weighting is enabled, compute and apply SNR weights
         if self.config.snr_gamma is not None:
-            snr = self.all_snr[timesteps]
-            mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
+            # Use smooth Min-SNR if configured
+            if getattr(self.config, "use_smooth_min_snr", False):
+                mse_loss_weights = smooth_min_snr_weights(
+                    timesteps,
+                    self.all_snr,
+                    min_snr_gamma=self.config.snr_gamma,
+                    smoothing_factor=getattr(self.config, "smooth_min_snr_factor", 0.1),
+                    mode=getattr(self.config, "smooth_min_snr_mode", "sigmoid"),
+                )
+            else:
+                # Standard Min-SNR clipping
+                snr = self.all_snr[timesteps]
+                mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
+
             # Adjust weights according to prediction_type
             if self.noise_scheduler.config.get("prediction_type") == "epsilon":
                 epsilon = 1e-8
-                mse_loss_weights = mse_loss_weights / (snr + epsilon)
+                mse_loss_weights = mse_loss_weights / (self.all_snr[timesteps] + epsilon)
             elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
-                mse_loss_weights = mse_loss_weights / (snr + 1)
+                mse_loss_weights = mse_loss_weights / (self.all_snr[timesteps] + 1)
             weights = weights * mse_loss_weights  # Further multiply by SNR weights
 
         # 4. Apply the final weights and compute the mean loss
@@ -357,7 +375,28 @@ class BaseTuner:
 
     def sample_noise(self, latents: torch.Tensor) -> torch.Tensor:
         """Sample noise that will be added to the latents."""
-        noise = torch.randn_like(latents)
+        # Determine which advanced noise technique to use
+        if getattr(self.config, "use_pyramid_noise", False):
+            noise = pyramid_noise(
+                latents.shape,
+                discount_factor=getattr(self.config, "pyramid_noise_discount", 0.8),
+                num_levels=getattr(self.config, "pyramid_noise_levels", 5),
+                device=latents.device,
+                dtype=latents.dtype,
+            )
+        elif getattr(self.config, "use_multi_resolution_noise", False):
+            noise = multi_resolution_noise(
+                latents.shape,
+                scales=getattr(self.config, "multi_res_noise_scales", [1.0, 0.5, 0.25]),
+                weights=getattr(self.config, "multi_res_noise_weights", None),
+                device=latents.device,
+                dtype=latents.dtype,
+            )
+        else:
+            # Standard random noise
+            noise = torch.randn_like(latents)
+
+        # Apply traditional noise offset if configured
         if hasattr(self.config, "noise_offset") and self.config.noise_offset:
             # Add noise to the image latents
             # https://www.crosslabs.org//blog/diffusion-with-offset-noise
@@ -372,10 +411,21 @@ class BaseTuner:
         if self.config.input_perturbation > 0:
             # Apply perturbation only if the configuration exists and the value is non-zero
             noise = noise + self.config.input_perturbation * torch.randn_like(noise)
+
+        # Apply adaptive noise scheduling if configured
+        if getattr(self.config, "use_adaptive_noise", False):
+            noise = adaptive_noise_schedule(
+                noise,
+                timesteps,
+                noise_schedule_type=getattr(self.config, "adaptive_noise_type", "cosine"),
+                strength_factor=getattr(self.config, "adaptive_noise_strength", 1.0),
+            )
+
         return self.noise_scheduler.add_noise(latents, noise, timesteps)
 
     def sample_timesteps(self, batch_size: int) -> torch.IntTensor:
         num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
+
         if self.config.timestep_bias_strategy == "uniform":
             # Sample a random timestep for each image without bias.
             timesteps = torch.randint(0, num_timesteps, (batch_size,), device=self.accelerator.device)

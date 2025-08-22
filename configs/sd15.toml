@@ -20,8 +20,8 @@ model_name = "creative-test"
 mode = 'full-finetune'
 
 n_epochs = 50
-batch_size = 8
-gradient_accumulation_steps = 4 # 增加梯度累积步数
+batch_size = 1
+gradient_accumulation_steps = 1 # 增加梯度累积步数
 
 save_every_n_epochs = 0
 save_every_n_steps = 500
@@ -58,6 +58,8 @@ zero_grad_set_to_none = true
 
 # # 增加lokr_factor以减少训练参数
 # lokr_factor = 32  # 从16增加到32
+
+enable_flash_attention = true
 
 [[preview_sample_options]]
 prompt = "shotgunman, rappa (honkai: star rail), 1girl, belt, black footwear, black hat, black headwear, black nails, black sandals, black shorts, can, fake horns, floating hair, full body, graffiti, green eyes, grin, hand up, hat, hat horns, holding, holding can, horned hat, horns, jacket, leaning forward, long hair, long sleeves, looking at viewer, nail polish, open clothes, open jacket, open mouth, paint splatter, pink hair, ponytail, red horns, red jacket, sandals, shirt, shorts, smile, solo, spray can, teeth, thigh belt, thigh strap, tied shirt, toeless footwear, toenail polish, toenails, very long hair, white shirt, absurdres, highres"

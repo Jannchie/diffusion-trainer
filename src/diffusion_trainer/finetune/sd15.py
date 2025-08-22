@@ -45,7 +45,11 @@ class SD15Tuner(BaseTuner):
         return SD15Tuner(config)
 
     def get_pipeline(self) -> "StableDiffusionPipeline":
-        return load_sd15_pipeline(self.config.model_path, self.weight_dtype)
+        return load_sd15_pipeline(
+            self.config.model_path,
+            self.weight_dtype,
+            enable_flash_attention=getattr(self.config, "enable_flash_attention", True),
+        )
 
     def __init__(self, config: SD15Config) -> None:
         self.config = config
@@ -105,14 +109,19 @@ class SD15Tuner(BaseTuner):
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, tensors["prompt_embeds"])
 
         # Calculate target
-        target = self.get_pred_target(img_latents, noise, timesteps, model_pred) # type: ignore
+        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)  # type: ignore
 
         # Calculate loss
         loss = self.get_loss(timesteps, model_pred, target)
 
         # Free memory efficiently
         self._free_tensors(
-            noise, img_noisy_latents, model_pred, target, img_latents, tensors["prompt_embeds"],
+            noise,
+            img_noisy_latents,
+            model_pred,
+            target,
+            img_latents,
+            tensors["prompt_embeds"],
         )
 
         # Use the base class optimizer step method
