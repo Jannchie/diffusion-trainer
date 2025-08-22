@@ -39,14 +39,18 @@ def pyramid_noise(
 
     for level in range(num_levels):
         # Calculate the scale factor for this level
-        scale = 2 ** level
+        scale = 2**level
         level_height = max(1, height // scale)
         level_width = max(1, width // scale)
 
         # Generate noise at this resolution
         level_noise = torch.randn(
-            batch_size, channels, level_height, level_width,
-            device=device, dtype=dtype,
+            batch_size,
+            channels,
+            level_height,
+            level_width,
+            device=device,
+            dtype=dtype,
         )
 
         # Upscale to target resolution if needed
@@ -59,7 +63,7 @@ def pyramid_noise(
             )
 
         # Add to the accumulated noise with discount factor
-        weight = discount_factor ** level
+        weight = discount_factor**level
         noise += weight * level_noise
 
     return noise
@@ -113,8 +117,12 @@ def multi_resolution_noise(
 
         # Generate noise at scaled resolution
         scale_noise = torch.randn(
-            batch_size, channels, scaled_height, scaled_width,
-            device=device, dtype=dtype,
+            batch_size,
+            channels,
+            scaled_height,
+            scaled_width,
+            device=device,
+            dtype=dtype,
         )
 
         # Resize to target dimensions
@@ -172,7 +180,6 @@ def smooth_min_snr_weights(
         raise ValueError(msg)
 
     return weights
-
 
 
 def adaptive_noise_schedule(

@@ -32,7 +32,7 @@ if __name__ == "__main__":
     with progress:
         total_task = progress.add_task("Total Progress", total=n_epochs * len(data_loader))
         for epoch in range(n_epochs):
-            for step, batch in enumerate(progress.track(data_loader, description=f"Epoch {epoch+1}")):
+            for step, batch in enumerate(progress.track(data_loader, description=f"Epoch {epoch + 1}")):
                 if not isinstance(batch, DiffusionBatch):
                     msg = "Expected DiffusionBatch, got something else."
                     raise TypeError(msg)

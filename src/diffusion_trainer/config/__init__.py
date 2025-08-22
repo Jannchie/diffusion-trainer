@@ -64,7 +64,6 @@ class BaseConfig:
     multi_res_noise_scales: list[float] = field(default_factory=lambda: [1.0, 0.5, 0.25], metadata={"help": "Scales for multi-resolution noise."})
     multi_res_noise_weights: list[float] | None = field(default=None, metadata={"help": "Weights for multi-resolution noise scales."})
 
-
     # Advanced SNR options
     use_smooth_min_snr: bool = field(default=True, metadata={"help": "Use smooth Min-SNR weighting instead of hard clipping when SNR gamma is set."})
     smooth_min_snr_mode: Literal["clip", "sigmoid", "tanh"] = field(default="sigmoid", metadata={"help": "Smoothing mode for Min-SNR."})
@@ -80,6 +79,8 @@ class BaseConfig:
         default=True,
         metadata={"help": "Enable Flash Attention (xformers) for memory efficiency. Reduces VRAM usage by 30-50%."},
     )
+    flash_attention_unet: bool = field(default=True, metadata={"help": "Enable Flash Attention for UNet (recommended)."})
+    flash_attention_text_encoder: bool = field(default=True, metadata={"help": "Enable Flash Attention for text encoders (recommended)."})
     gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
     timestep_bias_strategy: Literal["uniform", "logit"] = field(
         default="uniform",

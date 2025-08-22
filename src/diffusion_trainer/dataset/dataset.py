@@ -109,7 +109,7 @@ class DiffusionDataset(Dataset):
 
     @staticmethod
     def from_parquet(parquet_path: str | PathLike) -> "DiffusionDataset":
-        parquet_path =  Path(parquet_path)
+        parquet_path = Path(parquet_path)
         logger.info('Reading dataset from "%s"', parquet_path)
         table = pq.read_table(parquet_path)
         metadata = table.to_pandas()

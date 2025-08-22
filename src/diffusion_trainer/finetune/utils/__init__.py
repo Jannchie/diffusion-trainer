@@ -186,13 +186,16 @@ def load_sdxl_pipeline(
     dtype: torch.dtype,
     *,
     enable_flash_attention: bool = True,
+    flash_attention_unet: bool = True,
+    flash_attention_text_encoder: bool = True,
 ) -> StableDiffusionXLPipeline:
     return load_pipeline(
         path,
         dtype,
         StableDiffusionXLPipeline,
         enable_flash_attention=enable_flash_attention,
-        flash_attention_text_encoder=False,
+        flash_attention_unet=flash_attention_unet,
+        flash_attention_text_encoder=flash_attention_text_encoder,
     )
 
 
@@ -201,13 +204,16 @@ def load_sd15_pipeline(
     dtype: torch.dtype,
     *,
     enable_flash_attention: bool = True,
+    flash_attention_unet: bool = True,
+    flash_attention_text_encoder: bool = True,
 ) -> StableDiffusionPipeline:
     return load_pipeline(
         path,
         dtype,
         StableDiffusionPipeline,
         enable_flash_attention=enable_flash_attention,
-        flash_attention_text_encoder=False,
+        flash_attention_unet=flash_attention_unet,
+        flash_attention_text_encoder=flash_attention_text_encoder,
     )
 
 
@@ -217,6 +223,8 @@ def load_pipeline[T: PipelineProtocol](  # noqa: PLR0913
     pipe_type: type[T],
     *,
     enable_flash_attention: bool = True,
+    flash_attention_unet: bool = True,
+    flash_attention_text_encoder: bool = True,
 ) -> T:
     path = Path(path)
 
@@ -231,9 +239,10 @@ def load_pipeline[T: PipelineProtocol](  # noqa: PLR0913
     # Enable Flash Attention if requested
     if enable_flash_attention:
         from diffusion_trainer.utils.flash_attention import enable_flash_attention_pipeline
+
         enable_flash_attention_pipeline(
             pipe,
-            enable_unet=enable_flash_attention,
+            enable_unet=flash_attention_unet,
             enable_text_encoder=flash_attention_text_encoder,
         )
 

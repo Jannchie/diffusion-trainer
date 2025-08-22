@@ -133,14 +133,21 @@ class SDXLTuner(BaseTuner):
 
         # Predict and calculate loss
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds, unet_added_conditions)
-        target = self.get_pred_target(img_latents, noise, timesteps, model_pred) # type: ignore
+        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)  # type: ignore
 
         loss = self.get_loss(timesteps, model_pred, target)
 
         # Free memory efficiently
         self._free_tensors(
-            noise, img_noisy_latents, model_pred, target, img_latents,
-            prompt_embeds, tensors["prompt_embeds_1"], tensors["prompt_embeds_2"], tensors["prompt_embeds_pooled_2"],
+            noise,
+            img_noisy_latents,
+            model_pred,
+            target,
+            img_latents,
+            prompt_embeds,
+            tensors["prompt_embeds_1"],
+            tensors["prompt_embeds_2"],
+            tensors["prompt_embeds_pooled_2"],
         )
 
         # Use base class optimizer step method

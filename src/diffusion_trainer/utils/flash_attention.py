@@ -268,6 +268,7 @@ def enable_flash_attention_pipeline(
     pipeline: Any,  # noqa: ANN401
     *,
     enable_unet: bool = True,
+    enable_text_encoder: bool = True,
 ) -> dict[str, bool]:
     """
     Enable Flash Attention for all compatible components in a diffusion pipeline.
@@ -275,6 +276,7 @@ def enable_flash_attention_pipeline(
     Args:
         pipeline: The diffusion pipeline
         enable_unet: Whether to enable Flash Attention for UNet
+        enable_text_encoder: Whether to enable Flash Attention for text encoders
 
     Returns:
         Dictionary with results for each component
@@ -290,6 +292,15 @@ def enable_flash_attention_pipeline(
         results["unet"] = enable_flash_attention_for_model(pipeline.unet, "UNet")
         log_attention_info(pipeline.unet, "UNet")
 
+    # Enable for text encoder
+    if enable_text_encoder and hasattr(pipeline, "text_encoder"):
+        results["text_encoder"] = enable_flash_attention_for_model(pipeline.text_encoder, "Text Encoder")
+        log_attention_info(pipeline.text_encoder, "Text Encoder")
+
+    # Enable for text encoder 2 (SDXL)
+    if enable_text_encoder and hasattr(pipeline, "text_encoder_2"):
+        results["text_encoder_2"] = enable_flash_attention_for_model(pipeline.text_encoder_2, "Text Encoder 2")
+        log_attention_info(pipeline.text_encoder_2, "Text Encoder 2")
 
     # Log summary
     enabled_components = [comp for comp, enabled in results.items() if enabled]
@@ -299,4 +310,3 @@ def enable_flash_attention_pipeline(
         logger.warning("❌ Flash Attention could not be enabled for any component")
 
     return results
-
