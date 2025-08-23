@@ -605,6 +605,10 @@ class BaseTuner:
                 logger.info("Successfully loaded checkpoint at global step: %d", global_step)
         except Exception as e:
             logger.warning("Failed to load checkpoint: %s", e)
+            logger.warning("Removing incompatible checkpoint directory: %s", self.checkpointing_path)
+            import shutil
+            if self.checkpointing_path.exists():
+                shutil.rmtree(self.checkpointing_path)
             global_step = 0
 
         # 1. Calculate the number of completed full epochs
@@ -768,7 +772,8 @@ class BaseTuner:
 
                 with autocast_ctx:
                     self.pipeline.to(self.accelerator.device)
-                    self.pipeline.vae.to(dtype=self.vae_dtype)
+                    # Force VAE to use bfloat16 for preview generation to avoid precision issues
+                    self.pipeline.vae.to(dtype=torch.bfloat16)
                     try:
                         prompt_embeds, prompt_neg_embeds = self.get_preview_prompt_embeds(
                             sample_option.prompt,

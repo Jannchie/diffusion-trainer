@@ -80,7 +80,6 @@ class BaseConfig:
         metadata={"help": "Enable Flash Attention (xformers) for memory efficiency. Reduces VRAM usage by 30-50%."},
     )
     flash_attention_unet: bool = field(default=True, metadata={"help": "Enable Flash Attention for UNet (recommended)."})
-    flash_attention_text_encoder: bool = field(default=True, metadata={"help": "Enable Flash Attention for text encoders (recommended)."})
     gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
     timestep_bias_strategy: Literal["uniform", "logit"] = field(
         default="uniform",

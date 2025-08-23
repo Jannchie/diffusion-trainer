@@ -49,10 +49,10 @@ def load_pictoria_dataset(
                 "source": post["source"],
                 "caption": post["caption"] or "",
                 "tags": [tag["tagInfo"]["name"] for tag in post["tags"]],
-                "md5": post["md5"],
+                "sha256": post["sha256"],
             }
 
-            with tags_dir.joinpath(f"{post_info['md5']}.txt").open("w", encoding="utf-8") as f:
+            with tags_dir.joinpath(f"{post_info['sha256']}.txt").open("w", encoding="utf-8") as f:
                 f.write(", ".join(post_info["tags"]))
 
             img_resp = httpx.get(
@@ -61,7 +61,7 @@ def load_pictoria_dataset(
             if img_resp.status_code != 200:
                 continue
             img = Image.open(io.BytesIO(img_resp.content))
-            save_path = latents_dir / f"{post_info['md5']}.npz"
+            save_path = latents_dir / f"{post_info['sha256']}.npz"
             if save_path.exists():
                 continue
             processor.process_by_pil(img, save_npz_path=save_path)

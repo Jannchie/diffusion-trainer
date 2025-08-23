@@ -187,7 +187,6 @@ def load_sdxl_pipeline(
     *,
     enable_flash_attention: bool = True,
     flash_attention_unet: bool = True,
-    flash_attention_text_encoder: bool = True,
 ) -> StableDiffusionXLPipeline:
     return load_pipeline(
         path,
@@ -195,7 +194,6 @@ def load_sdxl_pipeline(
         StableDiffusionXLPipeline,
         enable_flash_attention=enable_flash_attention,
         flash_attention_unet=flash_attention_unet,
-        flash_attention_text_encoder=flash_attention_text_encoder,
     )
 
 
@@ -205,7 +203,6 @@ def load_sd15_pipeline(
     *,
     enable_flash_attention: bool = True,
     flash_attention_unet: bool = True,
-    flash_attention_text_encoder: bool = True,
 ) -> StableDiffusionPipeline:
     return load_pipeline(
         path,
@@ -213,18 +210,16 @@ def load_sd15_pipeline(
         StableDiffusionPipeline,
         enable_flash_attention=enable_flash_attention,
         flash_attention_unet=flash_attention_unet,
-        flash_attention_text_encoder=flash_attention_text_encoder,
     )
 
 
-def load_pipeline[T: PipelineProtocol](  # noqa: PLR0913
+def load_pipeline[T: PipelineProtocol](
     path: PathLike | str,
     dtype: torch.dtype,
     pipe_type: type[T],
     *,
     enable_flash_attention: bool = True,
     flash_attention_unet: bool = True,
-    flash_attention_text_encoder: bool = True,
 ) -> T:
     path = Path(path)
 
@@ -243,7 +238,7 @@ def load_pipeline[T: PipelineProtocol](  # noqa: PLR0913
         enable_flash_attention_pipeline(
             pipe,
             enable_unet=flash_attention_unet,
-            enable_text_encoder=flash_attention_text_encoder,
+            enable_text_encoder=False,
         )
 
     if isinstance(pipe, pipe_type):

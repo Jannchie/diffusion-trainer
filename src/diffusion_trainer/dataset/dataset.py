@@ -116,12 +116,15 @@ class DiffusionDataset(Dataset):
         buckets: dict[tuple[int, int], list[DiffusionTrainingItem]] = defaultdict(list)
         for _idx, row in metadata.iterrows():
             key = row["key"]
-            npz_path = parquet_path.parent / "latents" / f"{key}.npz"
+            # Use SHA256-based directory structure: ab/cd/abcd...npz
+            dir1 = key[:2]
+            dir2 = key[2:4]
+            npz_path = parquet_path.parent / "latents" / dir1 / dir2 / f"{key}.npz"
             train_resolution = tuple(row["train_resolution"].tolist())
             buckets[tuple(train_resolution)].append(
                 DiffusionTrainingItem(
                     npz_path=npz_path.as_posix(),
-                    caption=row["caption"],
+                    caption=row.get("caption", ""),  # Use empty string if caption doesn't exist
                     tags=row["tags"].tolist(),
                 ),
             )
@@ -143,7 +146,6 @@ class DiffusionDataset(Dataset):
             raise ValueError(msg)
 
         npz_path_list = list(retrieve_npz_path(Path(meta_dir)))
-        latents_dir = (meta_dir / "latents").resolve()
         lock = threading.Lock()
 
         with get_progress() as progress, ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -153,9 +155,13 @@ class DiffusionDataset(Dataset):
                 npz_path: Path,
             ) -> None:
                 npz = np.load(npz_path)
-                key = npz_path.relative_to(latents_dir).with_suffix("")
-                tag_file = meta_dir / "tags" / f"{key}.txt"
-                caption_file = meta_dir / "caption" / f"{key}.txt"
+                # Extract SHA256 hash from filename (e.g., ab/cd/abcd...npz -> abcd...)
+                key = npz_path.stem
+                # Use SHA256-based directory structure for tags
+                dir1 = key[:2]
+                dir2 = key[2:4]
+                tag_file = meta_dir / "tags" / dir1 / dir2 / f"{key}.txt"
+                caption_file = meta_dir / "caption" / dir1 / dir2 / f"{key}.txt"
                 caption = caption_file.read_text() if caption_file.exists() else ""
                 tags = tag_file.read_text().split(",") if tag_file.exists() else []
                 train_resolution = npz.get("train_resolution")
