@@ -40,9 +40,10 @@ class CreateParquetProcessor:
             for dir2 in dir1.iterdir():
                 if not dir2.is_dir() or len(dir2.name) != 2:
                     continue
-                for file in dir2.iterdir():
-                    if file.suffix == ".npz" and len(file.stem) == 64:  # SHA256 hash length
-                        npz_files.append(file)
+                npz_files.extend(
+                    file for file in dir2.iterdir()
+                    if file.suffix == ".npz" and len(file.stem) == 64  # SHA256 hash length
+                )
         return npz_files
 
     def _find_corresponding_txt_file(self, npz_path: Path) -> Path | None:
@@ -126,4 +127,4 @@ class CreateParquetProcessor:
 def retrieve_npz_path(target_dir: Path) -> list[Path]:
     """Retrieve NPZ paths from SHA256-based directory structure (backward compatibility)."""
     processor = CreateParquetProcessor(target_dir)
-    return processor._find_all_npz_files()
+    return processor._find_all_npz_files()  # noqa: SLF001

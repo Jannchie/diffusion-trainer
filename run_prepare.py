@@ -176,7 +176,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     # Step 1: Generate Latents
     if not args.skip_latents:
-        logger.info("\n📊 Step 1: Generating latent vectors...")
+        logger.info("📊 Step 1: Generating latent vectors...")
         try:
             latent_generator = LatentsGenerateProcessor(
                 vae_path=args.vae_path,
@@ -231,7 +231,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     pipeline_end = time.time()
     elapsed = pipeline_end - pipeline_start
 
-    logger.info("\n🎉 Data preparation pipeline completed successfully!")
+    logger.info("🎉 Data preparation pipeline completed successfully!")
     logger.info("⏱️  Total time: %.2f seconds", elapsed)
     logger.info("📁 Output directory: %s", target_path)
 

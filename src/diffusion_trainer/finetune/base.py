@@ -174,15 +174,26 @@ class BaseTuner:
         n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
 
         # Initialize learning rate scheduler
-        # For COSINE_WITH_RESTARTS, num_warmup_steps should be per-cycle warmup steps
-        # not total warmup steps across all cycles
-        self.lr_scheduler = get_scheduler(
-            SchedulerType.COSINE_WITH_RESTARTS,
-            optimizer=self.optimizer,
-            num_warmup_steps=self.config.optimizer_warmup_steps,
-            num_training_steps=n_total_steps * self.accelerator.num_processes,
-            num_cycles=self.config.optimizer_num_cycles,
-        )
+        # Use different scheduler based on optimizer type
+        if self.config.optimizer == "adafactor":
+            # For Adafactor, use constant_with_warmup as recommended by SS-Script
+            scheduler_type = SchedulerType.CONSTANT_WITH_WARMUP
+            self.lr_scheduler = get_scheduler(
+                scheduler_type,
+                optimizer=self.optimizer,
+                num_warmup_steps=self.config.optimizer_warmup_steps,
+                num_training_steps=n_total_steps * self.accelerator.num_processes,
+            )
+        else:
+            # For other optimizers, use cosine with restarts
+            scheduler_type = SchedulerType.COSINE_WITH_RESTARTS
+            self.lr_scheduler = get_scheduler(
+                scheduler_type,
+                optimizer=self.optimizer,
+                num_warmup_steps=self.config.optimizer_warmup_steps,
+                num_training_steps=n_total_steps * self.accelerator.num_processes,
+                num_cycles=self.config.optimizer_num_cycles,
+            )
         self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
 
         # Initialize trackers
@@ -252,6 +263,11 @@ class BaseTuner:
             raise ValueError(msg)
 
         lycoris_model = apply_lora_config(self.config.mode, unet_model, self.config)
+
+        # Ensure LoRA model dtype matches the weight dtype to prevent dtype mismatch errors
+        lycoris_model.to(dtype=self.weight_dtype)
+        logger.info("LoRA model dtype set to: %s", self.weight_dtype)
+
         # Use getattr to safely access unet_lr which may be defined in subclasses
         unet_lr = getattr(self.config, "unet_lr", 1e-5)
         self.trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=unet_lr))
@@ -395,23 +411,30 @@ class BaseTuner:
 
     def sample_noise(self, latents: torch.Tensor) -> torch.Tensor:
         """Sample noise that will be added to the latents."""
-        # Determine which advanced noise technique to use
-        if getattr(self.config, "use_pyramid_noise", False):
-            noise = pyramid_noise(
-                latents.shape,
-                discount_factor=getattr(self.config, "pyramid_noise_discount", 0.8),
-                num_levels=getattr(self.config, "pyramid_noise_levels", 5),
-                device=latents.device,
-                dtype=latents.dtype,
-            )
-        elif getattr(self.config, "use_multi_resolution_noise", False):
-            noise = multi_resolution_noise(
-                latents.shape,
-                scales=getattr(self.config, "multi_res_noise_scales", [1.0, 0.5, 0.25]),
-                weights=getattr(self.config, "multi_res_noise_weights", None),
-                device=latents.device,
-                dtype=latents.dtype,
-            )
+        # Use multi-resolution noise if enabled
+        if getattr(self.config, "use_multires_noise", True):
+            # Check if custom scales are provided
+            custom_scales = getattr(self.config, "multires_noise_scales", None)
+            custom_weights = getattr(self.config, "multires_noise_weights", None)
+
+            if custom_scales is not None:
+                # Use custom scales/weights method
+                noise = multi_resolution_noise(
+                    latents.shape,
+                    scales=custom_scales,
+                    weights=custom_weights,
+                    device=latents.device,
+                    dtype=latents.dtype,
+                )
+            else:
+                # Use pyramid method with iterations and discount
+                noise = pyramid_noise(
+                    latents.shape,
+                    discount_factor=getattr(self.config, "multires_noise_discount", 0.8),
+                    num_levels=getattr(self.config, "multires_noise_iterations", 6),
+                    device=latents.device,
+                    dtype=latents.dtype,
+                )
         else:
             # Standard random noise
             noise = torch.randn_like(latents)
@@ -792,7 +815,7 @@ class BaseTuner:
     def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]: ...
 
     @torch.no_grad()
-    def generate_preview(self, filename: str, global_step: int = 0) -> None:  # noqa: C901, PLR0915
+    def generate_preview(self, filename: str, global_step: int = 0) -> None:  # noqa: C901, PLR0912, PLR0915
         # Release memory to ensure sufficient VRAM for preview generation
         free_memory()
 
@@ -811,6 +834,13 @@ class BaseTuner:
                     raise TypeError(msg)
                 hash_hex = get_sample_options_hash(sample_option)
                 filename_with_hash = f"{filename}-{hash_hex}"
+
+                # Check if preview file already exists, skip if it does
+                path = self.save_path / "previews" / f"{filename_with_hash}.png"
+                if path.exists():
+                    logger.info("Preview file already exists, skipping: %s", path)
+                    continue
+
                 logger.info("Generating preview for %s", filename_with_hash)
 
                 # Save original training-related settings and device information for later restoration
@@ -866,7 +896,6 @@ class BaseTuner:
 
                 logger.info("Preview generated for %s", filename_with_hash)
 
-                path = self.save_path / "previews" / f"{filename_with_hash}.png"
                 path.parent.mkdir(parents=True, exist_ok=True)
 
                 # Clean up any potential NaN/Inf values in the image before saving
@@ -934,7 +963,7 @@ class BaseTuner:
         # Create essential metadata for compatibility
         metadata = {
             # Core LoRA parameters - essential for loading
-            "ss_network_dim": str(getattr(self.lycoris_model, "lora_dim", self.config.lora_rank)),
+            "ss_network_dim": str(getattr(self.lycoris_model, "lora_dim", self.config.lora_dim)),
             "ss_network_alpha": str(getattr(self.lycoris_model, "alpha", self.config.lora_alpha)),
             "ss_network_module": "lycoris.kohya",
             "ss_network_args": f'{{"algo": "{self.config.mode}"}}',

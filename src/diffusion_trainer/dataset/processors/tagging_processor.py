@@ -149,7 +149,7 @@ class TaggingProcessor:
                         with tag_path.open("r", encoding="utf-8") as f:
                             if f.read().strip():  # Has content
                                 existing_count += 1
-                    except Exception:
+                    except Exception:  # noqa: S110
                         pass
             self.skip_count = existing_count
             logger.info("Skipping %d existing files", self.skip_count)
@@ -252,7 +252,7 @@ class TaggingProcessor:
                 with self.progress_lock:
                     self.progress_counter += 1
 
-    def __call__(self) -> None:  # noqa: C901
+    def __call__(self) -> None:  # noqa: C901, PLR0912
         """Run the image tagging process."""
         total_images = len(self.image_paths)
 

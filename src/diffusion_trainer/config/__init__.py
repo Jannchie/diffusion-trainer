@@ -20,7 +20,7 @@ class BaseConfig:
     model_path: str = field(metadata={"help": "Path to the model."})
     dataset_path: str = field(metadata={"help": "Path to the dataset."})
     image_path: str | None = field(default=None, metadata={"help": "Path to the images."})
-    skip_prepare_image: bool = field(default=False, metadata={"help": "Skip preparing the images."})
+    skip_prepare_image: bool = field(default=True, metadata={"help": "Skip preparing the images."})
 
     vae_path: str | None = field(default=None, metadata={"help": "Path to the VAE."})
     vae_dtype: str = field(default="fp32", metadata={"help": "the VAE dtype."})
@@ -51,13 +51,16 @@ class BaseConfig:
     mode: Literal["full-finetune", "lora", "lokr", "loha", "locon"] = field(default="lokr", metadata={"help": "Mode."})
 
     # Common LoRA parameters (used by all LoRA variants)
-    lora_rank: int = field(default=16, metadata={"help": "Rank for all LoRA variants (lora, loha, locon)."})
-    lora_dim: int | None = field(default=None, metadata={"help": "Alias for lora_rank (backward compatibility)."})
+    lora_dim: int = field(default=16, metadata={"help": "Dimension for all LoRA variants (lora, loha, locon)."})
+    lora_rank: int | None = field(default=None, metadata={"help": "Alias for lora_dim (backward compatibility)."})
     lora_alpha: float = field(default=1.0, metadata={"help": "Alpha for all LoRA variants (lora, loha, locon)."})
     lora_dropout: float = field(default=0.0, metadata={"help": "Dropout rate for LoRA variants that support it (locon)."})
+    # Convolutional layer parameters for LoRA variants
+    conv_dim: int | None = field(default=None, metadata={"help": "Convolutional layer dimension for LoRA variants. If None, uses lora_dim."})
+    conv_alpha: float | None = field(default=None, metadata={"help": "Convolutional layer alpha for LoRA variants. If None, uses lora_alpha."})
 
     # Specific parameters for certain variants
-    lokr_factor: int = field(default=16, metadata={"help": "Factor for LoKr decomposition."})
+    lokr_factor: int = field(default=16, metadata={"help": "Factor for LoKr decomposition. Use -1 for adaptive factor."})
 
     # Advanced LoRA configuration
     lora_multiplier: float = field(default=1.0, metadata={"help": "LoRA multiplier for all modes."})
@@ -78,14 +81,12 @@ class BaseConfig:
         metadata={"help": "Number of steps for input perturbation linear decay. 0 means no decay (constant perturbation)."},
     )
 
-    # Advanced noise options
-    use_pyramid_noise: bool = field(default=True, metadata={"help": "Use pyramid noise for improved training quality. Safe to enable by default."})
-    pyramid_noise_discount: float = field(default=0.85, metadata={"help": "Discount factor for pyramid noise levels. Lower = more variation, higher quality."})
-    pyramid_noise_levels: int = field(default=3, metadata={"help": "Number of pyramid noise levels. Lower = less overhead."})
-
-    use_multi_resolution_noise: bool = field(default=False, metadata={"help": "Use multi-resolution noise."})
-    multi_res_noise_scales: list[float] = field(default_factory=lambda: [1.0, 0.5, 0.25], metadata={"help": "Scales for multi-resolution noise."})
-    multi_res_noise_weights: list[float] | None = field(default=None, metadata={"help": "Weights for multi-resolution noise scales."})
+    # Multi-resolution noise settings
+    use_multires_noise: bool = field(default=True, metadata={"help": "Enable multi-resolution noise for improved training quality."})
+    multires_noise_iterations: int = field(default=6, metadata={"help": "Number of noise levels/iterations. Higher = more detail, more computation."})
+    multires_noise_discount: float = field(default=0.8, metadata={"help": "Discount factor between levels. Lower = more variation. Range: 0.1-0.9."})
+    multires_noise_scales: list[float] | None = field(default=None, metadata={"help": "Custom scales [1.0, 0.5, 0.25]. Overrides iterations if set."})
+    multires_noise_weights: list[float] | None = field(default=None, metadata={"help": "Custom weights for scales. Must match scales length."})
 
     # Advanced SNR options
     use_smooth_min_snr: bool = field(default=True, metadata={"help": "Use smooth Min-SNR weighting instead of hard clipping when SNR gamma is set."})
@@ -152,9 +153,10 @@ class BaseConfig:
         # automatically combine save_dir with model_name
         self.save_dir = str(Path(self.save_dir) / self.model_name)
 
-        # handle lora_dim as alias for lora_rank (backward compatibility)
-        if self.lora_dim is not None:
-            self.lora_rank = self.lora_dim
+        # handle lora_rank as alias for lora_dim (backward compatibility)
+        if self.lora_rank is not None:
+            self.lora_dim = self.lora_rank
+
 
 
 @dataclass

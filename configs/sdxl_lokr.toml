@@ -1,60 +1,52 @@
 seed = 47
 
-image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
-skip_prepare_image = false
 
-meta_path = "datasets/suzume_xl"
+dataset_path = ".dt_cache/suzume"
 
 vae_path = "madebyollin/sdxl-vae-fp16-fix"
 vae_dtype = "fp16"
 
-model_path = "../SimpleTuner/models/creative-xl-0.9-b2"
+model_path = "cagliostrolab/animagine-xl-3.1"
 save_dir = "./out"
 
-optimizer = "adafactor"
-
-model_name = "creativexl-test-xl"
+optimizer = "adamW8bit"
+model_name = "suzume-lora"
 
 mode = 'lokr'
+lora_dim = 2
+lora_alpha = 1
+conv_dim = 4
+conv_alpha = 1
 
 n_epochs = 50
 batch_size = 1
 gradient_accumulation_steps = 1
 
 save_every_n_epochs = 1
-save_every_n_steps = 5
+save_every_n_steps = 0
 
 preview_every_n_epochs = 1
-preview_every_n_steps = 100
+preview_every_n_steps = 0
 
 mixed_precision = "bf16"
 weight_dtype = "fp32"
 save_dtype = "fp16"
 
 unet_lr = 1e-4
-optimizer_warmup_steps = 100
-optimizer_num_cycles = 10
+snr_gamma = 5.0
+optimizer_warmup_steps = 0
+optimizer_num_cycles = 4
 
 text_encoder_1_lr = 0
 text_encoder_2_lr = 0
 
-noise_offset = 0.1
-input_perturbation = 0.1
-
-snr_gamma = 5.0
-
-max_grad_norm = 1.0
-
+input_perturbation = 0
 timestep_bias_strategy = "logit"
-use_ema = false
-
 gradient_checkpointing = true
-
-zero_grad_set_to_none = true
 
 
 [[preview_sample_options]]
-prompt = "background, cityscape, urban, city, street, road, buildings, cars, traffic, night, star, cloud"
+prompt = "best quality, high quality, moon, night, sky, scenery, cloud, no_humans, outdoors, ocean, night_sky, full_moon, horizon, water, cloudy_sky, star_(sky), blue_theme"
 negative_prompt = "worst quality, bad quality, blurry, low resolution"
 seed = 47
 steps = 25

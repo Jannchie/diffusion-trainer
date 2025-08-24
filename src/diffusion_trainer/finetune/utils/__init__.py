@@ -313,25 +313,28 @@ def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[Pa
             eps=1e-6,  # AdamW8bit expects float eps
         )
     elif optimizer_str == "adafactor":
-        # Adafactor with Kohya_SS style parameters
-        from torch.optim import Adafactor
+        # Use transformers Adafactor (same as SD-Scripts/Kohya_SS)
+        from transformers.optimization import Adafactor
 
-        # Create parameter groups with proper eps format for Adafactor
+        # Create parameter groups for transformers Adafactor
         adafactor_params = []
         for param_dict in trainable_parameters_dicts:
-            # Create a copy with Adafactor-specific eps format
             ada_dict = {
                 "params": param_dict["params"],
                 "lr": param_dict["lr"],
-                "eps": (1e-30, 1e-3),  # Adafactor expects tuple eps
             }
             adafactor_params.append(ada_dict)
 
+        # Use same parameters as SD-Scripts
         optimizer = Adafactor(
             adafactor_params,  # type: ignore
-            eps=(1e-30, 1e-3),  # Global default (eps1, eps2) as required by Adafactor
-            beta2_decay=-0.8,
-            weight_decay=0.0,
+            relative_step=False,  # Use fixed learning rate
+            scale_parameter=False,  # Don't scale by parameter norm
+            warmup_init=False,  # No warmup initialization
+            eps=(1e-30, 1e-3),  # (eps1, eps2) for numerical stability
+            clip_threshold=1.0,  # Gradient clipping threshold
+            decay_rate=-0.8,  # Beta2 decay rate
+            weight_decay=0.0,  # Weight decay
         )
     else:
         supported_optimizers = ["adamW8bit", "adafactor"]

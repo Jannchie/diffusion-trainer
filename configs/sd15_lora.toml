@@ -1,0 +1,58 @@
+seed = 47
+use_enhanced_embeddings = true
+
+model_path = "models/AOM3B2_orangemixs_fp16"
+model_name = "crypko6"
+save_dir = "./out"
+
+dataset_path = ".dt_cache/crypko"
+
+vae_path = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"
+vae_dtype = "bf16"
+
+all_tags_dropout = 0
+single_tag_dropout = 0
+
+optimizer = "adafactor"
+
+mode = 'lora'
+lora_dim = 4
+lora_alpha = 1
+
+n_epochs = 16
+batch_size = 1
+gradient_accumulation_steps = 1
+
+save_every_n_epochs = 0
+save_every_n_steps = 0
+
+preview_every_n_epochs = 1
+preview_every_n_steps = 0
+
+checkpoint_every_n_steps = 50
+
+mixed_precision = "bf16"
+weight_dtype = "bf16"
+save_dtype = "fp32"
+
+unet_lr = 5e-4
+optimizer_warmup_steps = 0
+optimizer_num_cycles = 1
+
+text_encoder_lr = 1e-5
+
+noise_offset = 0.1
+input_perturbation = 0.1
+
+timestep_bias_strategy = "logit"
+gradient_checkpointing = false
+
+
+[[preview_sample_options]]
+prompt = "1girl, solo, smile, long_hair, purple_eyes, shirt, bow, white_background, sleeveless, sleeveless_shirt, looking_at_viewer, breasts, simple_background, red_bow, black_hair, white_shirt, bowtie, closed_mouth, blush, bare_shoulders, medium_breasts, skirt, red_bowtie, wristband, collared_shirt, upper_body, animal_ears, red_skirt, dress_shirt"
+negative_prompt = "worst quality, bad quality, blurry, low resolution"
+seed = 47
+steps = 25
+width = 768
+height = 768
+clip_skip = 2

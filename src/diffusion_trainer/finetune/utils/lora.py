@@ -14,10 +14,14 @@ logger = getLogger("diffusion_trainer")
 
 def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: torch.nn.Module, config: "BaseConfig | None" = None) -> LycorisNetwork:
     # Use config values if provided, otherwise use defaults
-    lora_rank = config.lora_rank if config else 16
+    lora_dim = config.lora_dim if config else 16
     lora_alpha = config.lora_alpha if config else 1.0
     lora_dropout = config.lora_dropout if config else 0.0
     lokr_factor = config.lokr_factor if config else 16
+
+    # Convolutional layer parameters (fallback to linear parameters if not specified)
+    conv_dim = config.conv_dim if config and config.conv_dim is not None else lora_dim
+    conv_alpha = config.conv_alpha if config and config.conv_alpha is not None else lora_alpha
 
     # Advanced configuration parameters
     multiplier = config.lora_multiplier if config else 1.0
@@ -28,8 +32,10 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: tor
         lycoris_config = {
             "algo": "lora",
             "multiplier": multiplier,
-            "linear_dim": lora_rank,
+            "linear_dim": lora_dim,
             "linear_alpha": lora_alpha,
+            "conv_dim": conv_dim,
+            "conv_alpha": conv_alpha,
         }
         LycorisNetwork.apply_preset(
             {
@@ -40,8 +46,10 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: tor
         lycoris_config = {
             "algo": "loha",
             "multiplier": multiplier,
-            "linear_dim": lora_rank,  # LoHA uses same rank parameter as LoRA
+            "linear_dim": lora_dim,
             "linear_alpha": lora_alpha,
+            "conv_dim": conv_dim,
+            "conv_alpha": conv_alpha,
         }
         LycorisNetwork.apply_preset(
             {
@@ -69,11 +77,11 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: tor
         lycoris_config = {
             "algo": "locon",
             "multiplier": multiplier,
-            "linear_dim": lora_rank,
+            "linear_dim": lora_dim,
             "linear_alpha": lora_alpha,
             "linear_dropout": lora_dropout,
-            "conv_dim": lora_rank,
-            "conv_alpha": lora_alpha,
+            "conv_dim": conv_dim,
+            "conv_alpha": conv_alpha,
             "conv_dropout": lora_dropout,
         }
         LycorisNetwork.apply_preset(

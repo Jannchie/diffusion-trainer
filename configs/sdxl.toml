@@ -2,9 +2,8 @@ seed = 47
 use_enhanced_embeddings = false
 
 image_path = "/home/jannchie/SimpleTuner/datasets/suzume"
-skip_prepare_image = false
 
-meta_path = "datasets/suzume_xl"
+dataset_path = "datasets/suzume_xl"
 
 vae_path = "madebyollin/sdxl-vae-fp16-fix"
 vae_dtype = "fp16"
@@ -43,16 +42,8 @@ text_encoder_2_lr = 0
 noise_offset = 0.1
 input_perturbation = 0.1
 
-snr_gamma = 5.0
-
-max_grad_norm = 1.0
-
 timestep_bias_strategy = "logit"
-use_ema = false
-
 gradient_checkpointing = true
-
-zero_grad_set_to_none = true
 
 
 [[preview_sample_options]]

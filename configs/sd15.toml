@@ -1,8 +1,7 @@
 seed = 47
 use_enhanced_embeddings = true
 
-meta_path = "datasets/cache_pictoria"
-skip_prepare_image = false
+dataset_path = "datasets/cache_pictoria"
 
 vae_path = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"
 vae_dtype = "bf16"
@@ -28,7 +27,6 @@ save_every_n_steps = 500
 
 preview_every_n_epochs = 0
 preview_every_n_steps = 50
-preview_before_training = true
 
 checkpoint_every_n_steps = 2
 
@@ -45,19 +43,10 @@ text_encoder_lr = 0
 noise_offset = 0.1
 input_perturbation = 0.1
 
-snr_gamma = 5.0
-
-max_grad_norm = 1.0
-
 timestep_bias_strategy = "logit"
-use_ema = false
 
 gradient_checkpointing = true
-
-zero_grad_set_to_none = true
-
-# # 增加lokr_factor以减少训练参数
-# lokr_factor = 32  # 从16增加到32
+lokr_factor = -1
 
 enable_flash_attention = true
 
