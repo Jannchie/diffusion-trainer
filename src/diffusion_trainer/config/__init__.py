@@ -48,7 +48,7 @@ class BaseConfig:
     batch_size: int = field(default=8, metadata={"help": "Batch size."})
     gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps."})
 
-    mode: Literal["full-finetune", "lora", "lokr", "loha", "locon"] = field(default="lokr", metadata={"help": "Mode."})
+    mode: Literal["full-finetune", "lora", "lokr", "loha"] = field(default="lokr", metadata={"help": "Mode."})
 
     # Common LoRA parameters (used by all LoRA variants)
     lora_dim: int = field(default=16, metadata={"help": "Dimension for all LoRA variants (lora, loha, locon)."})
@@ -156,7 +156,6 @@ class BaseConfig:
         # handle lora_rank as alias for lora_dim (backward compatibility)
         if self.lora_rank is not None:
             self.lora_dim = self.lora_rank
-
 
 
 @dataclass

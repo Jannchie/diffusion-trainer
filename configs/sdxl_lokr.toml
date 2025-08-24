@@ -22,6 +22,9 @@ n_epochs = 50
 batch_size = 1
 gradient_accumulation_steps = 1
 
+input_perturbation = 0.01
+use_multires_noise = true
+
 save_every_n_epochs = 1
 save_every_n_steps = 0
 
@@ -40,7 +43,6 @@ optimizer_num_cycles = 4
 text_encoder_1_lr = 0
 text_encoder_2_lr = 0
 
-input_perturbation = 0
 timestep_bias_strategy = "logit"
 gradient_checkpointing = true
 
