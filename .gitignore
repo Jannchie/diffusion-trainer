@@ -10,5 +10,6 @@ demo_meta/
 models/
 
 datasets
+.dt_cache
 
 CLAUDE.md
