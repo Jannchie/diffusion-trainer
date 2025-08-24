@@ -724,7 +724,7 @@ class BaseTuner:
                 # Free up memory from original batch if it contains large tensors
                 del orig_batch
 
-                with self.accelerator.accumulate(training_models):
+                with self.accelerator.accumulate(training_models):  # type: ignore
                     self.train_each_batch(batch)
 
                     # Free up processed batch memory
@@ -859,6 +859,7 @@ class BaseTuner:
                     # Check if the pipeline output contains NaN values and handle them
                     if hasattr(result, "images") and result.images:
                         import numpy as np
+
                         image_array = np.array(result.images[0])
                         if np.any(np.isnan(image_array)) or np.any(np.isinf(image_array)):
                             logger.warning("Pipeline output contains NaN/Inf values, may cause conversion warnings")
@@ -924,9 +925,8 @@ class BaseTuner:
             else:
                 self.save_full_finetune_model(filename)
 
-    def save_lora_model(self, filename: str) -> None:
-        out_path = self.save_path / f"{filename}.safetensors"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+    def _create_lora_metadata(self) -> dict[str, str]:
+        """Create metadata for LoRA models."""
         if self.lycoris_model is None:
             msg = "LyCORIS model is not initialized."
             raise ValueError(msg)
@@ -938,7 +938,6 @@ class BaseTuner:
             "ss_network_alpha": str(getattr(self.lycoris_model, "alpha", self.config.lora_alpha)),
             "ss_network_module": "lycoris.kohya",
             "ss_network_args": f'{{"algo": "{self.config.mode}"}}',
-
             # Basic info
             "format": "pt",
             "ss_base_model_version": "sd_v1" if "sd15" in str(self.config.model_path).lower() else "sdxl_v1",
@@ -950,6 +949,17 @@ class BaseTuner:
         if self.config.mode == "lokr":
             metadata["ss_lokr_factor"] = str(self.config.lokr_factor)
 
+        return metadata
+
+    def _save_lycoris_format_lora(self, filename: str, metadata: dict[str, str]) -> None:
+        """Save LyCORIS format LoRA."""
+        out_path = self.save_path / f"{filename}.safetensors"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if self.lycoris_model is None:
+            msg = "LyCORIS model is not initialized."
+            raise ValueError(msg)
+
         # Save LyCORIS weights with metadata
         self.lycoris_model.save_weights(
             self.save_path / f"{filename}.safetensors",
@@ -957,27 +967,85 @@ class BaseTuner:
             metadata=metadata,
         )
 
+    def save_lora_model(self, filename: str) -> None:
+        """Save LoRA model in both LyCORIS and diffusers formats."""
+        # Create metadata first
+        metadata = self._create_lora_metadata()
+
+        # Save LyCORIS format
+        self._save_lycoris_format_lora(filename, metadata)
+
         # Also create a diffusers-compatible version if possible
         self._save_diffusers_compatible_lora(filename, metadata)
 
-    def _save_diffusers_compatible_lora(self, filename: str, _metadata: dict[str, str]) -> None:
+    def _save_diffusers_compatible_lora(self, filename: str, metadata: dict[str, str]) -> None:
         """Save a diffusers-compatible LoRA that can be loaded with pipeline.load_lora_weights()"""
         try:
-            # Only attempt for standard LoRA - LoHA and LoKr may not be fully supported
+            # Only attempt for LoRA mode
             if self.config.mode == "lora":
-                # Note: diffusers metadata would go here if needed
+                from diffusers.utils.state_dict_utils import convert_state_dict_to_diffusers
+                from peft.utils import get_peft_model_state_dict
 
-                # Try to save using pipeline's save_lora_weights if available
                 diffusers_path = self.save_path / f"{filename}_diffusers.safetensors"
 
-                # For now, just copy the LyCORIS file with better metadata
-                import shutil
-                shutil.copy2(
-                    self.save_path / f"{filename}.safetensors",
-                    diffusers_path,
-                )
+                # Get the current state dict directly from the model
+                if hasattr(self, "lycoris_model") and self.lycoris_model is not None:
+                    # Method 1: Try to get PEFT state dict if available
+                    try:
+                        peft_state_dict = get_peft_model_state_dict(self.lycoris_model)
+                        diffusers_state_dict = convert_state_dict_to_diffusers(peft_state_dict)
 
-                logger.info("Created diffusers-compatible copy at %s", diffusers_path)
+                        # Save using pipeline's method
+                        unet_lora_layers = {}
+                        text_encoder_lora_layers = {}
+
+                        for key, value in diffusers_state_dict.items():
+                            if key.startswith("text_encoder"):
+                                text_encoder_lora_layers[key] = value
+                            else:
+                                unet_lora_layers[key] = value
+
+                        self.pipeline.save_lora_weights(
+                            save_directory=str(self.save_path),
+                            unet_lora_layers=unet_lora_layers if unet_lora_layers else None,
+                            text_encoder_lora_layers=text_encoder_lora_layers if text_encoder_lora_layers else None,
+                            weight_name=f"{filename}_diffusers.safetensors",
+                        )
+
+                        logger.info("Created diffusers-compatible LoRA using PEFT conversion at %s", diffusers_path)
+                    except Exception as e1:
+                        logger.debug("PEFT conversion failed: %s", e1)
+                    else:
+                        return
+
+                # Method 2: Manual key conversion fallback
+                logger.info("Attempting manual LyCORIS to diffusers conversion...")
+                from safetensors.torch import load_file, save_file
+
+                # Load the just-saved LyCORIS file
+                lycoris_file = self.save_path / f"{filename}.safetensors"
+                lycoris_state_dict = load_file(lycoris_file)
+
+                # Convert LyCORIS keys to diffusers format
+                diffusers_state_dict = {}
+                for key, value in lycoris_state_dict.items():
+                    if key.startswith("lycoris_"):
+                        # Remove lycoris_ prefix and convert format
+                        new_key = key.replace("lycoris_", "")
+                        # Convert underscore format to dot format for diffusers
+                        new_key = new_key.replace("_", ".", 6)  # Convert first 6 underscores to dots
+                        diffusers_state_dict[new_key] = value
+                    else:
+                        diffusers_state_dict[key] = value
+
+                # Add diffusers-specific metadata
+                diffusers_metadata = metadata.copy()
+                diffusers_metadata["library_name"] = "diffusers"
+
+                # Save the converted file
+                save_file(diffusers_state_dict, diffusers_path, metadata=diffusers_metadata)
+
+                logger.info("Created diffusers-compatible LoRA using manual conversion at %s", diffusers_path)
 
         except Exception as e:
             logger.warning("Could not create diffusers-compatible version: %s", e)

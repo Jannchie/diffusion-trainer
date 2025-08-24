@@ -49,6 +49,12 @@ class BaseConfig:
     gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps."})
 
     mode: Literal["full-finetune", "lora", "lokr", "loha", "locon"] = field(default="lokr", metadata={"help": "Mode."})
+    
+    # LoRA implementation choice
+    use_diffusers_lora: bool = field(
+        default=False, 
+        metadata={"help": "Use standard diffusers PEFT LoRA instead of LyCORIS. Only applies when mode='lora'."}
+    )
 
     # Common LoRA parameters (used by all LoRA variants)
     lora_rank: int = field(default=16, metadata={"help": "Rank for all LoRA variants (lora, loha, locon)."})
