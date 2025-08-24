@@ -8,7 +8,7 @@ from dataclasses import asdict
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
-from typing import Literal, NamedTuple, Protocol, TypedDict, TypeVar
+from typing import Literal, NamedTuple, NotRequired, Protocol, TypedDict, TypeVar
 
 import torch
 import wandb
@@ -26,6 +26,7 @@ logger = getLogger("diffusion_trainer")
 class ParamDict(TypedDict):
     lr: float
     params: list[torch.Tensor]
+    eps: NotRequired[tuple[float | None, float]]  # Optional for Adafactor optimizer
 
 
 class TrainableModel(NamedTuple):
@@ -286,9 +287,18 @@ def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[Pa
             eps=1e-6,
         )
     else:
-        optimizer = torch.optim.Adafactor(
+        # Adafactor with Kohya_SS style parameters
+        from torch.optim import Adafactor
+
+        # Ensure each parameter group has the correct eps format
+        for param_dict in trainable_parameters_dicts:
+            param_dict["eps"] = (1e-30, 1e-3)  # Set eps for each param group
+
+        optimizer = Adafactor(
             trainable_parameters_dicts,  # type: ignore
-            # lr=self.unet_lr,
+            eps=(1e-30, 1e-3),  # Global default (eps1, eps2) as required by Adafactor
+            beta2_decay=-0.8,
+            weight_decay=0.0,
         )
     return optimizer
 

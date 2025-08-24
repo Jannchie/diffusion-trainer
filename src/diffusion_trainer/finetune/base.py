@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Sequence
 from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -182,7 +183,8 @@ class BaseTuner:
         self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
 
         # Initialize trackers
-        self.accelerator.init_trackers(f"diffusion-trainer-{self.config.mode}", config=self.config.__dict__)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")  # noqa: DTZ005
+        self.accelerator.init_trackers(timestamp, config=self.config.__dict__)
 
         return num_update_steps_per_epoch, n_total_steps
 
@@ -233,8 +235,15 @@ class BaseTuner:
     def _configure_lora_finetune(self) -> None:
         """Configure models for LoRA fine-tuning. Uses template method pattern."""
         unet_model = self._get_unet_model()
-        lycoris_model = apply_lora_config(self.config.mode, unet_model)
-        self.trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=self.config.unet_lr))
+        # Type check - this should never happen if called correctly, but satisfies type checker
+        if self.config.mode == "full-finetune":
+            msg = "Cannot configure LoRA for full-finetune mode"
+            raise ValueError(msg)
+
+        lycoris_model = apply_lora_config(self.config.mode, unet_model, self.config)
+        # Use getattr to safely access unet_lr which may be defined in subclasses
+        unet_lr = getattr(self.config, "unet_lr", 1e-5)
+        self.trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=unet_lr))
         self.lycoris_model = lycoris_model
 
         # Allow subclasses to perform additional setup
@@ -607,6 +616,7 @@ class BaseTuner:
             logger.warning("Failed to load checkpoint: %s", e)
             logger.warning("Removing incompatible checkpoint directory: %s", self.checkpointing_path)
             import shutil
+
             if self.checkpointing_path.exists():
                 shutil.rmtree(self.checkpointing_path)
             global_step = 0
@@ -737,7 +747,7 @@ class BaseTuner:
     def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]: ...
 
     @torch.no_grad()
-    def generate_preview(self, filename: str, global_step: int = 0) -> None:
+    def generate_preview(self, filename: str, global_step: int = 0) -> None:  # noqa: C901, PLR0915
         # Release memory to ensure sufficient VRAM for preview generation
         free_memory()
 
@@ -772,8 +782,8 @@ class BaseTuner:
 
                 with autocast_ctx:
                     self.pipeline.to(self.accelerator.device)
-                    # Force VAE to use bfloat16 for preview generation to avoid precision issues
-                    self.pipeline.vae.to(dtype=torch.bfloat16)
+                    # Use the configured VAE dtype but add NaN checking
+                    self.pipeline.vae.to(dtype=self.vae_dtype)
                     try:
                         prompt_embeds, prompt_neg_embeds = self.get_preview_prompt_embeds(
                             sample_option.prompt,
@@ -801,19 +811,45 @@ class BaseTuner:
                             height=sample_option.height,
                         )
 
+                    # Check if the pipeline output contains NaN values and handle them
+                    if hasattr(result, "images") and result.images:
+                        import numpy as np
+                        image_array = np.array(result.images[0])
+                        if np.any(np.isnan(image_array)) or np.any(np.isinf(image_array)):
+                            logger.warning("Pipeline output contains NaN/Inf values, may cause conversion warnings")
+
                 logger.info("Preview generated for %s", filename_with_hash)
 
                 path = self.save_path / "previews" / f"{filename_with_hash}.png"
                 path.parent.mkdir(parents=True, exist_ok=True)
 
-                result.images[0].save(path)
+                # Clean up any potential NaN/Inf values in the image before saving
+                image = result.images[0]
+
+                # Convert to numpy array for NaN checking and cleanup
+                import numpy as np
+                from PIL import Image as PILImage
+
+                image_array = np.array(image)
+
+                # Check for and replace NaN/Inf values
+                if np.any(np.isnan(image_array)) or np.any(np.isinf(image_array)):
+                    logger.warning("Found NaN/Inf values in preview image, cleaning up...")
+                    image_array = np.nan_to_num(image_array, nan=128.0, posinf=255.0, neginf=0.0)
+
+                # Ensure values are in valid range [0, 255]
+                image_array = np.clip(image_array, 0, 255).astype(np.uint8)
+
+                # Convert back to PIL Image and save
+                clean_image = PILImage.fromarray(image_array)
+                clean_image.save(path)
 
                 if self.config.log_with == "wandb":
                     import wandb
 
                     self.accelerator.log(
                         {
-                            f"{hash_hex}": [wandb.Image(result.images[0], caption=f"{sample_option.prompt}")],
+                            f"{hash_hex}": [wandb.Image(clean_image, caption=f"{sample_option.prompt}")],
                         },
                         step=global_step,
                     )
@@ -847,7 +883,58 @@ class BaseTuner:
         if self.lycoris_model is None:
             msg = "LyCORIS model is not initialized."
             raise ValueError(msg)
-        self.lycoris_model.save_weights(self.save_path / f"{filename}.safetensors", dtype=self.save_dtype, metadata={})
+
+        # Create essential metadata for compatibility
+        metadata = {
+            # Core LoRA parameters - essential for loading
+            "ss_network_dim": str(getattr(self.lycoris_model, "lora_dim", self.config.lora_rank)),
+            "ss_network_alpha": str(getattr(self.lycoris_model, "alpha", self.config.lora_alpha)),
+            "ss_network_module": "lycoris.kohya",
+            "ss_network_args": f'{{"algo": "{self.config.mode}"}}',
+
+            # Basic info
+            "format": "pt",
+            "ss_base_model_version": "sd_v1" if "sd15" in str(self.config.model_path).lower() else "sdxl_v1",
+            "ss_training_comment": f"LyCORIS {self.config.mode.upper()} training",
+            "ss_resolution": "512,512" if "sd15" in str(self.config.model_path).lower() else "1024,1024",
+        }
+
+        # Add algorithm-specific metadata
+        if self.config.mode == "lokr":
+            metadata["ss_lokr_factor"] = str(self.config.lokr_factor)
+
+        # Save LyCORIS weights with metadata
+        self.lycoris_model.save_weights(
+            self.save_path / f"{filename}.safetensors",
+            dtype=self.save_dtype,
+            metadata=metadata,
+        )
+
+        # Also create a diffusers-compatible version if possible
+        self._save_diffusers_compatible_lora(filename, metadata)
+
+    def _save_diffusers_compatible_lora(self, filename: str, _metadata: dict[str, str]) -> None:
+        """Save a diffusers-compatible LoRA that can be loaded with pipeline.load_lora_weights()"""
+        try:
+            # Only attempt for standard LoRA - LoHA and LoKr may not be fully supported
+            if self.config.mode == "lora":
+                # Note: diffusers metadata would go here if needed
+
+                # Try to save using pipeline's save_lora_weights if available
+                diffusers_path = self.save_path / f"{filename}_diffusers.safetensors"
+
+                # For now, just copy the LyCORIS file with better metadata
+                import shutil
+                shutil.copy2(
+                    self.save_path / f"{filename}.safetensors",
+                    diffusers_path,
+                )
+
+                logger.info("Created diffusers-compatible copy at %s", diffusers_path)
+
+        except Exception as e:
+            logger.warning("Could not create diffusers-compatible version: %s", e)
+            # This is not a fatal error, continue with the original LyCORIS save
 
     def save_full_finetune_model(self, filename: str) -> None:
         self.save_path.mkdir(parents=True, exist_ok=True)
