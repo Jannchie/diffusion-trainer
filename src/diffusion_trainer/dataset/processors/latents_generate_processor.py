@@ -26,11 +26,11 @@ from diffusion_trainer.shared import get_progress, logger
 class WritePayload:
     """Payload for writing latent vectors."""
 
-    save_path: Path
-    latents: torch.Tensor
-    crop_ltrb: tuple[int, int, int, int]
-    original_size: tuple[int, int]
-    resolution: tuple[int, int]
+    save_path: Path | None  # None indicates error case
+    latents: torch.Tensor | None
+    crop_ltrb: tuple[int, int, int, int] | None
+    original_size: tuple[int, int] | None
+    resolution: tuple[int, int] | None
 
 
 class SimpleLatentsProcessor:
@@ -206,6 +206,7 @@ class LatentsGenerateProcessor:
 
         self.progress_counter = 0
         self.progress_lock = threading.Lock()
+        self.progress_callback = None  # Will be set during processing
 
         # Create multiple GPU processors
         self.gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
@@ -252,8 +253,15 @@ class LatentsGenerateProcessor:
                         # Verify the existing file is valid
                         npz = np.load(npz_save_path)
                         if "train_resolution" in npz:
-                            with self.progress_lock:
-                                self.progress_counter += 1
+                            # File exists and is valid, send skip payload to write_npz for consistent progress tracking
+                            skip_payload = WritePayload(
+                                save_path=None,  # Indicates skip case
+                                latents=None,
+                                crop_ltrb=None,
+                                original_size=None,
+                                resolution=None,
+                            )
+                            self.write_queue.put(skip_payload)
                             continue
                     except Exception:
                         logger.warning("Corrupted file %s, reprocessing...", npz_save_path)
@@ -264,8 +272,15 @@ class LatentsGenerateProcessor:
 
             except Exception as e:
                 logger.error("Error reading %s: %s", image_path, e)
-                with self.progress_lock:
-                    self.progress_counter += 1
+                # Send error payload to write_npz for consistent progress tracking
+                error_payload = WritePayload(
+                    save_path=None,
+                    latents=None,
+                    crop_ltrb=None,
+                    original_size=None,
+                    resolution=None,
+                )
+                self.write_queue.put(error_payload)
 
     def process_image(self, processor: SimpleLatentsProcessor) -> None:
         """Process images using VAE encoder."""
@@ -307,8 +322,15 @@ class LatentsGenerateProcessor:
 
             except Exception as e:
                 logger.error("Error processing %s: %s", image_path, e)
-                with self.progress_lock:
-                    self.progress_counter += 1
+                # Send error payload to write_npz to increment progress counter
+                error_payload = WritePayload(
+                    save_path=None,
+                    latents=None,
+                    crop_ltrb=None,
+                    original_size=None,
+                    resolution=None,
+                )
+                self.write_queue.put(error_payload)
 
     def write_npz(self) -> None:
         """Write encoded latents to NPZ files."""
@@ -316,6 +338,15 @@ class LatentsGenerateProcessor:
             payload = self.write_queue.get()
             if payload is None:
                 break
+
+            # Handle error cases (empty payload)
+            if payload.save_path is None:
+                with self.progress_lock:
+                    self.progress_counter += 1
+                    # Immediate callback for skip/error cases
+                    if self.progress_callback:
+                        self.progress_callback(self.progress_counter)
+                continue
 
             try:
                 # Convert tensor to compatible dtype before converting to numpy
@@ -339,13 +370,19 @@ class LatentsGenerateProcessor:
 
                 with self.progress_lock:
                     self.progress_counter += 1
+                    # Immediate callback for successful writes
+                    if self.progress_callback:
+                        self.progress_callback(self.progress_counter)
 
             except Exception as e:
                 logger.error("Error writing %s: %s", payload.save_path, e)
                 with self.progress_lock:
                     self.progress_counter += 1
+                    # Immediate callback for write errors
+                    if self.progress_callback:
+                        self.progress_callback(self.progress_counter)
 
-    def __call__(self) -> None:  # noqa: C901, PLR0912
+    def __call__(self) -> None:  # noqa: C901
         """Run the processing pipeline."""
         # Get all image paths
         logger.info("Scanning for images in %s", self.ds_path)
@@ -374,35 +411,37 @@ class LatentsGenerateProcessor:
         with get_progress() as progress:
             task = progress.add_task("Processing images...", total=total_images)
 
-            # Add image paths to queue in batches
-            batch_size = 1000
-            for i in range(0, len(image_paths), batch_size):
-                batch = image_paths[i:i + batch_size]
-                for image_path in batch:
-                    self.read_queue.put(image_path)
+            # Set up progress callback for immediate updates
+            def update_progress(current_count: int) -> None:
+                progress.update(task, completed=current_count)
 
-                # Small delay to avoid overwhelming the queue
-                if i > 0:
-                    time.sleep(0.1)
+            self.progress_callback = update_progress
 
-            # Monitor progress
+            # Add all image paths to queue at once for immediate processing
+            for image_path in image_paths:
+                self.read_queue.put(image_path)
+
+            # Monitor progress with fallback updates in case callback misses
             last_count = 0
             stall_count = 0
             while self.progress_counter < total_images:
                 current_count = self.progress_counter
-                progress.update(task, completed=current_count)
+
+                # Only update if callback hasn't updated recently
+                if current_count != last_count:
+                    progress.update(task, completed=current_count)
 
                 # Check for stalled processing
                 if current_count == last_count:
                     stall_count += 1
-                    if stall_count > 100:  # 10 seconds
+                    if stall_count > 200:  # 10 seconds at 0.05s intervals
                         logger.warning("Processing seems stalled at %d/%d", current_count, total_images)
                         stall_count = 0
                 else:
                     stall_count = 0
 
                 last_count = current_count
-                time.sleep(0.1)
+                time.sleep(0.05)  # More frequent updates for better responsiveness
 
             # Signal threads to stop
             for _ in range(self.num_reader):
