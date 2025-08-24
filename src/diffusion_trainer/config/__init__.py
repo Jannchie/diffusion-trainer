@@ -37,8 +37,8 @@ class BaseConfig:
     seed: int = field(default_factory=lambda: random.randint(0, 1_000_000_000), metadata={"help": "Seed for reproducibility."})
     model_name: str = field(default="my_model", metadata={"help": "Model name."})
     save_dir: str = field(default="out", metadata={"help": "Directory to save the model."})
-    save_dtype: str = field(default="fp16", metadata={"help": "Save dtype."})
-    weight_dtype: str = field(default="bf16", metadata={"help": "Weight dtype."})
+    save_dtype: str = field(default="fp32", metadata={"help": "Save dtype."})
+    weight_dtype: str = field(default="fp32", metadata={"help": "Weight dtype."})
     mixed_precision: Literal["float16", "bfloat16", "fp16", "bf16"] = field(default="bf16", metadata={"help": "Mixed precision."})
     prediction_type: Literal["epsilon", "v_prediction", "sample"] | None = field(
         default=None,
@@ -49,12 +49,6 @@ class BaseConfig:
     gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps."})
 
     mode: Literal["full-finetune", "lora", "lokr", "loha", "locon"] = field(default="lokr", metadata={"help": "Mode."})
-    
-    # LoRA implementation choice
-    use_diffusers_lora: bool = field(
-        default=False, 
-        metadata={"help": "Use standard diffusers PEFT LoRA instead of LyCORIS. Only applies when mode='lora'."}
-    )
 
     # Common LoRA parameters (used by all LoRA variants)
     lora_rank: int = field(default=16, metadata={"help": "Rank for all LoRA variants (lora, loha, locon)."})
@@ -124,7 +118,7 @@ class BaseConfig:
     )
     # SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0.
     # More details here: https://arxiv.org/abs/2303.09556.
-    snr_gamma: float | None = field(default=None, metadata={"help": "SNR gamma. Recommended value is 5.0."})
+    snr_gamma: float = field(default=5.0, metadata={"help": "SNR gamma. Recommended value is 5.0."})
     # Use debiased estimation technique to weight the loss by SNR, making the model focus more on high SNR (low noise) regions
     use_debiased_estimation: bool = field(
         default=False,
@@ -137,7 +131,7 @@ class BaseConfig:
     save_every_n_epochs: int = field(default=1, metadata={"help": "Save every n epochs."})
     preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
     preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
-    preview_before_training: bool = field(default=False, metadata={"help": "Generate preview before training starts."})
+    preview_before_training: bool = field(default=True, metadata={"help": "Generate preview before training starts."})
 
     log_with: Literal["wandb", "tensorboard", "none"] = field(default="wandb", metadata={"help": "Logger."})
 
@@ -145,7 +139,7 @@ class BaseConfig:
     optimizer_warmup_steps: int = field(default=0, metadata={"help": "Optimizer warmup steps."})
     optimizer_num_cycles: int = field(default=1, metadata={"help": "Optimizer num cycles."})
 
-    zero_grad_set_to_none: bool = field(default=False, metadata={"help": "Zero grad set to none."})
+    zero_grad_set_to_none: bool = field(default=True, metadata={"help": "Zero grad set to none."})
     preview_sample_options: list[SampleOptions] = field(default_factory=list, metadata={"help": "Preview sample options."})
 
     checkpoint_every_n_steps: int = field(default=1000, metadata={"help": "Checkpoint steps."})

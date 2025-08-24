@@ -24,9 +24,17 @@ logger = getLogger("diffusion_trainer")
 
 
 class ParamDict(TypedDict):
+    """Type definition for optimizer parameter groups.
+
+    This defines the basic structure expected by the training system.
+    Individual optimizers may add their own specific parameters.
+    """
     lr: float
     params: list[torch.Tensor]
-    eps: NotRequired[tuple[float | None, float]]  # Optional for Adafactor optimizer
+    # Optional eps field - different optimizers expect different formats:
+    # - AdamW8bit expects float (e.g., 1e-6)
+    # - Adafactor expects tuple[float | None, float] (e.g., (1e-30, 1e-3))
+    eps: NotRequired[tuple[float | None, float] | float]
 
 
 class TrainableModel(NamedTuple):
@@ -276,30 +284,60 @@ def get_trainable_parameter_dicts(accelerator: Accelerator, trainable_mdels: lis
 
 
 def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[ParamDict]) -> torch.optim.Optimizer:
+    """Initialize optimizer with proper parameter handling and type safety.
+
+    Args:
+        optimizer_str: Optimizer type ("adamW8bit" or "adafactor")
+        trainable_parameters_dicts: List of parameter dictionaries with model parameters and learning rates
+
+    Returns:
+        Configured optimizer instance
+
+    Raises:
+        ValueError: If optimizer_str is not supported
+    """
     if optimizer_str == "adamW8bit":
         import bitsandbytes as bnb
 
+        # Create clean parameter groups for AdamW8bit (expects eps as float)
+        clean_params = []
+        for param_dict in trainable_parameters_dicts:
+            # Create a copy to avoid modifying the original dict
+            clean_dict = {"params": param_dict["params"], "lr": param_dict["lr"]}
+            clean_params.append(clean_dict)
+
         optimizer = bnb.optim.AdamW8bit(
-            trainable_parameters_dicts,
-            # lr=self.unet_lr,
+            clean_params,
             betas=(0.9, 0.999),
             weight_decay=1e-2,
-            eps=1e-6,
+            eps=1e-6,  # AdamW8bit expects float eps
         )
-    else:
+    elif optimizer_str == "adafactor":
         # Adafactor with Kohya_SS style parameters
         from torch.optim import Adafactor
 
-        # Ensure each parameter group has the correct eps format
+        # Create parameter groups with proper eps format for Adafactor
+        adafactor_params = []
         for param_dict in trainable_parameters_dicts:
-            param_dict["eps"] = (1e-30, 1e-3)  # Set eps for each param group
+            # Create a copy with Adafactor-specific eps format
+            ada_dict = {
+                "params": param_dict["params"],
+                "lr": param_dict["lr"],
+                "eps": (1e-30, 1e-3),  # Adafactor expects tuple eps
+            }
+            adafactor_params.append(ada_dict)
 
         optimizer = Adafactor(
-            trainable_parameters_dicts,  # type: ignore
+            adafactor_params,  # type: ignore
             eps=(1e-30, 1e-3),  # Global default (eps1, eps2) as required by Adafactor
             beta2_decay=-0.8,
             weight_decay=0.0,
         )
+    else:
+        supported_optimizers = ["adamW8bit", "adafactor"]
+        msg = f"Unsupported optimizer: {optimizer_str}. Supported optimizers: {supported_optimizers}"
+        raise ValueError(msg)
+
     return optimizer
 
 

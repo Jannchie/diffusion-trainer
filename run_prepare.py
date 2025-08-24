@@ -22,7 +22,7 @@ def get_default_dtype() -> torch.dtype:
     return torch.float16
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
     """Main function for data preparation."""
     parser = argparse.ArgumentParser(
         description="Data preparation pipeline for diffusion training",
