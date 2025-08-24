@@ -1,5 +1,6 @@
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 
@@ -17,7 +18,7 @@ class SampleOptions:
 @dataclass
 class BaseConfig:
     model_path: str = field(metadata={"help": "Path to the model."})
-    meta_path: str = field(metadata={"help": "Path to the metadata."})
+    dataset_path: str = field(metadata={"help": "Path to the dataset."})
     image_path: str | None = field(default=None, metadata={"help": "Path to the images."})
     skip_prepare_image: bool = field(default=False, metadata={"help": "Skip preparing the images."})
 
@@ -47,13 +48,35 @@ class BaseConfig:
     batch_size: int = field(default=8, metadata={"help": "Batch size."})
     gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps."})
 
-    mode: Literal["full-finetune", "lora", "lokr", "loha"] = field(default="lokr", metadata={"help": "Mode."})
-    lora_rank: int = field(default=4, metadata={"help": "Lora rank."})
-    lora_alpha: int = field(default=1, metadata={"help": "Lora alpha."})
-    lokr_factor: int = field(default=16, metadata={"help": "LoKr factor."})
+    mode: Literal["full-finetune", "lora", "lokr", "loha", "locon"] = field(default="lokr", metadata={"help": "Mode."})
+
+    # Common LoRA parameters (used by all LoRA variants)
+    lora_rank: int = field(default=16, metadata={"help": "Rank for all LoRA variants (lora, loha, locon)."})
+    lora_dim: int | None = field(default=None, metadata={"help": "Alias for lora_rank (backward compatibility)."})
+    lora_alpha: float = field(default=1.0, metadata={"help": "Alpha for all LoRA variants (lora, loha, locon)."})
+    lora_dropout: float = field(default=0.0, metadata={"help": "Dropout rate for LoRA variants that support it (locon)."})
+
+    # Specific parameters for certain variants
+    lokr_factor: int = field(default=16, metadata={"help": "Factor for LoKr decomposition."})
+
+    # Advanced LoRA configuration
+    lora_multiplier: float = field(default=1.0, metadata={"help": "LoRA multiplier for all modes."})
+    lokr_linear_dim: int = field(default=10000, metadata={"help": "LoKr linear dimension (use large value for full dimension)."})
+    lokr_feedforward_factor_ratio: float = field(default=0.5, metadata={"help": "Ratio for FeedForward factor relative to Attention factor in LoKr."})
 
     noise_offset: float = field(default=0.02, metadata={"help": "Noise offset for improved training quality. 0.02-0.1 recommended."})
-    input_perturbation: float = field(default=0.01, metadata={"help": "Input perturbation strength for improved training stability. 0.01-0.1 recommended."})
+    noise_offset_probability: float = field(
+        default=1.0,
+        metadata={"help": "Probability of applying noise offset. 0.25 means 25% of the time. 1.0 means always."},
+    )
+    input_perturbation: float = field(
+        default=0.01,
+        metadata={"help": "Input perturbation strength for improved training stability. 0.01-0.1 recommended."},
+    )
+    input_perturbation_steps: int = field(
+        default=0,
+        metadata={"help": "Number of steps for input perturbation linear decay. 0 means no decay (constant perturbation)."},
+    )
 
     # Advanced noise options
     use_pyramid_noise: bool = field(default=True, metadata={"help": "Use pyramid noise for improved training quality. Safe to enable by default."})
@@ -125,6 +148,13 @@ class BaseConfig:
     def __post_init__(self) -> None:
         # convert preview_sample_options to SampleOptions
         self.preview_sample_options = [item if isinstance(item, SampleOptions) else SampleOptions(**item) for item in self.preview_sample_options]
+
+        # automatically combine save_dir with model_name
+        self.save_dir = str(Path(self.save_dir) / self.model_name)
+
+        # handle lora_dim as alias for lora_rank (backward compatibility)
+        if self.lora_dim is not None:
+            self.lora_rank = self.lora_dim
 
 
 @dataclass

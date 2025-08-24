@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Sequence
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -116,6 +116,7 @@ class BaseTuner:
         self.train_loss = 0.0
         self.trainable_models_with_lr: list[TrainableModel] = []
         self.training_models: list[torch.nn.Module] = []
+        self.global_step = 0  # Track global training step for input perturbation decay
 
         # Initialize model-specific components (implemented by subclasses)
         self._setup_models()
@@ -173,18 +174,28 @@ class BaseTuner:
         n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
 
         # Initialize learning rate scheduler
+        # For COSINE_WITH_RESTARTS, num_warmup_steps should be per-cycle warmup steps
+        # not total warmup steps across all cycles
         self.lr_scheduler = get_scheduler(
             SchedulerType.COSINE_WITH_RESTARTS,
             optimizer=self.optimizer,
-            num_warmup_steps=self.config.optimizer_warmup_steps * self.accelerator.num_processes,
+            num_warmup_steps=self.config.optimizer_warmup_steps,
             num_training_steps=n_total_steps * self.accelerator.num_processes,
             num_cycles=self.config.optimizer_num_cycles,
         )
         self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
 
         # Initialize trackers
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")  # noqa: DTZ005
-        self.accelerator.init_trackers(timestamp, config=self.config.__dict__)
+        timestamp = datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
+        self.accelerator.init_trackers(
+            "diffusion-trainer",
+            config=self.config.__dict__,
+            init_kwargs={
+                "wandb": {
+                    "name": timestamp,  # Set run name to timestamp
+                },
+            },
+        )
 
         return num_update_steps_per_epoch, n_total_steps
 
@@ -296,9 +307,8 @@ class BaseTuner:
         # Zero gradients
         self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
 
-        # Clear CUDA cache if necessary
-        if self.accelerator.sync_gradients and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Clear CUDA cache only when necessary (not after every sync)
+        # Removed frequent cache clearing to improve performance
 
     def generate_initial_preview(self) -> None:
         """Generate preview images before training starts if configured to do so."""
@@ -335,6 +345,9 @@ class BaseTuner:
 
         # 3. If SNR weighting is enabled, compute and apply SNR weights
         if self.config.snr_gamma is not None:
+            # Extract SNR values for timesteps once
+            snr = self.all_snr[timesteps]
+
             # Use smooth Min-SNR if configured
             if getattr(self.config, "use_smooth_min_snr", False):
                 mse_loss_weights = smooth_min_snr_weights(
@@ -346,15 +359,13 @@ class BaseTuner:
                 )
             else:
                 # Standard Min-SNR clipping
-                snr = self.all_snr[timesteps]
                 mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
 
             # Adjust weights according to prediction_type
             if self.noise_scheduler.config.get("prediction_type") == "epsilon":
-                epsilon = 1e-8
-                mse_loss_weights = mse_loss_weights / (self.all_snr[timesteps] + epsilon)
+                mse_loss_weights = mse_loss_weights / snr
             elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
-                mse_loss_weights = mse_loss_weights / (self.all_snr[timesteps] + 1)
+                mse_loss_weights = mse_loss_weights / (snr + 1)
             weights = weights * mse_loss_weights  # Further multiply by SNR weights
 
         # 4. Apply the final weights and compute the mean loss
@@ -405,21 +416,36 @@ class BaseTuner:
             # Standard random noise
             noise = torch.randn_like(latents)
 
-        # Apply traditional noise offset if configured
-        if hasattr(self.config, "noise_offset") and self.config.noise_offset:
-            # Add noise to the image latents
-            # https://www.crosslabs.org//blog/diffusion-with-offset-noise
-            noise += self.config.noise_offset * torch.randn(
-                (latents.shape[0], latents.shape[1], 1, 1),
-                device=latents.device,
-            )
+        # Apply traditional noise offset if configured with probability
+        if hasattr(self.config, "noise_offset") and self.config.noise_offset > 0:
+            # Apply noise offset with configured probability
+            noise_offset_prob = getattr(self.config, "noise_offset_probability", 1.0)
+            if noise_offset_prob >= 1.0 or random.random() < noise_offset_prob:
+                # Add noise to the image latents
+                # https://www.crosslabs.org//blog/diffusion-with-offset-noise
+                noise += self.config.noise_offset * torch.randn(
+                    (latents.shape[0], latents.shape[1], 1, 1),
+                    device=latents.device,
+                )
         return noise
 
     def get_noisy_latents(self, latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.IntTensor) -> torch.Tensor:
         """Get noisy latents"""
         if self.config.input_perturbation > 0:
-            # Apply perturbation only if the configuration exists and the value is non-zero
-            noise = noise + self.config.input_perturbation * torch.randn_like(noise)
+            # Apply input perturbation with optional step-based decay
+            input_perturbation = self.config.input_perturbation
+
+            # Apply linear decay if input_perturbation_steps is configured
+            if self.config.input_perturbation_steps > 0 and self.global_step < self.config.input_perturbation_steps:
+                # Linear decay: starts at full strength, decays to 0 over input_perturbation_steps
+                decay_factor = 1.0 - (self.global_step / self.config.input_perturbation_steps)
+                input_perturbation *= decay_factor
+            elif self.config.input_perturbation_steps > 0 and self.global_step >= self.config.input_perturbation_steps:
+                # After decay period, set perturbation to 0
+                input_perturbation = 0.0
+
+            if input_perturbation > 0:
+                noise = noise + input_perturbation * torch.randn_like(noise)
 
         # Apply adaptive noise scheduling if configured
         if getattr(self.config, "use_adaptive_noise", False):
@@ -514,8 +540,8 @@ class BaseTuner:
                 logger.warning("cannot checkpointing!")
 
     def prepare_dataset(self, config: BaseConfig) -> DiffusionDataset:
-        if config.meta_path:
-            meta_path = Path(config.meta_path)
+        if config.dataset_path:
+            meta_path = Path(config.dataset_path)
         elif config.image_path:
             meta_path = Path(config.image_path) / "metadata"
         else:
@@ -535,18 +561,18 @@ class BaseTuner:
                 latents_processor = LatentsGenerateProcessor(
                     vae_path=config.vae_path,
                     img_path=config.image_path,
-                    target_path=config.meta_path,
+                    target_path=config.dataset_path,
                     vae_dtype=self.vae_dtype,
                 )
 
                 latents_processor()
 
-                tagging_processor = TaggingProcessor(img_path=config.image_path, target_path=config.meta_path, num_workers=1)
+                tagging_processor = TaggingProcessor(img_path=config.image_path, target_path=config.dataset_path, num_workers=1)
                 tagging_processor()
 
             if not parquet_path.exists():
                 logger.info('Creating parquet file at "%s"', parquet_path)
-                CreateParquetProcessor(target_dir=config.meta_path)(max_workers=8)
+                CreateParquetProcessor(target_dir=config.dataset_path)(max_workers=8)
             else:
                 logger.info('found parquet file at "%s"', parquet_path)
         return DiffusionDataset.from_parquet(parquet_path)
@@ -611,15 +637,33 @@ class BaseTuner:
             else:
                 self.accelerator.load_state(self.checkpointing_path.as_posix())
                 global_step = int(self.global_steps_file.read_text())
+                self.global_step = global_step  # Update instance variable for input perturbation decay
                 logger.info("Successfully loaded checkpoint at global step: %d", global_step)
-        except Exception as e:
-            logger.warning("Failed to load checkpoint: %s", e)
-            logger.warning("Removing incompatible checkpoint directory: %s", self.checkpointing_path)
+        except Exception:
+            logger.exception("Failed to load checkpoint:")
+            # Instead of immediately deleting, try to backup and provide recovery options
             import shutil
+            from datetime import datetime
 
             if self.checkpointing_path.exists():
-                shutil.rmtree(self.checkpointing_path)
+                # Create a backup of the corrupted checkpoint
+                timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
+                backup_path = self.checkpointing_path.parent / f"{self.checkpointing_path.name}_corrupted_{timestamp}"
+                try:
+                    shutil.copytree(self.checkpointing_path, backup_path)
+                    logger.info("Corrupted checkpoint backed up to: %s", backup_path)
+                except Exception as backup_e:
+                    logger.warning("Failed to backup corrupted checkpoint: %s", backup_e)
+
+                # Only remove after successful backup
+                try:
+                    shutil.rmtree(self.checkpointing_path)
+                    logger.warning("Removed corrupted checkpoint directory: %s", self.checkpointing_path)
+                except Exception:
+                    logger.exception("Failed to remove corrupted checkpoint:")
+
             global_step = 0
+            logger.info("Starting training from scratch due to checkpoint corruption")
 
         # 1. Calculate the number of completed full epochs
         skipped_epoch = global_step // num_update_steps_per_epoch if num_update_steps_per_epoch > 0 else 0
@@ -686,14 +730,15 @@ class BaseTuner:
                     # Free up processed batch memory
                     del batch
 
-                    # Manually trigger garbage collection after each batch
-                    if hasattr(torch.cuda, "empty_cache") and self.accelerator.sync_gradients:
+                    # Only clear CUDA cache occasionally to avoid performance issues
+                    if hasattr(torch.cuda, "empty_cache") and self.accelerator.sync_gradients and global_step % 50 == 0:
                         torch.cuda.empty_cache()
 
                 if self.accelerator.sync_gradients:
                     current_lr = lr_scheduler.get_last_lr()[0]
 
                     global_step += 1
+                    self.global_step = global_step  # Update instance variable for input perturbation decay
                     log_data = {"train_loss": self.train_loss, "lr": current_lr}
                     self.accelerator.log(log_data, step=global_step)
 
@@ -856,7 +901,9 @@ class BaseTuner:
 
                 # Release generated results promptly to reduce memory usage
                 del result
-                torch.cuda.empty_cache()
+                # Only clear cache after preview generation, not after each image
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
                 # Restore the training mode of the models
                 for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder), ("vae", self.pipeline.vae)]:

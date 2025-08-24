@@ -137,12 +137,12 @@ class DiffusionDataset(Dataset):
     ) -> "DiffusionDataset":
         buckets: dict[tuple[int, int], list[DiffusionTrainingItem]] = defaultdict(list)
 
-        if config.meta_path is None and config.image_path is not None:
+        if config.dataset_path is None and config.image_path is not None:
             meta_dir = Path(config.image_path) / "metadata"
-        elif config.meta_path is not None:
-            meta_dir = Path(config.meta_path)
+        elif config.dataset_path is not None:
+            meta_dir = Path(config.dataset_path)
         else:
-            msg = "Please specify the `meta_path` in the config file."
+            msg = "Please specify the `dataset_path` in the config file."
             raise ValueError(msg)
 
         npz_path_list = list(retrieve_npz_path(Path(meta_dir)))

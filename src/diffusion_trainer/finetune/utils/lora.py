@@ -12,16 +12,22 @@ if TYPE_CHECKING:
 logger = getLogger("diffusion_trainer")
 
 
-def apply_lora_config(mode: Literal["lora", "loha", "lokr"], model: torch.nn.Module, config: "BaseConfig | None" = None) -> LycorisNetwork:
+def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: torch.nn.Module, config: "BaseConfig | None" = None) -> LycorisNetwork:
     # Use config values if provided, otherwise use defaults
-    lora_rank = config.lora_rank if config else 4
-    lora_alpha = config.lora_alpha if config else 1
+    lora_rank = config.lora_rank if config else 16
+    lora_alpha = config.lora_alpha if config else 1.0
+    lora_dropout = config.lora_dropout if config else 0.0
     lokr_factor = config.lokr_factor if config else 16
+
+    # Advanced configuration parameters
+    multiplier = config.lora_multiplier if config else 1.0
+    lokr_linear_dim = config.lokr_linear_dim if config else 10000
+    lokr_ff_factor_ratio = config.lokr_feedforward_factor_ratio if config else 0.5
 
     if mode == "lora":
         lycoris_config = {
             "algo": "lora",
-            "multiplier": 1.0,
+            "multiplier": multiplier,
             "linear_dim": lora_rank,
             "linear_alpha": lora_alpha,
         }
@@ -33,7 +39,7 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr"], model: torch.nn.Mod
     elif mode == "loha":
         lycoris_config = {
             "algo": "loha",
-            "multiplier": 1.0,
+            "multiplier": multiplier,
             "linear_dim": lora_rank,  # LoHA uses same rank parameter as LoRA
             "linear_alpha": lora_alpha,
         }
@@ -45,9 +51,9 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr"], model: torch.nn.Mod
     elif mode == "lokr":
         lycoris_config = {
             "algo": "lokr",
-            "multiplier": 1.0,
-            "linear_dim": 10000,  # Full dimension
-            "linear_alpha": 1,  # Ignored in full dimension
+            "multiplier": multiplier,
+            "linear_dim": lokr_linear_dim,
+            "linear_alpha": 1,  # Ignored when using full dimension
             "factor": lokr_factor,
         }
         LycorisNetwork.apply_preset(
@@ -55,8 +61,24 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr"], model: torch.nn.Mod
                 "target_module": ["Attention", "FeedForward"],
                 "module_algo_map": {
                     "Attention": {"factor": lokr_factor},
-                    "FeedForward": {"factor": lokr_factor // 2},
+                    "FeedForward": {"factor": max(1, int(lokr_factor * lokr_ff_factor_ratio))},
                 },
+            },
+        )
+    elif mode == "locon":
+        lycoris_config = {
+            "algo": "locon",
+            "multiplier": multiplier,
+            "linear_dim": lora_rank,
+            "linear_alpha": lora_alpha,
+            "linear_dropout": lora_dropout,
+            "conv_dim": lora_rank,
+            "conv_alpha": lora_alpha,
+            "conv_dropout": lora_dropout,
+        }
+        LycorisNetwork.apply_preset(
+            {
+                "target_module": ["Attention", "FeedForward"],
             },
         )
     else:  # type: ignore[misc]  # Defensive programming for runtime safety
