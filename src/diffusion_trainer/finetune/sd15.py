@@ -156,9 +156,10 @@ class SD15Tuner(BaseTuner):
                 self.pipeline.text_encoder,
                 prompts=prompts_str,
                 pad_last_block=True,
+                clip_skip=self.config.clip_skip,
             )
 
-        # 使用原生的 CLIPTextModel
+        # Use the native CLIPTextModel path when enhanced embeddings are disabled
         text_inputs = self.pipeline.tokenizer(
             prompts_str,
             padding="max_length",
@@ -167,8 +168,21 @@ class SD15Tuner(BaseTuner):
             return_tensors="pt",
         )
         text_input_ids = text_inputs["input_ids"].to(self.accelerator.device)
+        attention_mask = text_inputs["attention_mask"].to(self.accelerator.device)
         prompt_embeds_output = self.pipeline.text_encoder(
             text_input_ids,
+            attention_mask=attention_mask,
             output_hidden_states=True,
         )
-        return prompt_embeds_output.last_hidden_state
+        hidden_states = prompt_embeds_output.hidden_states
+        clip_skip = max(self.config.clip_skip, 0)
+        if clip_skip == 0 or hidden_states is None:
+            return prompt_embeds_output.last_hidden_state
+
+        target_index = -(clip_skip + 1)
+        # Ensure the index is within hidden_states range
+        target_index = max(target_index, -len(hidden_states))
+
+        selected_hidden_state = hidden_states[target_index]
+        final_layer_norm = self.pipeline.text_encoder.text_model.final_layer_norm
+        return final_layer_norm(selected_hidden_state)

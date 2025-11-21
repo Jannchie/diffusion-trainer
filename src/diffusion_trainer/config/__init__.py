@@ -169,3 +169,4 @@ class SDXLConfig(BaseConfig):
 class SD15Config(BaseConfig):
     unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
     text_encoder_lr: float = field(default=1e-6, metadata={"help": "Text encoder learning rate."})
+    clip_skip: int = field(default=2, metadata={"help": "Number of final CLIP blocks to skip (0 = use last hidden state)."})

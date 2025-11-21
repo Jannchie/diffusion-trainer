@@ -307,8 +307,15 @@ class BaseTuner:
 
         # Apply gradient clipping if configured
         if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
-            params_to_clip = self.pipeline.unet.parameters()
-            self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
+            params_to_clip = []
+            for group in self.optimizer.param_groups:
+                group_params = group.get("params", [])
+                if isinstance(group_params, torch.Tensor):
+                    params_to_clip.append(group_params)
+                else:
+                    params_to_clip.extend(group_params)
+            if params_to_clip:
+                self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
 
         # Optimizer step
         self.optimizer.step()
