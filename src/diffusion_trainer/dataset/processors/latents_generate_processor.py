@@ -184,6 +184,7 @@ class LatentsGenerateProcessor:
         vae_dtype: torch.dtype | None = None,
         num_reader: int = 4,
         num_writer: int = 4,
+        skip_existing: bool = True,
     ) -> None:
         """Initialize the processor (compatible with original interface)."""
         self.ds_path = Path(img_path).absolute()
@@ -191,6 +192,7 @@ class LatentsGenerateProcessor:
         self.target_path = self.meta_path  # SHA256-based output
         self.num_reader = num_reader
         self.num_writer = num_writer
+        self.skip_existing = skip_existing
 
         # Create output directory
         self.target_path.mkdir(parents=True, exist_ok=True)
@@ -239,7 +241,6 @@ class LatentsGenerateProcessor:
 
     def read_image(self) -> None:
         """Read images and check for existing files."""
-        skip_existing = True
         while image_path := self.read_queue.get():
             if image_path is None:
                 break
@@ -248,7 +249,7 @@ class LatentsGenerateProcessor:
                 npz_save_path = self.get_npz_save_path(image_path)
 
                 # Check if output file already exists
-                if skip_existing and npz_save_path.exists():
+                if self.skip_existing and npz_save_path.exists():
                     try:
                         # Verify the existing file is valid
                         npz = np.load(npz_save_path)

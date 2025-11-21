@@ -121,11 +121,18 @@ class DiffusionDataset(Dataset):
             dir2 = key[2:4]
             npz_path = parquet_path.parent / "latents" / dir1 / dir2 / f"{key}.npz"
             train_resolution = tuple(row["train_resolution"].tolist())
+            tags_value = row.get("tags", [])
+            if isinstance(tags_value, list):
+                tags_list = tags_value
+            elif hasattr(tags_value, "tolist"):
+                tags_list = list(tags_value.tolist())
+            else:
+                tags_list = [str(tags_value)] if tags_value is not None else []
             buckets[tuple(train_resolution)].append(
                 DiffusionTrainingItem(
                     npz_path=npz_path.as_posix(),
                     caption=row.get("caption", ""),  # Use empty string if caption doesn't exist
-                    tags=row["tags"].tolist(),
+                    tags=tags_list,
                 ),
             )
         return DiffusionDataset(buckets)
