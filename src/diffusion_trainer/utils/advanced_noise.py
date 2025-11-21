@@ -140,6 +140,33 @@ def multi_resolution_noise(
     return combined_noise
 
 
+def brownian_noise(
+    shape: torch.Size | tuple[int, ...],
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+    scale: float = 1.0,
+) -> torch.Tensor:
+    """
+    Generate Brownian (random walk) noise to emphasize low-frequency structure.
+
+    The noise is normalized to zero mean and unit variance, then scaled.
+    """
+    if len(shape) < 4:
+        msg = f"Shape must have at least 4 dimensions (BCHW), got {len(shape)}"
+        raise ValueError(msg)
+
+    base = torch.randn(shape, device=device, dtype=dtype)
+    walk_h = torch.cumsum(base, dim=-2)
+    walk_hw = torch.cumsum(walk_h, dim=-1)
+
+    # Normalize to unit variance to keep magnitude stable
+    walk_hw = walk_hw - walk_hw.mean(dim=(-2, -1), keepdim=True)
+    std = walk_hw.std(dim=(-2, -1), keepdim=True)
+    std = torch.where(std == 0, torch.ones_like(std), std)
+    walk_hw = walk_hw / std
+    return walk_hw * scale
+
+
 def smooth_min_snr_weights(
     timesteps: torch.Tensor,
     all_snr: torch.Tensor,

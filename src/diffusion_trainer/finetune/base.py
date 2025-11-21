@@ -4,10 +4,10 @@ import random
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Sequence
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, ContextManager, TypeVar
 
 import torch
 import torch.nn.functional as F
@@ -83,6 +83,9 @@ class BaseTuner:
         self.weight_dtype = str_to_dtype(config.weight_dtype)
         self.save_dtype = str_to_dtype(config.save_dtype)
         self.vae_dtype = str_to_dtype(config.vae_dtype)
+        self._sigma_for_timesteps: torch.Tensor | None = None
+        self.ema_unet: EMAModel | None = None
+        self.ema_unet_short: EMAModel | None = None
 
         # Common initialization steps
         self._initialize_environment()
@@ -159,15 +162,19 @@ class BaseTuner:
         freeze_models = [model for model in getattr(self, "models", []) if model not in self.training_models]
         self.freeze_model(freeze_models)
 
-        # Initialize EMA model if enabled
+        # Initialize EMA models if enabled
         if self.config.use_ema:
-            self.ema_unet = self.get_ema(self.pipeline.unet, self.pipeline.unet.config)
-        else:
-            self.ema_unet = None
+            self.ema_unet = self.get_ema(self.pipeline.unet, self.pipeline.unet.config, decay=self.config.ema_decay_long)
+            if getattr(self.config, "use_dual_ema", False):
+                self.ema_unet_short = self.get_ema(self.pipeline.unet, self.pipeline.unet.config, decay=self.config.ema_decay_short)
 
         # Prepare optimizer
         self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, self.trainable_models_with_lr)
-        self.optimizer = initialize_optimizer(self.config.optimizer, self.trainable_parameters_dicts)
+        self.optimizer = initialize_optimizer(
+            self.config.optimizer,
+            self.trainable_parameters_dicts,
+            weight_decay=self.config.weight_decay,
+        )
         self.optimizer = self.accelerator.prepare(self.optimizer)
 
         num_update_steps_per_epoch = math.ceil(len(data_loader) / self.config.gradient_accumulation_steps / self.accelerator.num_processes)
@@ -320,9 +327,9 @@ class BaseTuner:
         # Optimizer step
         self.optimizer.step()
 
-        # Update EMA model if enabled
-        if self.accelerator.sync_gradients and hasattr(self, "ema_unet") and self.ema_unet is not None:
-            self.ema_unet.step(self.pipeline.unet.parameters())
+        # Update EMA model(s) if enabled
+        step_for_ema = self.global_step + (1 if self.accelerator.sync_gradients else 0)
+        self._step_emas(step_for_ema)
 
         # LR scheduler step
         self.lr_scheduler.step()
@@ -332,6 +339,19 @@ class BaseTuner:
 
         # Clear CUDA cache only when necessary (not after every sync)
         # Removed frequent cache clearing to improve performance
+
+    def _should_step_ema(self, step: int) -> bool:
+        return self.config.use_ema and step >= getattr(self.config, "ema_start_step", 0)
+
+    def _step_emas(self, step: int) -> None:
+        if not self.accelerator.sync_gradients:
+            return
+        if not self._should_step_ema(step):
+            return
+        if self.ema_unet is not None:
+            self.ema_unet.step(self.pipeline.unet.parameters())
+        if getattr(self.config, "use_dual_ema", False) and self.ema_unet_short is not None:
+            self.ema_unet_short.step(self.pipeline.unet.parameters())
 
     def generate_initial_preview(self) -> None:
         """Generate preview images before training starts if configured to do so."""
@@ -418,8 +438,16 @@ class BaseTuner:
 
     def sample_noise(self, latents: torch.Tensor) -> torch.Tensor:
         """Sample noise that will be added to the latents."""
+        # Use Brownian noise if requested
+        if getattr(self.config, "use_brownian_noise", False):
+            noise = brownian_noise(
+                latents.shape,
+                device=latents.device,
+                dtype=latents.dtype,
+                scale=getattr(self.config, "brownian_noise_scale", 1.0),
+            )
         # Use multi-resolution noise if enabled
-        if getattr(self.config, "use_multires_noise", True):
+        elif getattr(self.config, "use_multires_noise", True):
             # Check if custom scales are provided
             custom_scales = getattr(self.config, "multires_noise_scales", None)
             custom_weights = getattr(self.config, "multires_noise_weights", None)
@@ -488,6 +516,35 @@ class BaseTuner:
 
         return self.noise_scheduler.add_noise(latents, noise, timesteps)
 
+    def _sample_timesteps_lognormal(self, batch_size: int) -> torch.IntTensor:
+        """
+        Sample timesteps by drawing sigma from a lognormal distribution (EDM-style)
+        and mapping to the closest scheduler timestep.
+        """
+        if self._sigma_for_timesteps is None:
+            alphas_cumprod = self.noise_scheduler.alphas_cumprod  # type: ignore[attr-defined]
+            if alphas_cumprod is None:
+                msg = "Noise scheduler missing alphas_cumprod for lognormal sampling"
+                raise ValueError(msg)
+            eps = 1e-12
+            alphas_cumprod = alphas_cumprod.to(device=self.accelerator.device, dtype=torch.float32).clamp(min=eps)
+            sigma_table = torch.sqrt((1 - alphas_cumprod) / alphas_cumprod)
+            self._sigma_for_timesteps = sigma_table
+
+        sigma_table = self._sigma_for_timesteps
+        if sigma_table is None:
+            msg = "Sigma table was not initialized"
+            raise ValueError(msg)
+
+        mean = torch.tensor(self.config.timestep_lognormal_mean, device=self.accelerator.device, dtype=torch.float32)
+        std = torch.tensor(self.config.timestep_lognormal_std, device=self.accelerator.device, dtype=torch.float32)
+        lognormal = torch.distributions.LogNormal(mean, std)
+        sampled_sigma = lognormal.sample((batch_size,))
+
+        # Find nearest timestep by sigma distance
+        distance = torch.abs(sigma_table.view(1, -1) - sampled_sigma.view(-1, 1))
+        return distance.argmin(dim=1).int()
+
     def sample_timesteps(self, batch_size: int) -> torch.IntTensor:
         num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
 
@@ -510,6 +567,8 @@ class BaseTuner:
                 device=self.accelerator.device,
             )
             timesteps = torch.multinomial(weights, batch_size, replacement=True).int()
+        elif self.config.timestep_bias_strategy == "lognormal":
+            timesteps = self._sample_timesteps_lognormal(batch_size)
         else:
             msg = f"Unknown timestep bias strategy {self.config.timestep_bias_strategy}"
             raise ValueError(msg)
@@ -542,6 +601,57 @@ class BaseTuner:
         # Trigger garbage collection for CUDA tensors
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    @contextmanager
+    def use_ema_weights(self) -> ContextManager[None]:
+        """Temporarily swap UNet weights to EMA for eval/save, then restore."""
+        if not self.config.use_ema or self.ema_unet is None:
+            yield
+            return
+        self.ema_unet.store(self.pipeline.unet.parameters())
+        self.ema_unet.copy_to(self.pipeline.unet.parameters())
+        try:
+            yield
+        finally:
+            self.ema_unet.restore(self.pipeline.unet.parameters())
+
+    def _sample_condition_dropout_mask(self, batch_size: int, device: torch.device) -> torch.BoolTensor:
+        """
+        Sample a boolean mask for conditional dropout (CFG-style).
+        True values indicate samples where text condition should be dropped.
+        """
+        prob = getattr(self.config, "condition_dropout_prob", 0.0)
+        if prob <= 0:
+            return torch.zeros(batch_size, device=device, dtype=torch.bool)
+        return torch.rand(batch_size, device=device) < prob
+
+    def _get_unconditional_prompts(self, prompts_str: list[str]) -> list[str]:
+        """Create placeholder prompts used for unconditional classifier-free guidance."""
+        return [""] * len(prompts_str)
+
+    def _apply_condition_dropout(
+        self,
+        prompt_embeds: torch.Tensor,
+        mask: torch.BoolTensor,
+        unconditional_prompt_embeds: torch.Tensor,
+    ) -> torch.Tensor:
+        """Replace conditional embeddings with unconditional ones for masked samples."""
+        if mask.any():
+            expanded_mask = mask.view(-1, 1, 1)
+            prompt_embeds = torch.where(expanded_mask, unconditional_prompt_embeds, prompt_embeds)
+        return prompt_embeds
+
+    def _apply_condition_dropout_pooled(
+        self,
+        pooled_embeds: torch.Tensor,
+        mask: torch.BoolTensor,
+        unconditional_pooled_embeds: torch.Tensor,
+    ) -> torch.Tensor:
+        """Replace pooled embeddings with unconditional ones for masked samples."""
+        if mask.any():
+            expanded_mask = mask.view(-1, 1)
+            pooled_embeds = torch.where(expanded_mask, unconditional_pooled_embeds, pooled_embeds)
+        return pooled_embeds
 
     def _apply_vae_scaling(self, latents: torch.Tensor) -> torch.Tensor:
         """Apply VAE scaling factor to latents."""
@@ -618,13 +728,16 @@ class BaseTuner:
 
     def get_noise_scheduler(self) -> DDPMScheduler:
         """Set up the noise scheduler"""
-        # Use the specified prediction type from the configuration if provided
-        if hasattr(self.config, "prediction_type") and self.config.prediction_type == "v_prediction":
-            self.pipeline.scheduler.register_to_config(
-                rescale_betas_zero_snr=True,
-                timestep_spacing="trailing",
-                prediction_type="v_prediction",
-            )
+        scheduler_config_updates = {}
+        prediction_type = getattr(self.config, "prediction_type", None)
+        if prediction_type is not None:
+            scheduler_config_updates["prediction_type"] = prediction_type
+            scheduler_config_updates["timestep_spacing"] = "trailing"
+        if getattr(self.config, "rescale_betas_zero_snr", False):
+            scheduler_config_updates["rescale_betas_zero_snr"] = True
+            scheduler_config_updates.setdefault("timestep_spacing", "trailing")
+        if scheduler_config_updates:
+            self.pipeline.scheduler.register_to_config(**scheduler_config_updates)
 
         # Create the noise scheduler from the pipeline's scheduler configuration
         noise_scheduler = DDPMScheduler.from_config(
@@ -862,7 +975,7 @@ class BaseTuner:
                 autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
                 generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
 
-                with autocast_ctx:
+                with self.use_ema_weights(), autocast_ctx:
                     self.pipeline.to(self.accelerator.device)
                     # Use the configured VAE dtype but add NaN checking
                     self.pipeline.vae.to(dtype=self.vae_dtype)
@@ -956,10 +1069,12 @@ class BaseTuner:
     def saving_model(self, filename: str) -> None:
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
-            if self.config.mode in ("lora", "lokr", "loha"):
-                self.save_lora_model(filename)
-            else:
-                self.save_full_finetune_model(filename)
+            save_context = self.use_ema_weights() if self.config.use_ema else nullcontext()
+            with save_context:
+                if self.config.mode in ("lora", "lokr", "loha"):
+                    self.save_lora_model(filename)
+                else:
+                    self.save_full_finetune_model(filename)
 
     def _create_lora_metadata(self) -> dict[str, str]:
         """Create metadata for LoRA models."""
@@ -1128,12 +1243,13 @@ class BaseTuner:
 
         return prompts
 
-    def get_ema(self, model: torch.nn.Module, config: dict) -> EMAModel:
+    def get_ema(self, model: torch.nn.Module, config: dict, *, decay: float) -> EMAModel:
         """Initialize Exponential Moving Average for the model if enabled in config."""
         ema_model = EMAModel(
             parameters=model.parameters(),
             model_cls=UNet2DConditionModel,
             model_config=config,
+            decay=decay,
         )
         ema_model.to(self.device)
         return ema_model

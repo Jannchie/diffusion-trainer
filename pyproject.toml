@@ -30,6 +30,8 @@ dependencies = [
     "pytest>=8.3.5",
     "torchao>=0.9.0",
     "diffusion-prompt-embedder>=0.2.0",
+    "prodigyopt>=1.1.2",
+    "lion-pytorch>=0.2.3",
 ]
 
 

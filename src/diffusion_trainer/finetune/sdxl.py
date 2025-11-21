@@ -174,6 +174,18 @@ class SDXLTuner(BaseTuner):
         # Process prompt embeddings efficiently
         prompt_embeds_1 = self.get_prompt_embeds_1(prompts_str)
         prompt_embeds_2, prompt_embeds_pooled_2 = self.get_prompt_embeds_2(prompts_str)
+        cond_dropout_mask = self._sample_condition_dropout_mask(len(prompts_str), self.accelerator.device)
+        if cond_dropout_mask.any():
+            unconditional_prompts = self._get_unconditional_prompts(prompts_str)
+            unconditional_prompt_embeds_1 = self.get_prompt_embeds_1(unconditional_prompts)
+            unconditional_prompt_embeds_2, unconditional_prompt_embeds_pooled_2 = self.get_prompt_embeds_2(unconditional_prompts)
+            prompt_embeds_1 = self._apply_condition_dropout(prompt_embeds_1, cond_dropout_mask, unconditional_prompt_embeds_1)
+            prompt_embeds_2 = self._apply_condition_dropout(prompt_embeds_2, cond_dropout_mask, unconditional_prompt_embeds_2)
+            prompt_embeds_pooled_2 = self._apply_condition_dropout_pooled(
+                prompt_embeds_pooled_2,
+                cond_dropout_mask,
+                unconditional_prompt_embeds_pooled_2,
+            )
 
         # Create time_ids tensor once and directly with the correct device
         time_ids = torch.stack(

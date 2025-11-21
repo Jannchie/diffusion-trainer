@@ -33,12 +33,17 @@ class BaseConfig:
     all_tags_dropout: float = field(default=0.0, metadata={"help": "All tags dropout."})
     caption_dropout: float = field(default=0.0, metadata={"help": "Caption dropout."})
     use_enhanced_embeddings: bool = field(default=False, metadata={"help": "Whether to use enhanced prompt embeddings for training."})
+    condition_dropout_prob: float = field(
+        default=0.0,
+        metadata={"help": "Probability to drop conditional text (CFG-style dropout) to teach unconditional branch."},
+    )
 
     seed: int = field(default_factory=lambda: random.randint(0, 1_000_000_000), metadata={"help": "Seed for reproducibility."})
     model_name: str = field(default="my_model", metadata={"help": "Model name."})
     save_dir: str = field(default="out", metadata={"help": "Directory to save the model."})
     save_dtype: str = field(default="fp32", metadata={"help": "Save dtype."})
     weight_dtype: str = field(default="fp32", metadata={"help": "Weight dtype."})
+    weight_decay: float = field(default=1e-2, metadata={"help": "Weight decay for optimizers that support it."})
     mixed_precision: Literal["float16", "bfloat16", "fp16", "bf16"] = field(default="bf16", metadata={"help": "Mixed precision."})
     prediction_type: Literal["epsilon", "v_prediction", "sample"] | None = field(
         default=None,
@@ -87,6 +92,8 @@ class BaseConfig:
     multires_noise_discount: float = field(default=0.8, metadata={"help": "Discount factor between levels. Lower = more variation. Range: 0.1-0.9."})
     multires_noise_scales: list[float] | None = field(default=None, metadata={"help": "Custom scales [1.0, 0.5, 0.25]. Overrides iterations if set."})
     multires_noise_weights: list[float] | None = field(default=None, metadata={"help": "Custom weights for scales. Must match scales length."})
+    use_brownian_noise: bool = field(default=False, metadata={"help": "Use Brownian noise (random walk) instead of Gaussian for low-frequency richness."})
+    brownian_noise_scale: float = field(default=1.0, metadata={"help": "Scale factor for Brownian noise amplitude."})
 
     # Advanced SNR options
     use_smooth_min_snr: bool = field(default=True, metadata={"help": "Use smooth Min-SNR weighting instead of hard clipping when SNR gamma is set."})
@@ -105,9 +112,17 @@ class BaseConfig:
     )
     flash_attention_unet: bool = field(default=True, metadata={"help": "Enable Flash Attention for UNet (recommended)."})
     gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
-    timestep_bias_strategy: Literal["uniform", "logit"] = field(
-        default="uniform",
-        metadata={"help": "Timestep bias strategy."},
+    timestep_bias_strategy: Literal["uniform", "logit", "lognormal"] = field(
+        default="lognormal",
+        metadata={"help": "Timestep bias strategy (default lognormal for EDM-style sigma sampling)."},
+    )
+    timestep_lognormal_mean: float = field(
+        default=-1.2,
+        metadata={"help": "Mean for lognormal sigma timestep sampling (EDM-style)."},
+    )
+    timestep_lognormal_std: float = field(
+        default=1.2,
+        metadata={"help": "Std for lognormal sigma timestep sampling (EDM-style)."},
     )
     timestep_bias_m: float = field(
         default=0.0,
@@ -125,9 +140,17 @@ class BaseConfig:
         default=False,
         metadata={"help": "Use debiased estimation technique to reweight loss. Focuses learning on high SNR (low noise) regions."},
     )
+    rescale_betas_zero_snr: bool = field(
+        default=True,
+        metadata={"help": "Enable zero terminal SNR (rescale_betas_zero_snr) to improve stability with v-prediction."},
+    )
 
     max_grad_norm: float = field(default=1.0, metadata={"help": "Max gradient norm."})
     use_ema: bool = field(default=False, metadata={"help": "Use EMA."})
+    ema_start_step: int = field(default=0, metadata={"help": "Global step to start EMA updates."})
+    use_dual_ema: bool = field(default=False, metadata={"help": "Maintain a secondary short EMA alongside long EMA."})
+    ema_decay_long: float = field(default=0.9999, metadata={"help": "Decay for long EMA."})
+    ema_decay_short: float = field(default=0.9, metadata={"help": "Decay for short EMA when use_dual_ema is enabled."})
     save_every_n_steps: int = field(default=0, metadata={"help": "Save every n steps."})
     save_every_n_epochs: int = field(default=1, metadata={"help": "Save every n epochs."})
     preview_every_n_steps: int = field(default=0, metadata={"help": "Preview every n steps."})
@@ -136,7 +159,10 @@ class BaseConfig:
 
     log_with: Literal["wandb", "tensorboard", "none"] = field(default="wandb", metadata={"help": "Logger."})
 
-    optimizer: Literal["adamW8bit", "adafactor"] = field(default="adamW8bit", metadata={"help": "Optimizer."})
+    optimizer: Literal["adamW8bit", "adafactor", "prodigy", "lion", "lion8bit"] = field(
+        default="adamW8bit",
+        metadata={"help": "Optimizer (adamW8bit/adafactor/prodigy/lion/lion8bit)."},
+    )
     optimizer_warmup_steps: int = field(default=0, metadata={"help": "Optimizer warmup steps."})
     optimizer_num_cycles: int = field(default=1, metadata={"help": "Optimizer num cycles."})
 

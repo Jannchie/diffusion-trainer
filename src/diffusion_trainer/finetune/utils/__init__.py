@@ -283,12 +283,13 @@ def get_trainable_parameter_dicts(accelerator: Accelerator, trainable_mdels: lis
     return [prepare_params(accelerator, model.model, model.lr) for model in trainable_mdels]
 
 
-def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[ParamDict]) -> torch.optim.Optimizer:
+def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[ParamDict], *, weight_decay: float = 1e-2) -> torch.optim.Optimizer:
     """Initialize optimizer with proper parameter handling and type safety.
 
     Args:
-        optimizer_str: Optimizer type ("adamW8bit" or "adafactor")
+        optimizer_str: Optimizer type ("adamW8bit", "adafactor", "prodigy", "lion", "lion8bit")
         trainable_parameters_dicts: List of parameter dictionaries with model parameters and learning rates
+        weight_decay: Weight decay to apply where supported
 
     Returns:
         Configured optimizer instance
@@ -309,7 +310,7 @@ def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[Pa
         optimizer = bnb.optim.AdamW8bit(
             clean_params,
             betas=(0.9, 0.999),
-            weight_decay=1e-2,
+            weight_decay=weight_decay,
             eps=1e-6,  # AdamW8bit expects float eps
         )
     elif optimizer_str == "adafactor":
@@ -334,10 +335,46 @@ def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[Pa
             eps=(1e-30, 1e-3),  # (eps1, eps2) for numerical stability
             clip_threshold=1.0,  # Gradient clipping threshold
             decay_rate=-0.8,  # Beta2 decay rate
-            weight_decay=0.0,  # Weight decay
+            weight_decay=weight_decay,  # Weight decay
+        )
+    elif optimizer_str == "prodigy":
+        try:
+            from prodigyopt import Prodigy
+        except ImportError as exc:
+            msg = "prodigyopt is required for optimizer='prodigy'. Install with `uv add prodigyopt`."
+            raise ImportError(msg) from exc
+
+        prodigy_params = [{"params": param_dict["params"], "lr": param_dict["lr"]} for param_dict in trainable_parameters_dicts]
+        optimizer = Prodigy(
+            prodigy_params,
+            betas=(0.9, 0.999),
+            weight_decay=weight_decay,
+            decouple=True,
+        )
+    elif optimizer_str == "lion":
+        try:
+            from lion_pytorch import Lion
+        except ImportError as exc:
+            msg = "lion-pytorch is required for optimizer='lion'. Install with `uv add lion-pytorch`."
+            raise ImportError(msg) from exc
+
+        lion_params = [{"params": param_dict["params"], "lr": param_dict["lr"]} for param_dict in trainable_parameters_dicts]
+        optimizer = Lion(
+            lion_params,
+            betas=(0.9, 0.99),
+            weight_decay=weight_decay,
+        )
+    elif optimizer_str == "lion8bit":
+        import bitsandbytes as bnb
+
+        lion8bit_params = [{"params": param_dict["params"], "lr": param_dict["lr"]} for param_dict in trainable_parameters_dicts]
+        optimizer = bnb.optim.Lion8bit(
+            lion8bit_params,
+            betas=(0.9, 0.99),
+            weight_decay=weight_decay,
         )
     else:
-        supported_optimizers = ["adamW8bit", "adafactor"]
+        supported_optimizers = ["adamW8bit", "adafactor", "prodigy", "lion", "lion8bit"]
         msg = f"Unsupported optimizer: {optimizer_str}. Supported optimizers: {supported_optimizers}"
         raise ValueError(msg)
 

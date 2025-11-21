@@ -86,6 +86,11 @@ class SD15Tuner(BaseTuner):
     def process_batch(self, batch: DiffusionBatch) -> SD15Batch:
         prompts_str = self.create_prompts_str(batch)
         prompt_embeds = self.get_prompt_embeds(prompts_str)
+        cond_dropout_mask = self._sample_condition_dropout_mask(len(prompts_str), self.accelerator.device)
+        if cond_dropout_mask.any():
+            unconditional_prompts = self._get_unconditional_prompts(prompts_str)
+            unconditional_prompt_embeds = self.get_prompt_embeds(unconditional_prompts)
+            prompt_embeds = self._apply_condition_dropout(prompt_embeds, cond_dropout_mask, unconditional_prompt_embeds)
 
         return SD15Batch(
             img_latents=batch.img_latents,
