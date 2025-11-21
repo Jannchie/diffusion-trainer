@@ -3,11 +3,11 @@ import math
 import random
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ContextManager, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 import torch.nn.functional as F
@@ -39,6 +39,7 @@ from diffusion_trainer.finetune.utils.lora import apply_lora_config
 from diffusion_trainer.shared import get_progress
 from diffusion_trainer.utils.advanced_noise import (
     adaptive_noise_schedule,
+    brownian_noise,
     multi_resolution_noise,
     pyramid_noise,
     smooth_min_snr_weights,
@@ -418,14 +419,14 @@ class BaseTuner:
         self,
         img_latents: torch.Tensor,
         noise: torch.Tensor,
-        timesteps: torch.IntTensor,
+        timesteps: torch.Tensor,
         model_pred: torch.Tensor,
     ) -> torch.Tensor:
         noise_scheduler = self.noise_scheduler
         if noise_scheduler.config.get("prediction_type") == "epsilon":
             target = noise
         elif noise_scheduler.config.get("prediction_type") == "v_prediction":
-            target = noise_scheduler.get_velocity(img_latents, noise, timesteps)
+            target = noise_scheduler.get_velocity(img_latents, noise, timesteps)  # type: ignore
         elif noise_scheduler.config.get("prediction_type") == "sample":
             # We set the target to latents here, but the model_pred will return the noise sample prediction.
             target = img_latents
@@ -487,7 +488,7 @@ class BaseTuner:
                 )
         return noise
 
-    def get_noisy_latents(self, latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.IntTensor) -> torch.Tensor:
+    def get_noisy_latents(self, latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
         """Get noisy latents"""
         if self.config.input_perturbation > 0:
             # Apply input perturbation with optional step-based decay
@@ -514,9 +515,9 @@ class BaseTuner:
                 strength_factor=getattr(self.config, "adaptive_noise_strength", 1.0),
             )
 
-        return self.noise_scheduler.add_noise(latents, noise, timesteps)
+        return self.noise_scheduler.add_noise(latents, noise, timesteps)  # type: ignore
 
-    def _sample_timesteps_lognormal(self, batch_size: int) -> torch.IntTensor:
+    def _sample_timesteps_lognormal(self, batch_size: int) -> torch.Tensor:
         """
         Sample timesteps by drawing sigma from a lognormal distribution (EDM-style)
         and mapping to the closest scheduler timestep.
@@ -536,21 +537,31 @@ class BaseTuner:
             msg = "Sigma table was not initialized"
             raise ValueError(msg)
 
+        sigma_tensor: torch.Tensor = sigma_table
+
         mean = torch.tensor(self.config.timestep_lognormal_mean, device=self.accelerator.device, dtype=torch.float32)
         std = torch.tensor(self.config.timestep_lognormal_std, device=self.accelerator.device, dtype=torch.float32)
         lognormal = torch.distributions.LogNormal(mean, std)
         sampled_sigma = lognormal.sample((batch_size,))
-
+        if sampled_sigma is None:
+            msg = "Failed to sample sigma from lognormal distribution"
+            raise ValueError(msg)
         # Find nearest timestep by sigma distance
-        distance = torch.abs(sigma_table.view(1, -1) - sampled_sigma.view(-1, 1))
-        return distance.argmin(dim=1).int()
+        distance = torch.abs(sigma_tensor.view(1, -1) - sampled_sigma.view(-1, 1))
+        return distance.argmin(dim=1).to(dtype=torch.long)
 
-    def sample_timesteps(self, batch_size: int) -> torch.IntTensor:
+    def sample_timesteps(self, batch_size: int) -> torch.Tensor:
         num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
 
         if self.config.timestep_bias_strategy == "uniform":
             # Sample a random timestep for each image without bias.
-            timesteps = torch.randint(0, num_timesteps, (batch_size,), device=self.accelerator.device)
+            timesteps = torch.randint(
+                0,
+                num_timesteps,
+                (batch_size,),
+                device=self.accelerator.device,
+                dtype=torch.long,
+            )
         elif self.config.timestep_bias_strategy == "logit":
             # Sample a random timestep for each image, potentially biased by the timestep weights.
             # Biasing the timestep weights allows us to spend less time training irrelevant timesteps
@@ -566,7 +577,7 @@ class BaseTuner:
                 s=s,
                 device=self.accelerator.device,
             )
-            timesteps = torch.multinomial(weights, batch_size, replacement=True).int()
+            timesteps = torch.multinomial(weights, batch_size, replacement=True)
         elif self.config.timestep_bias_strategy == "lognormal":
             timesteps = self._sample_timesteps_lognormal(batch_size)
         else:
@@ -578,7 +589,7 @@ class BaseTuner:
             for t in timesteps.cpu().numpy().tolist():
                 self.timesteps_counter[t] += 1
 
-        return timesteps  # type: ignore
+        return timesteps
 
     def apply_seed_settings(self, seed: int) -> None:
         logger.info("Setting seed to %s", seed)
@@ -603,7 +614,7 @@ class BaseTuner:
             torch.cuda.empty_cache()
 
     @contextmanager
-    def use_ema_weights(self) -> ContextManager[None]:
+    def use_ema_weights(self) -> Generator[None, None, None]:
         """Temporarily swap UNet weights to EMA for eval/save, then restore."""
         if not self.config.use_ema or self.ema_unet is None:
             yield
@@ -615,7 +626,7 @@ class BaseTuner:
         finally:
             self.ema_unet.restore(self.pipeline.unet.parameters())
 
-    def _sample_condition_dropout_mask(self, batch_size: int, device: torch.device) -> torch.BoolTensor:
+    def _sample_condition_dropout_mask(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """
         Sample a boolean mask for conditional dropout (CFG-style).
         True values indicate samples where text condition should be dropped.
@@ -632,7 +643,7 @@ class BaseTuner:
     def _apply_condition_dropout(
         self,
         prompt_embeds: torch.Tensor,
-        mask: torch.BoolTensor,
+        mask: torch.Tensor,
         unconditional_prompt_embeds: torch.Tensor,
     ) -> torch.Tensor:
         """Replace conditional embeddings with unconditional ones for masked samples."""
@@ -644,7 +655,7 @@ class BaseTuner:
     def _apply_condition_dropout_pooled(
         self,
         pooled_embeds: torch.Tensor,
-        mask: torch.BoolTensor,
+        mask: torch.Tensor,
         unconditional_pooled_embeds: torch.Tensor,
     ) -> torch.Tensor:
         """Replace pooled embeddings with unconditional ones for masked samples."""
