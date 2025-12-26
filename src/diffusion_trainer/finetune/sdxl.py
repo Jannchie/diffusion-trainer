@@ -133,7 +133,7 @@ class SDXLTuner(BaseTuner):
 
         # Predict and calculate loss
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds, unet_added_conditions)
-        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)  # type: ignore
+        target, model_pred = self.get_pred_target(img_latents, noise, timesteps, model_pred)
 
         loss = self.get_loss(timesteps, model_pred, target)
 

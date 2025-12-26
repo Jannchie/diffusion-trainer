@@ -178,7 +178,7 @@ class BaseTuner:
         )
         self.optimizer = self.accelerator.prepare(self.optimizer)
 
-        num_update_steps_per_epoch = math.ceil(len(data_loader) / self.config.gradient_accumulation_steps / self.accelerator.num_processes)
+        num_update_steps_per_epoch = math.ceil(len(data_loader) / self.config.gradient_accumulation_steps)
         n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
 
         # Initialize learning rate scheduler
@@ -190,7 +190,7 @@ class BaseTuner:
                 scheduler_type,
                 optimizer=self.optimizer,
                 num_warmup_steps=self.config.optimizer_warmup_steps,
-                num_training_steps=n_total_steps * self.accelerator.num_processes,
+                num_training_steps=n_total_steps,
             )
         else:
             # For other optimizers, use cosine with restarts
@@ -199,7 +199,7 @@ class BaseTuner:
                 scheduler_type,
                 optimizer=self.optimizer,
                 num_warmup_steps=self.config.optimizer_warmup_steps,
-                num_training_steps=n_total_steps * self.accelerator.num_processes,
+                num_training_steps=n_total_steps,
                 num_cycles=self.config.optimizer_num_cycles,
             )
         self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
@@ -223,7 +223,7 @@ class BaseTuner:
         if self.accelerator.is_main_process:
             dataset.print_bucket_info()
         sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
-        with self.accelerator.main_process_first():
+        with self.accelerator.main_process_first(): # type: ignore
             data_loader = DataLoader(
                 dataset,
                 batch_sampler=sampler,
@@ -421,8 +421,9 @@ class BaseTuner:
         noise: torch.Tensor,
         timesteps: torch.Tensor,
         model_pred: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         noise_scheduler = self.noise_scheduler
+        pred = model_pred
         if noise_scheduler.config.get("prediction_type") == "epsilon":
             target = noise
         elif noise_scheduler.config.get("prediction_type") == "v_prediction":
@@ -431,11 +432,11 @@ class BaseTuner:
             # We set the target to latents here, but the model_pred will return the noise sample prediction.
             target = img_latents
             # We will have to subtract the noise residual from the prediction to get the target sample.
-            model_pred = model_pred - noise
+            pred = model_pred - noise
         else:
             msg = f"Unknown prediction type {noise_scheduler.config.get('prediction_type')}"
             raise ValueError(msg)
-        return target
+        return target, pred
 
     def sample_noise(self, latents: torch.Tensor) -> torch.Tensor:
         """Sample noise that will be added to the latents."""

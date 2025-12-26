@@ -114,7 +114,7 @@ class SD15Tuner(BaseTuner):
         model_pred = self.get_model_pred(img_noisy_latents, timesteps, tensors["prompt_embeds"])
 
         # Calculate target
-        target = self.get_pred_target(img_latents, noise, timesteps, model_pred)  # type: ignore
+        target, model_pred = self.get_pred_target(img_latents, noise, timesteps, model_pred)
 
         # Calculate loss
         loss = self.get_loss(timesteps, model_pred, target)
