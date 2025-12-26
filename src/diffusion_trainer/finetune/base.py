@@ -7,7 +7,7 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 import torch.nn.functional as F
@@ -51,26 +51,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("diffusion_trainer")
 
-# Type variable for batch types
-BatchType = TypeVar("BatchType")
+ModelPredFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
-class BaseBatchProcessor(ABC):
-    """Abstract base class for batch processing logic."""
-
-    def __init__(self, tuner: "BaseTuner") -> None:
-        self.tuner = tuner
-
-    @abstractmethod
-    def process_batch_data(self, batch: "DiffusionBatch") -> object:
-        """Process raw batch data into model-specific format."""
-
-    @abstractmethod
-    def get_model_prediction(self, processed_batch: object, img_noisy_latents: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
-        """Get model prediction for the batch."""
-
-
-class BaseTuner:
+class BaseTuner(ABC):
     @staticmethod
     def from_config(_config: BaseConfig) -> "BaseTuner":
         """Create a Tuner from a config."""
@@ -374,6 +358,38 @@ class BaseTuner:
         msg = "This method should be implemented in subclasses."
         raise NotImplementedError(msg)
 
+    def train_on_latents(
+        self,
+        img_latents: torch.Tensor,
+        model_pred_fn: ModelPredFn,
+        *,
+        extra_tensors: Sequence[torch.Tensor | None] = (),
+    ) -> None:
+        """Run a single training step given latents and a model prediction function."""
+        # Apply VAE scaling
+        img_latents = self._apply_vae_scaling(img_latents)
+
+        # Prepare training tensors
+        img_latents, noise, timesteps, img_noisy_latents = self._prepare_training_tensors(img_latents)
+
+        # Predict and calculate loss
+        model_pred = model_pred_fn(img_noisy_latents, timesteps)
+        target, model_pred = self.get_pred_target(img_latents, noise, timesteps, model_pred)
+        loss = self.get_loss(timesteps, model_pred, target)
+
+        # Free memory efficiently
+        self._free_tensors(
+            noise,
+            img_noisy_latents,
+            model_pred,
+            target,
+            img_latents,
+            *extra_tensors,
+        )
+
+        # Optimizer step
+        self.optimizer_step(loss)
+
     def get_loss(self, timesteps: torch.Tensor, model_pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         # 1. Compute the basic MSE loss (per sample)
         loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
@@ -637,33 +653,17 @@ class BaseTuner:
             return torch.zeros(batch_size, device=device, dtype=torch.bool)
         return torch.rand(batch_size, device=device) < prob
 
-    def _get_unconditional_prompts(self, prompts_str: list[str]) -> list[str]:
-        """Create placeholder prompts used for unconditional classifier-free guidance."""
-        return [""] * len(prompts_str)
-
-    def _apply_condition_dropout(
-        self,
-        prompt_embeds: torch.Tensor,
-        mask: torch.Tensor,
-        unconditional_prompt_embeds: torch.Tensor,
-    ) -> torch.Tensor:
-        """Replace conditional embeddings with unconditional ones for masked samples."""
-        if mask.any():
-            expanded_mask = mask.view(-1, 1, 1)
-            prompt_embeds = torch.where(expanded_mask, unconditional_prompt_embeds, prompt_embeds)
-        return prompt_embeds
-
-    def _apply_condition_dropout_pooled(
-        self,
-        pooled_embeds: torch.Tensor,
-        mask: torch.Tensor,
-        unconditional_pooled_embeds: torch.Tensor,
-    ) -> torch.Tensor:
-        """Replace pooled embeddings with unconditional ones for masked samples."""
-        if mask.any():
-            expanded_mask = mask.view(-1, 1)
-            pooled_embeds = torch.where(expanded_mask, unconditional_pooled_embeds, pooled_embeds)
-        return pooled_embeds
+    def apply_condition_dropout_to_prompts(self, prompts_str: list[str]) -> list[str]:
+        """Apply conditional dropout by replacing selected prompts with empty strings."""
+        mask = self._sample_condition_dropout_mask(len(prompts_str), self.accelerator.device)
+        if not mask.any():
+            return prompts_str
+        dropped = mask.cpu().tolist()
+        updated_prompts = list(prompts_str)
+        for idx, should_drop in enumerate(dropped):
+            if should_drop:
+                updated_prompts[idx] = ""
+        return updated_prompts
 
     def _apply_vae_scaling(self, latents: torch.Tensor) -> torch.Tensor:
         """Apply VAE scaling factor to latents."""
@@ -693,13 +693,15 @@ class BaseTuner:
 
     def prepare_dataset(self, config: BaseConfig) -> DiffusionDataset:
         if config.dataset_path:
-            meta_path = Path(config.dataset_path)
+            dataset_root = Path(config.dataset_path)
         elif config.image_path:
-            meta_path = Path(config.image_path) / "metadata"
+            dataset_root = Path(config.image_path) / "metadata"
         else:
             msg = "Please specify the meta path in the config file."
             raise ValueError(msg)
-        parquet_path = meta_path / "metadata.parquet"
+        parquet_path = dataset_root / "metadata.parquet"
+        latents_dir = dataset_root / "latents"
+        tags_dir = dataset_root / "tags"
         with self.accelerator.main_process_first():
             if not self.accelerator.is_main_process:
                 # Wait for the main process to finish preparing, then load the dataset.
@@ -713,18 +715,18 @@ class BaseTuner:
                 latents_processor = LatentsGenerateProcessor(
                     vae_path=config.vae_path,
                     img_path=config.image_path,
-                    target_path=config.dataset_path,
+                    target_path=str(latents_dir),
                     vae_dtype=self.vae_dtype,
                 )
 
                 latents_processor()
 
-                tagging_processor = TaggingProcessor(img_path=config.image_path, target_path=config.dataset_path, num_workers=1)
+                tagging_processor = TaggingProcessor(img_path=config.image_path, target_path=str(tags_dir), num_workers=1)
                 tagging_processor()
 
             if not parquet_path.exists():
                 logger.info('Creating parquet file at "%s"', parquet_path)
-                CreateParquetProcessor(target_dir=config.dataset_path)(max_workers=8)
+                CreateParquetProcessor(target_dir=dataset_root)(max_workers=8)
             else:
                 logger.info('found parquet file at "%s"', parquet_path)
         return DiffusionDataset.from_parquet(parquet_path)

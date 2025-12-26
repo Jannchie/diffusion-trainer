@@ -85,12 +85,8 @@ class SD15Tuner(BaseTuner):
 
     def process_batch(self, batch: DiffusionBatch) -> SD15Batch:
         prompts_str = self.create_prompts_str(batch)
+        prompts_str = self.apply_condition_dropout_to_prompts(prompts_str)
         prompt_embeds = self.get_prompt_embeds(prompts_str)
-        cond_dropout_mask = self._sample_condition_dropout_mask(len(prompts_str), self.accelerator.device)
-        if cond_dropout_mask.any():
-            unconditional_prompts = self._get_unconditional_prompts(prompts_str)
-            unconditional_prompt_embeds = self.get_prompt_embeds(unconditional_prompts)
-            prompt_embeds = self._apply_condition_dropout(prompt_embeds, cond_dropout_mask, unconditional_prompt_embeds)
 
         return SD15Batch(
             img_latents=batch.img_latents,
@@ -103,34 +99,17 @@ class SD15Tuner(BaseTuner):
             img_latents=batch.img_latents,
             prompt_embeds=batch.prompt_embeds,
         )
+        prompt_embeds = tensors["prompt_embeds"]
+        img_latents = tensors["img_latents"]
 
-        # Apply VAE scaling
-        img_latents = self._apply_vae_scaling(tensors["img_latents"])
+        def model_pred_fn(img_noisy_latents: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+            return self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds)
 
-        # Prepare training tensors
-        img_latents, noise, timesteps, img_noisy_latents = self._prepare_training_tensors(img_latents)
-
-        # Get model prediction
-        model_pred = self.get_model_pred(img_noisy_latents, timesteps, tensors["prompt_embeds"])
-
-        # Calculate target
-        target, model_pred = self.get_pred_target(img_latents, noise, timesteps, model_pred)
-
-        # Calculate loss
-        loss = self.get_loss(timesteps, model_pred, target)
-
-        # Free memory efficiently
-        self._free_tensors(
-            noise,
-            img_noisy_latents,
-            model_pred,
-            target,
+        self.train_on_latents(
             img_latents,
-            tensors["prompt_embeds"],
+            model_pred_fn,
+            extra_tensors=(prompt_embeds,),
         )
-
-        # Use the base class optimizer step method
-        self.optimizer_step(loss)
 
     def get_model_pred(
         self,

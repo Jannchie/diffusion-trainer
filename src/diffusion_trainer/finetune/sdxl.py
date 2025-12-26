@@ -118,9 +118,6 @@ class SDXLTuner(BaseTuner):
         )
         time_ids = batch.time_ids.to(self.device)
 
-        # Apply VAE scaling
-        img_latents = self._apply_vae_scaling(tensors["img_latents"])
-
         # Concatenate prompt embeds once and reuse
         prompt_embeds = torch.cat([tensors["prompt_embeds_1"], tensors["prompt_embeds_2"]], dim=2)
         unet_added_conditions = {
@@ -128,30 +125,20 @@ class SDXLTuner(BaseTuner):
             "time_ids": time_ids,
         }
 
-        # Prepare training tensors
-        img_latents, noise, timesteps, img_noisy_latents = self._prepare_training_tensors(img_latents)
+        def model_pred_fn(img_noisy_latents: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+            return self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds, unet_added_conditions)
 
-        # Predict and calculate loss
-        model_pred = self.get_model_pred(img_noisy_latents, timesteps, prompt_embeds, unet_added_conditions)
-        target, model_pred = self.get_pred_target(img_latents, noise, timesteps, model_pred)
-
-        loss = self.get_loss(timesteps, model_pred, target)
-
-        # Free memory efficiently
-        self._free_tensors(
-            noise,
-            img_noisy_latents,
-            model_pred,
-            target,
-            img_latents,
-            prompt_embeds,
-            tensors["prompt_embeds_1"],
-            tensors["prompt_embeds_2"],
-            tensors["prompt_embeds_pooled_2"],
+        self.train_on_latents(
+            tensors["img_latents"],
+            model_pred_fn,
+            extra_tensors=(
+                prompt_embeds,
+                tensors["prompt_embeds_1"],
+                tensors["prompt_embeds_2"],
+                tensors["prompt_embeds_pooled_2"],
+                time_ids,
+            ),
         )
-
-        # Use base class optimizer step method
-        self.optimizer_step(loss)
 
     def get_model_pred(
         self,
@@ -170,22 +157,11 @@ class SDXLTuner(BaseTuner):
 
     def process_batch(self, batch: DiffusionBatch) -> SDXLBatch:
         prompts_str = self.create_prompts_str(batch)
+        prompts_str = self.apply_condition_dropout_to_prompts(prompts_str)
 
         # Process prompt embeddings efficiently
         prompt_embeds_1 = self.get_prompt_embeds_1(prompts_str)
         prompt_embeds_2, prompt_embeds_pooled_2 = self.get_prompt_embeds_2(prompts_str)
-        cond_dropout_mask = self._sample_condition_dropout_mask(len(prompts_str), self.accelerator.device)
-        if cond_dropout_mask.any():
-            unconditional_prompts = self._get_unconditional_prompts(prompts_str)
-            unconditional_prompt_embeds_1 = self.get_prompt_embeds_1(unconditional_prompts)
-            unconditional_prompt_embeds_2, unconditional_prompt_embeds_pooled_2 = self.get_prompt_embeds_2(unconditional_prompts)
-            prompt_embeds_1 = self._apply_condition_dropout(prompt_embeds_1, cond_dropout_mask, unconditional_prompt_embeds_1)
-            prompt_embeds_2 = self._apply_condition_dropout(prompt_embeds_2, cond_dropout_mask, unconditional_prompt_embeds_2)
-            prompt_embeds_pooled_2 = self._apply_condition_dropout_pooled(
-                prompt_embeds_pooled_2,
-                cond_dropout_mask,
-                unconditional_prompt_embeds_pooled_2,
-            )
 
         # Create time_ids tensor once and directly with the correct device
         time_ids = torch.stack(

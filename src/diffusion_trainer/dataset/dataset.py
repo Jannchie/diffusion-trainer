@@ -54,10 +54,12 @@ class DiffusionDataset(Dataset):
     def __init__(self, buckets: dict[tuple[int, int], list[DiffusionTrainingItem]]) -> None:
         self.buckets = buckets
         self.bucket_boundaries = []
+        self.bucket_starts = []
         self.bucket_keys = list(buckets.keys())
 
         last_index = 0
         for key in self.bucket_keys:
+            self.bucket_starts.append(last_index)
             length = len(buckets[key])
             last_index += length
             self.bucket_boundaries.append(last_index)
@@ -185,18 +187,21 @@ class DiffusionDataset(Dataset):
                 executor.submit(process_metadata_files, npz_path)
         return DiffusionDataset(buckets)
 
-    def get_bucket_key(self, idx: int) -> tuple[int, int]:
+    def get_bucket_index(self, idx: int) -> int:
         # Use binary search to find the correct bucket
-        bucket_index = bisect_right(self.bucket_boundaries, idx)
-        return self.bucket_keys[bucket_index]
+        return bisect_right(self.bucket_boundaries, idx)
+
+    def get_bucket_key(self, idx: int) -> tuple[int, int]:
+        return self.bucket_keys[self.get_bucket_index(idx)]
 
     def __len__(self) -> int:
         return sum(len(v) for v in self.buckets.values())
 
     def __getitem__(self, idx: int) -> dict:
-        bucket_key = self.get_bucket_key(idx)
+        bucket_index = self.get_bucket_index(idx)
+        bucket_key = self.bucket_keys[bucket_index]
         bucket_items = self.buckets[bucket_key]
-        bucket_start_idx = self.bucket_boundaries[self.bucket_keys.index(bucket_key) - 1] if self.bucket_keys.index(bucket_key) > 0 else 0
+        bucket_start_idx = self.bucket_starts[bucket_index]
         item = bucket_items[idx - bucket_start_idx]
         npz = np.load(item.npz_path)
         img_latents = npz.get("latents")
@@ -224,7 +229,7 @@ class BucketBasedBatchSampler(Sampler):
         batche_indices_list = []
         logger.debug("Prepare batch indices...")
         for i, key in enumerate(self.dataset.bucket_keys):
-            key_start_idx = self.dataset.bucket_boundaries[i - 1] if i > 0 else 0
+            key_start_idx = self.dataset.bucket_starts[i]
             bucket_items = self.dataset.buckets[key]
             indices = list(range(len(bucket_items)))
             if self.shuffle:
