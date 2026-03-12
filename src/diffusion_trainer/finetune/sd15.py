@@ -1,4 +1,5 @@
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -117,7 +118,8 @@ class SD15Tuner(BaseTuner):
         timesteps: torch.Tensor,
         prompt_embeds: torch.Tensor,
     ) -> torch.Tensor:
-        return self.pipeline.unet(
+        runtime_unet = self.get_runtime_model(self.sd15_models.unet)
+        return runtime_unet(
             img_noisy_latents,
             timesteps,
             prompt_embeds,
@@ -134,14 +136,17 @@ class SD15Tuner(BaseTuner):
         )
 
     def get_prompt_embeds(self, prompts_str: list[str]) -> torch.Tensor:
+        runtime_text_encoder = self.get_runtime_model(self.sd15_models.text_encoder)
+        text_encoder_context = nullcontext() if any(param.requires_grad for param in self.sd15_models.text_encoder.parameters()) else torch.no_grad()
         if self.config.use_enhanced_embeddings:
-            return get_embeddings_sd15_batch(
-                self.pipeline.tokenizer,
-                self.pipeline.text_encoder,
-                prompts=prompts_str,
-                pad_last_block=True,
-                clip_skip=self.config.clip_skip,
-            )
+            with text_encoder_context:
+                return get_embeddings_sd15_batch(
+                    self.pipeline.tokenizer,
+                    runtime_text_encoder,
+                    prompts=prompts_str,
+                    pad_last_block=True,
+                    clip_skip=self.config.clip_skip,
+                )
 
         # Use the native CLIPTextModel path when enhanced embeddings are disabled
         text_inputs = self.pipeline.tokenizer(
@@ -153,11 +158,12 @@ class SD15Tuner(BaseTuner):
         )
         text_input_ids = text_inputs["input_ids"].to(self.accelerator.device)
         attention_mask = text_inputs["attention_mask"].to(self.accelerator.device)
-        prompt_embeds_output = self.pipeline.text_encoder(
-            text_input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-        )
+        with text_encoder_context:
+            prompt_embeds_output = runtime_text_encoder(
+                text_input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
         hidden_states = prompt_embeds_output.hidden_states
         clip_skip = max(self.config.clip_skip, 0)
         if clip_skip == 0 or hidden_states is None:

@@ -8,7 +8,7 @@ from dataclasses import asdict
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
-from typing import Literal, NamedTuple, NotRequired, Protocol, TypedDict, TypeVar
+from typing import Literal, NamedTuple, NotRequired, Protocol, Self, TypedDict, TypeVar
 
 import torch
 import wandb
@@ -180,7 +180,7 @@ class DummyProgressBar:
     def __init__(self, total: int) -> None:
         pass
 
-    def __enter__(self) -> "DummyProgressBar":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -269,18 +269,17 @@ def get_n_params(trainable_parameters: list[ParamDict]) -> int:
     return n_params
 
 
-def prepare_params(accelerator: Accelerator, model: torch.nn.Module, lr: float) -> ParamDict:
+def prepare_params(model: torch.nn.Module, lr: float) -> ParamDict:
     params = ParamDict(
         params=list(filter(lambda p: p.requires_grad, model.parameters())),
         lr=lr,
     )
     logger.info("%s learning rate: %s, number of parameters: %s", model.__class__.__name__, lr, format_size(get_n_params([params])))
-    accelerator.prepare(model)
     return params
 
 
-def get_trainable_parameter_dicts(accelerator: Accelerator, trainable_mdels: list[TrainableModel]) -> list[ParamDict]:
-    return [prepare_params(accelerator, model.model, model.lr) for model in trainable_mdels]
+def get_trainable_parameter_dicts(trainable_mdels: list[TrainableModel]) -> list[ParamDict]:
+    return [prepare_params(model.model, model.lr) for model in trainable_mdels]
 
 
 def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[ParamDict], *, weight_decay: float = 1e-2) -> torch.optim.Optimizer:

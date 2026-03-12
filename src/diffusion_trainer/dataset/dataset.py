@@ -223,9 +223,14 @@ class BucketBasedBatchSampler(Sampler):
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
-        self.rng = np.random.default_rng(seed)
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
 
     def __iter__(self) -> Generator[list[int], None, None]:
+        rng = np.random.default_rng(self.seed + self.epoch)
         batche_indices_list = []
         logger.debug("Prepare batch indices...")
         for i, key in enumerate(self.dataset.bucket_keys):
@@ -233,12 +238,12 @@ class BucketBasedBatchSampler(Sampler):
             bucket_items = self.dataset.buckets[key]
             indices = list(range(len(bucket_items)))
             if self.shuffle:
-                self.rng.shuffle(indices)
+                rng.shuffle(indices)
             for j in range(0, len(bucket_items), self.batch_size):
                 batch_indices = [key_start_idx + indices[k] for k in range(j, min(j + self.batch_size, len(indices)))]
                 batche_indices_list.append(batch_indices)
         if self.shuffle:
-            self.rng.shuffle(batche_indices_list)
+            rng.shuffle(batche_indices_list)
         logger.debug("Batch indices prepared!")
         for batch_indices in batche_indices_list:
             yield batch_indices

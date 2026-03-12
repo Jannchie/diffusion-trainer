@@ -1,8 +1,8 @@
 """Fintunner for Stable Diffusion XL model."""
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from logging import getLogger
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import torch
@@ -56,9 +56,7 @@ class SDXLTuner(BaseTuner):
     def __init__(self, config: SDXLConfig) -> None:
         """Initialize."""
         self.config = config
-        # Update save path for model-specific naming
         super().__init__(config)
-        self.save_path = Path(config.save_dir) / config.model_name
 
         # Keep mode as it needs type conversion
         self.mode: Literal["full-finetune", "lora", "lokr", "loha"] = config.mode
@@ -147,7 +145,8 @@ class SDXLTuner(BaseTuner):
         prompt_embeds: torch.Tensor,
         unet_added_conditions: dict,
     ) -> torch.Tensor:
-        return self.pipeline.unet(
+        runtime_unet = self.get_runtime_model(self.sdxl_models.unet)
+        return runtime_unet(
             img_noisy_latents,
             timesteps,
             prompt_embeds,
@@ -184,7 +183,6 @@ class SDXLTuner(BaseTuner):
             time_ids=time_ids,
         )
 
-    @torch.no_grad()
     def get_prompt_embeds_1(self, prompts_str: list[str]) -> torch.Tensor:
         text_inputs = self.pipeline.tokenizer(
             prompts_str,
@@ -195,11 +193,13 @@ class SDXLTuner(BaseTuner):
         )
         text_input_ids = text_inputs["input_ids"].to(self.accelerator.device)
 
-        # Use no_grad for inference to save memory
-        prompt_embeds_output = self.pipeline.text_encoder(
-            text_input_ids,
-            output_hidden_states=True,
-        )
+        runtime_text_encoder_1 = self.get_runtime_model(self.sdxl_models.text_encoder_1)
+        text_encoder_context = nullcontext() if any(param.requires_grad for param in self.sdxl_models.text_encoder_1.parameters()) else torch.no_grad()
+        with text_encoder_context:
+            prompt_embeds_output = runtime_text_encoder_1(
+                text_input_ids,
+                output_hidden_states=True,
+            )
 
         # Extract only what we need and free the rest
         hidden_states = prompt_embeds_output.hidden_states[-2]
@@ -207,7 +207,6 @@ class SDXLTuner(BaseTuner):
 
         return hidden_states
 
-    @torch.no_grad()
     def get_prompt_embeds_2(self, prompts_str: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         text_inputs_2 = self.pipeline.tokenizer_2(
             prompts_str,
@@ -218,11 +217,13 @@ class SDXLTuner(BaseTuner):
         )
         text_input_ids_2 = text_inputs_2["input_ids"].to(self.accelerator.device)
 
-        # Use no_grad for inference to save memory
-        prompt_embeds_output_2 = self.pipeline.text_encoder_2(
-            text_input_ids_2,
-            output_hidden_states=True,
-        )
+        runtime_text_encoder_2 = self.get_runtime_model(self.sdxl_models.text_encoder_2)
+        text_encoder_context = nullcontext() if any(param.requires_grad for param in self.sdxl_models.text_encoder_2.parameters()) else torch.no_grad()
+        with text_encoder_context:
+            prompt_embeds_output_2 = runtime_text_encoder_2(
+                text_input_ids_2,
+                output_hidden_states=True,
+            )
 
         # Extract only what we need and free the rest
         prompt_embeds_pooled_2 = prompt_embeds_output_2[0]

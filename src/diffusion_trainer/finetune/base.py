@@ -3,11 +3,11 @@ import math
 import random
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -71,6 +71,7 @@ class BaseTuner(ABC):
         self._sigma_for_timesteps: torch.Tensor | None = None
         self.ema_unet: EMAModel | None = None
         self.ema_unet_short: EMAModel | None = None
+        self.prepared_model_map: dict[int, torch.nn.Module] = {}
 
         # Common initialization steps
         self._initialize_environment()
@@ -140,12 +141,13 @@ class BaseTuner(ABC):
         # Configure trainable models (subclass-specific implementation)
         self._configure_models()
 
-        # Set models to training mode and freeze non-trainable models
+        trainable_models = [model.model for model in self.trainable_models_with_lr]
+        freeze_models = [model for model in getattr(self, "models", []) if model not in trainable_models]
+        self.freeze_model(freeze_models)
+        self._prepare_trainable_models()
         self.training_models = [model.model for model in self.trainable_models_with_lr]
         for model in self.training_models:
             model.train()
-        freeze_models = [model for model in getattr(self, "models", []) if model not in self.training_models]
-        self.freeze_model(freeze_models)
 
         # Initialize EMA models if enabled
         if self.config.use_ema:
@@ -154,7 +156,7 @@ class BaseTuner(ABC):
                 self.ema_unet_short = self.get_ema(self.pipeline.unet, self.pipeline.unet.config, decay=self.config.ema_decay_short)
 
         # Prepare optimizer
-        self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.accelerator, self.trainable_models_with_lr)
+        self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.trainable_models_with_lr)
         self.optimizer = initialize_optimizer(
             self.config.optimizer,
             self.trainable_parameters_dicts,
@@ -201,6 +203,29 @@ class BaseTuner(ABC):
         )
 
         return num_update_steps_per_epoch, n_total_steps
+
+    def _prepare_trainable_models(self) -> None:
+        """Wrap trainable models with accelerator and keep runtime references aligned."""
+        if not self.trainable_models_with_lr:
+            msg = "No trainable models configured."
+            raise ValueError(msg)
+
+        original_models = [item.model for item in self.trainable_models_with_lr]
+        prepared_models = self.accelerator.prepare(*original_models)
+        prepared_model_list = [prepared_models] if isinstance(prepared_models, torch.nn.Module) else list(prepared_models)
+
+        self.prepared_model_map = {
+            id(original): prepared
+            for original, prepared in zip(original_models, prepared_model_list, strict=True)
+        }
+        self.trainable_models_with_lr = [
+            TrainableModel(model=prepared, lr=item.lr)
+            for item, prepared in zip(self.trainable_models_with_lr, prepared_model_list, strict=True)
+        ]
+
+    def get_runtime_model(self, model: torch.nn.Module) -> torch.nn.Module:
+        """Return the accelerator-wrapped model when available."""
+        return self.prepared_model_map.get(id(model), model)
 
     def prepare_data_loader(self) -> torch.utils.data.DataLoader:
         dataset = self.prepare_dataset(self.config)
@@ -276,7 +301,7 @@ class BaseTuner(ABC):
 
     def _post_lora_setup(self, lycoris_model: "LycorisNetwork") -> None:
         """Perform additional setup after LoRA model creation. Can be overridden by subclasses."""
-        # Default implementation does nothing
+        del lycoris_model
 
     def optimizer_step(self, loss: torch.Tensor) -> None:
         """
@@ -802,7 +827,7 @@ class BaseTuner(ABC):
             import shutil
             from datetime import datetime
 
-            if self.checkpointing_path.exists():
+            if self.accelerator.is_main_process and self.checkpointing_path.exists():
                 # Create a backup of the corrupted checkpoint
                 timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
                 backup_path = self.checkpointing_path.parent / f"{self.checkpointing_path.name}_corrupted_{timestamp}"
@@ -812,12 +837,13 @@ class BaseTuner(ABC):
                 except Exception as backup_e:
                     logger.warning("Failed to backup corrupted checkpoint: %s", backup_e)
 
-                # Only remove after successful backup
                 try:
                     shutil.rmtree(self.checkpointing_path)
                     logger.warning("Removed corrupted checkpoint directory: %s", self.checkpointing_path)
                 except Exception:
                     logger.exception("Failed to remove corrupted checkpoint:")
+
+            self.accelerator.wait_for_everyone()
 
             global_step = 0
             logger.info("Starting training from scratch due to checkpoint corruption")
@@ -845,10 +871,10 @@ class BaseTuner(ABC):
             total_samples_processed = global_step * self.config.gradient_accumulation_steps * self.accelerator.num_processes * self.config.batch_size
             logger.info("Approximately %d total samples processed before resuming.", total_samples_processed)
 
-        # 3. 使用正确的批次数调用 skip_first_batches
+        self._set_data_loader_epoch(data_loader, skipped_epoch)
         skipped_data_loader = self.accelerator.skip_first_batches(
             data_loader,
-            num_batches_to_skip_in_current_epoch,  # Use the correctly calculated value
+            num_batches_to_skip_in_current_epoch,
         )
 
         logger.info("full_loader_length: %d", len(data_loader))
@@ -865,6 +891,9 @@ class BaseTuner(ABC):
         if self.accelerator.is_main_process:
             progress.start()
         for epoch in range(skipped_epoch, self.config.n_epochs):
+            self._set_data_loader_epoch(data_loader, epoch)
+            if epoch == skipped_epoch:
+                self._set_data_loader_epoch(skipped_data_loader, epoch)
             self.train_loss = 0.0
             current_epoch_task = progress.add_task(
                 f"Epoch {epoch + 1}",
@@ -932,14 +961,14 @@ class BaseTuner(ABC):
                             logger.info("Successfully saved checkpoint at global step: %d", global_step)
                     if should_preview_step:
                         self.generate_preview(f"{self.config.model_name}-step{global_step}", global_step)
-            # Check epoch-based conditions
-            should_save_epoch = self.config.save_every_n_epochs and (epoch % self.config.save_every_n_epochs == 0) and epoch != 0
-            should_preview_epoch = self.config.preview_every_n_epochs and (epoch % self.config.preview_every_n_epochs == 0) and epoch != 0
+            epoch_number = epoch + 1
+            should_save_epoch = self.config.save_every_n_epochs and epoch_number % self.config.save_every_n_epochs == 0
+            should_preview_epoch = self.config.preview_every_n_epochs and epoch_number % self.config.preview_every_n_epochs == 0
 
             if should_save_epoch:
-                self.saving_model(f"{self.config.model_name}-ep{epoch}")
+                self.saving_model(f"{self.config.model_name}-ep{epoch_number}")
             if should_preview_epoch:
-                self.generate_preview(f"{self.config.model_name}-ep{epoch}", global_step)
+                self.generate_preview(f"{self.config.model_name}-ep{epoch_number}", global_step)
             progress.remove_task(current_epoch_task)
         if self.accelerator.is_main_process:
             progress.stop()
@@ -980,7 +1009,15 @@ class BaseTuner(ABC):
                 # Save original training-related settings and device information for later restoration
                 original_training_mode = {}
                 original_device = {}
-                for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder), ("vae", self.pipeline.vae)]:
+                models_for_preview = [
+                    ("unet", self.pipeline.unet),
+                    ("text_encoder", self.pipeline.text_encoder),
+                    ("vae", self.pipeline.vae),
+                ]
+                text_encoder_2 = getattr(self.pipeline, "text_encoder_2", None)
+                if text_encoder_2 is not None:
+                    models_for_preview.append(("text_encoder_2", text_encoder_2))
+                for name, model in models_for_preview:
                     original_training_mode[name] = model.training
                     original_device[name] = next(model.parameters()).device
                     model.eval()  # Switch to evaluation mode for inference
@@ -1070,7 +1107,7 @@ class BaseTuner(ABC):
                     torch.cuda.empty_cache()
 
                 # Restore the training mode of the models
-                for name, model in [("unet", self.pipeline.unet), ("text_encoder", self.pipeline.text_encoder), ("vae", self.pipeline.vae)]:
+                for name, model in models_for_preview:
                     if model.training != original_training_mode[name]:
                         model.train(original_training_mode[name])
                     if next(model.parameters()).device != original_device[name]:
@@ -1172,8 +1209,8 @@ class BaseTuner(ABC):
 
                         self.pipeline.save_lora_weights(
                             save_directory=str(self.save_path),
-                            unet_lora_layers=unet_lora_layers if unet_lora_layers else None,
-                            text_encoder_lora_layers=text_encoder_lora_layers if text_encoder_lora_layers else None,
+                            unet_lora_layers=unet_lora_layers or None,
+                            text_encoder_lora_layers=text_encoder_lora_layers or None,
                             weight_name=f"{filename}_diffusers.safetensors",
                         )
 
@@ -1256,6 +1293,16 @@ class BaseTuner(ABC):
             prompts.append(prompt)
 
         return prompts
+
+    def _set_data_loader_epoch(self, data_loader: torch.utils.data.DataLoader, epoch: int) -> None:
+        """Propagate epoch information to custom samplers used for deterministic resume."""
+        batch_sampler = getattr(data_loader, "batch_sampler", None)
+        if batch_sampler is not None and hasattr(batch_sampler, "set_epoch"):
+            batch_sampler.set_epoch(epoch)
+
+        inner_data_loader = getattr(data_loader, "base_dataloader", None)
+        if inner_data_loader is not None and inner_data_loader is not data_loader:
+            self._set_data_loader_epoch(inner_data_loader, epoch)
 
     def get_ema(self, model: torch.nn.Module, config: dict, *, decay: float) -> EMAModel:
         """Initialize Exponential Moving Average for the model if enabled in config."""
