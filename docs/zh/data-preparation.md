@@ -53,6 +53,7 @@ uv run python run_prepare.py \
 | `--num_workers` | `4` | 打标工作线程数 |
 | `--general_threshold` | `0.35` | 普通标签阈值 |
 | `--character_threshold` | `0.9` | 角色标签阈值 |
+| `--tag_source` | `wd_tagger` | 标签来源，可选 `wd_tagger` 或 `sidecar_txt` |
 
 ### Parquet 参数
 
@@ -85,6 +86,32 @@ uv run python run_prepare.py \
 ### 2. 自动打标
 
 项目使用 `WD Tagger` 生成标签文本，并保存为逗号分隔的 `.txt` 文件。
+
+如果你已经有与图片同名的 `.txt` 标签文件，可以切换为导入模式：
+
+```bash
+uv run python run_prepare.py \
+  --image_path /path/to/images \
+  --target_path datasets/sample \
+  --vae_path /path/to/vae \
+  --tag_source sidecar_txt
+```
+
+此时程序会读取如下结构中的 sidecar 标签文件：
+
+```text
+images/
+├─ 001.png
+├─ 001.txt
+├─ 002.jpg
+└─ 002.txt
+```
+
+并把这些标签转换写入目标目录下的哈希结构：
+
+```text
+datasets/sample/tags/ab/cd/<sha256>.txt
+```
 
 ### 3. 生成 parquet
 

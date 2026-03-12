@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
+from typing import Literal
 
 import torch
 from PIL import Image
@@ -82,7 +83,7 @@ class SimpleTagger:
 
 
 class TaggingProcessor:
-    """Process images using the WD Tagger with SHA256-based directory structure (replaces original)."""
+    """Process images into SHA256-based tag files."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -96,6 +97,7 @@ class TaggingProcessor:
         recursive: bool = True,
         general_threshold: float = 0.35,
         character_threshold: float = 0.9,
+        tag_source: Literal["wd_tagger", "sidecar_txt"] = "wd_tagger",
     ) -> None:
         """Initialize (compatible with original interface)."""
         self.img_path = Path(img_path).absolute()
@@ -108,6 +110,7 @@ class TaggingProcessor:
         self.num_workers = num_workers
         self.skip_existing = skip_existing
         self.batch_size = batch_size  # Kept for compatibility
+        self.tag_source = tag_source
 
         # Create output directory
         self.target_path.mkdir(parents=True, exist_ok=True)
@@ -124,19 +127,22 @@ class TaggingProcessor:
         self.progress_counter = 0
         self.progress_lock = threading.Lock()
 
-        # Create multiple tagger instances
         self.gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
-        self.tagger_list = [
-            SimpleTagger(
-                general_threshold=general_threshold,
-                character_threshold=character_threshold,
-            )
-            for _ in range(self.gpu_count)
-        ]
+        if self.tag_source == "wd_tagger":
+            self.tagger_list = [
+                SimpleTagger(
+                    general_threshold=general_threshold,
+                    character_threshold=character_threshold,
+                )
+                for _ in range(self.gpu_count)
+            ]
+        else:
+            self.tagger_list = []
 
         # Get image paths
         self.image_paths = list(retrieve_image_paths(self.img_path, ignore_hidden=ignore_hidden, recursive=recursive))
         logger.info("Found %d images in %s", len(self.image_paths), self.img_path)
+        logger.info("Tag source: %s", self.tag_source)
 
         self.skip_count = 0
         if skip_existing:
@@ -171,6 +177,31 @@ class TaggingProcessor:
         dir1 = sha256_hash[:2]
         dir2 = sha256_hash[2:4]
         return self.target_path / dir1 / dir2 / f"{sha256_hash}.txt"
+
+    @staticmethod
+    def parse_tags_text(tags_text: str) -> list[str]:
+        """Parse comma-separated tags and preserve order while removing duplicates."""
+        seen: set[str] = set()
+        normalized_tags = []
+        for raw_tag in tags_text.split(","):
+            tag = raw_tag.strip()
+            if tag and tag not in seen:
+                seen.add(tag)
+                normalized_tags.append(tag)
+        return normalized_tags
+
+    @staticmethod
+    def get_sidecar_tag_path(image_path: Path) -> Path:
+        """Return the same-name sidecar txt path for an image."""
+        return image_path.with_suffix(".txt")
+
+    def load_sidecar_tags(self, image_path: Path) -> list[str]:
+        """Load tags from a same-name sidecar txt file."""
+        sidecar_tag_path = self.get_sidecar_tag_path(image_path)
+        if not sidecar_tag_path.exists():
+            msg = f"Missing sidecar tag file for image: {image_path}"
+            raise FileNotFoundError(msg)
+        return self.parse_tags_text(sidecar_tag_path.read_text(encoding="utf-8"))
 
     def read_image(self) -> None:
         """Read images and check for existing files."""
@@ -252,8 +283,38 @@ class TaggingProcessor:
                 with self.progress_lock:
                     self.progress_counter += 1
 
+    def import_sidecar_tags(self) -> None:
+        """Import existing same-name txt files into the SHA256-based tags directory."""
+        total_images = len(self.image_paths)
+        if total_images == 0:
+            logger.info("No images found in %s", self.img_path)
+            return
+
+        logger.info("Importing same-name sidecar txt tags for %d images", total_images)
+        with get_progress() as progress:
+            task = progress.add_task("Importing tags...", total=total_images, completed=self.skip_count)
+            completed = self.skip_count
+            for image_path in self.image_paths:
+                tag_save_path = self.get_tag_save_path(image_path)
+                if self.skip_existing and tag_save_path.exists():
+                    try:
+                        if tag_save_path.read_text(encoding="utf-8").strip():
+                            continue
+                    except Exception:
+                        logger.warning("Corrupted file %s, reprocessing...", tag_save_path)
+
+                tags = self.load_sidecar_tags(image_path)
+                tag_save_path.parent.mkdir(parents=True, exist_ok=True)
+                tag_save_path.write_text(", ".join(tags), encoding="utf-8")
+                completed += 1
+                progress.update(task, completed=completed)
+
     def __call__(self) -> None:  # noqa: C901, PLR0912
         """Run the image tagging process."""
+        if self.tag_source == "sidecar_txt":
+            self.import_sidecar_tags()
+            return
+
         total_images = len(self.image_paths)
 
         if total_images == 0:
@@ -359,6 +420,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=4, help="Number of worker threads")
     parser.add_argument("--general_threshold", type=float, default=0.35, help="General tag threshold (0.0-1.0)")
     parser.add_argument("--character_threshold", type=float, default=0.9, help="Character tag threshold (0.0-1.0)")
+    parser.add_argument(
+        "--tag_source",
+        type=str,
+        choices=["wd_tagger", "sidecar_txt"],
+        default="wd_tagger",
+        help="Tag source: run WD Tagger or import same-name sidecar txt files",
+    )
     parser.add_argument("--no_skip_existing", action="store_true", help="Do not skip existing files")
 
     args = parser.parse_args()
@@ -378,6 +446,7 @@ if __name__ == "__main__":
         num_workers=args.num_workers,
         general_threshold=args.general_threshold,
         character_threshold=args.character_threshold,
+        tag_source=args.tag_source,
         skip_existing=not args.no_skip_existing,
     )
 

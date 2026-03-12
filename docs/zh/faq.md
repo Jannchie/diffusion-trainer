@@ -46,6 +46,22 @@ dataset_path = "datasets/sample"
 
 其中 parquet 默认不写入 caption 列。训练加载器支持 caption，但需要你自行扩展生成流程或手动补充。
 
+## 我已经有与图片同名的 `.txt` 标签文件，还需要 WD Tagger 吗
+
+不需要。
+
+你可以直接在预处理时指定：
+
+```bash
+uv run python run_prepare.py \
+  --image_path /path/to/images \
+  --target_path datasets/sample \
+  --vae_path /path/to/vae \
+  --tag_source sidecar_txt
+```
+
+这样程序会读取同名 `.txt` 文件，而不是重新跑 `WD Tagger`。
+
 ## 训练输出目录为什么多了一层 `model_name`
 
 因为 `save_dir` 会在配置对象初始化后自动拼接 `model_name`。例如：

@@ -89,6 +89,13 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         default=0.9,
         help="Character tag threshold (0.0-1.0)",
     )
+    parser.add_argument(
+        "--tag_source",
+        type=str,
+        choices=["wd_tagger", "sidecar_txt"],
+        default="wd_tagger",
+        help="Tag source: run WD Tagger or import same-name sidecar txt files",
+    )
 
     # CreateParquetProcessor options
     parser.add_argument(
@@ -170,6 +177,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     logger.info("  📊 VAE Data Type: %s", vae_dtype)
     logger.info("  🏷️  General Threshold: %.2f", args.general_threshold)
     logger.info("  👤 Character Threshold: %.2f", args.character_threshold)
+    logger.info("  📝 Tag Source: %s", args.tag_source)
     logger.info("  ⏭️  Skip Existing: %s", not args.no_skip_existing)
 
     pipeline_start = time.time()
@@ -194,9 +202,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     else:
         logger.info("⏭️  Skipping latents generation")
 
-    # Step 2: Generate Tags
+    # Step 2: Generate or import tags
     if not args.skip_tagging:
-        logger.info("\n🏷️  Step 2: Generating image tags...")
+        logger.info("\n🏷️  Step 2: Processing image tags...")
         try:
             tagger = TaggingProcessor(
                 img_path=str(image_path),
@@ -204,6 +212,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 num_workers=args.num_workers,
                 general_threshold=args.general_threshold,
                 character_threshold=args.character_threshold,
+                tag_source=args.tag_source,
                 skip_existing=not args.no_skip_existing,
             )
             tagger()
