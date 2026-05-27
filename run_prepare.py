@@ -6,20 +6,13 @@ import sys
 import time
 from pathlib import Path
 
-import torch
 from rich.logging import RichHandler
 
 from diffusion_trainer.dataset import CreateParquetProcessor, LatentsGenerateProcessor, TaggingProcessor
+from diffusion_trainer.utils.dtype import get_default_dtype, str_to_dtype
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 logger = logging.getLogger(__name__)
-
-
-def get_default_dtype() -> torch.dtype:
-    """Get the best default dtype based on hardware support."""
-    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
-        return torch.bfloat16
-    return torch.float16
 
 
 def main() -> None:  # noqa: C901, PLR0912, PLR0915
@@ -154,17 +147,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     target_tags_path = target_path / "tags"
 
     # Parse dtype
-    vae_dtype = None
     if args.vae_dtype:
-        dtype_map = {
-            "fp16": torch.float16,
-            "fp32": torch.float32,
-            "bf16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-            "bfloat16": torch.bfloat16,
-        }
-        vae_dtype = dtype_map[args.vae_dtype]
+        vae_dtype = str_to_dtype(args.vae_dtype)
     else:
         vae_dtype = get_default_dtype()
         logger.info("Auto-detected dtype: %s", vae_dtype)

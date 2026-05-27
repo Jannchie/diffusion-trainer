@@ -15,7 +15,7 @@ from pyarrow import parquet as pq
 from torch.utils.data import Dataset, Sampler
 
 from diffusion_trainer.config import SDXLConfig
-from diffusion_trainer.dataset.utils import retrieve_npz_path
+from diffusion_trainer.dataset.utils import retrieve_npz_path, sharded_path
 from diffusion_trainer.shared import get_progress
 
 logger = logging.getLogger("diffusion_trainer.dataset")
@@ -97,14 +97,17 @@ class DiffusionDataset(Dataset):
         progress = get_progress()
         with progress:
             for key in progress.track(metadata, description="Processing metadata"):
-                buckets[tuple(metadata[key].get("train_resolution"))].append(
+                train_resolution = metadata[key].get("train_resolution")
+                if train_resolution is None:
+                    logger.warning("Skipping %s: missing train_resolution", key)
+                    continue
+                buckets[tuple(train_resolution)].append(
                     DiffusionTrainingItem(
                         str(ds_path / key) + ".npz",
                         process_caption(metadata[key].get("caption")),
                         process_tags(metadata[key].get("tags")),
                     ),
                 )
-                metadata[key]
             buckets = dict(sorted(buckets.items()))
         logger.info("Buckets created, Here are the buckets information:")
         return DiffusionDataset(buckets)
@@ -119,9 +122,7 @@ class DiffusionDataset(Dataset):
         for _idx, row in metadata.iterrows():
             key = row["key"]
             # Use SHA256-based directory structure: ab/cd/abcd...npz
-            dir1 = key[:2]
-            dir2 = key[2:4]
-            npz_path = parquet_path.parent / "latents" / dir1 / dir2 / f"{key}.npz"
+            npz_path = sharded_path(parquet_path.parent / "latents", key, "npz")
             train_resolution = tuple(row["train_resolution"].tolist())
             tags_value = row.get("tags", [])
             if isinstance(tags_value, list):
@@ -167,10 +168,8 @@ class DiffusionDataset(Dataset):
                 # Extract SHA256 hash from filename (e.g., ab/cd/abcd...npz -> abcd...)
                 key = npz_path.stem
                 # Use SHA256-based directory structure for tags
-                dir1 = key[:2]
-                dir2 = key[2:4]
-                tag_file = meta_dir / "tags" / dir1 / dir2 / f"{key}.txt"
-                caption_file = meta_dir / "caption" / dir1 / dir2 / f"{key}.txt"
+                tag_file = sharded_path(meta_dir / "tags", key, "txt")
+                caption_file = sharded_path(meta_dir / "caption", key, "txt")
                 caption = caption_file.read_text() if caption_file.exists() else ""
                 tags = tag_file.read_text().split(",") if tag_file.exists() else []
                 train_resolution = npz.get("train_resolution")
@@ -197,25 +196,40 @@ class DiffusionDataset(Dataset):
     def __len__(self) -> int:
         return sum(len(v) for v in self.buckets.values())
 
+    @staticmethod
+    def _load_item(item: DiffusionTrainingItem) -> dict:
+        npz = np.load(item.npz_path)
+        img_latents = npz.get("latents")
+        if img_latents is None:
+            msg = f"npz {item.npz_path} is missing 'latents'"
+            raise KeyError(msg)
+        return {
+            "img_latents": img_latents,
+            "crop_ltrb": npz.get("crop_ltrb"),
+            "original_size": npz.get("original_size"),
+            "train_resolution": npz.get("train_resolution"),
+            "caption": item.caption,
+            "tags": item.tags,
+        }
+
     def __getitem__(self, idx: int) -> dict:
         bucket_index = self.get_bucket_index(idx)
         bucket_key = self.bucket_keys[bucket_index]
         bucket_items = self.buckets[bucket_key]
         bucket_start_idx = self.bucket_starts[bucket_index]
-        item = bucket_items[idx - bucket_start_idx]
-        npz = np.load(item.npz_path)
-        img_latents = npz.get("latents")
-        crop_ltrb = npz.get("crop_ltrb")
-        original_size = npz.get("original_size")
-        train_resolution = npz.get("train_resolution")
-        return {
-            "img_latents": img_latents,
-            "crop_ltrb": crop_ltrb,
-            "original_size": original_size,
-            "train_resolution": train_resolution,
-            "caption": item.caption,
-            "tags": item.tags,
-        }
+        local_idx = idx - bucket_start_idx
+
+        # A single corrupt/half-written npz should not kill a long training run.
+        # Fall back to other items in the SAME bucket so latent shapes still match.
+        n = len(bucket_items)
+        for offset in range(n):
+            item = bucket_items[(local_idx + offset) % n]
+            try:
+                return self._load_item(item)
+            except Exception as e:
+                logger.warning("Skipping unreadable latent %s: %s", item.npz_path, e)
+        msg = f"All {n} items in bucket {bucket_key} are unreadable"
+        raise RuntimeError(msg)
 
 
 class BucketBasedBatchSampler(Sampler):

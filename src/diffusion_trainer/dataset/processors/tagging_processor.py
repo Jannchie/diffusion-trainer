@@ -1,7 +1,6 @@
 """Use the WD Tagger to tag images with SHA256-based directory structure."""
 
 import argparse
-import hashlib
 import logging
 import sys
 import threading
@@ -15,21 +14,11 @@ import torch
 from PIL import Image
 from wdtagger import Tagger
 
-from diffusion_trainer.dataset.utils import retrieve_image_paths
+from diffusion_trainer.dataset.utils import calculate_file_sha256, retrieve_image_paths, sharded_path
 from diffusion_trainer.shared import get_progress, logger
 
 wdtagger_logger = logging.getLogger("wdtagger")
 wdtagger_logger.setLevel(logging.ERROR)
-
-
-@dataclass
-class Args:
-    """Arguments for the script (backward compatibility)."""
-
-    image_base_path: str
-    meta_base_path: str
-    num_workers: int
-    skip_existing: bool
 
 
 @dataclass
@@ -165,18 +154,11 @@ class TaggingProcessor:
     @staticmethod
     def calculate_sha256(image_path: Path) -> str:
         """Calculate SHA256 hash of image content."""
-        hash_sha256 = hashlib.sha256()
-        with image_path.open("rb") as f:
-            while chunk := f.read(65536):  # 64KB chunks
-                hash_sha256.update(chunk)
-        return hash_sha256.hexdigest()
+        return calculate_file_sha256(image_path)
 
     def get_tag_save_path(self, image_path: Path) -> Path:
         """Get tag save path with SHA256-based directory structure."""
-        sha256_hash = self.calculate_sha256(image_path)
-        dir1 = sha256_hash[:2]
-        dir2 = sha256_hash[2:4]
-        return self.target_path / dir1 / dir2 / f"{sha256_hash}.txt"
+        return sharded_path(self.target_path, self.calculate_sha256(image_path), "txt")
 
     @staticmethod
     def parse_tags_text(tags_text: str) -> list[str]:
@@ -384,29 +366,6 @@ class TaggingProcessor:
             progress.update(task, completed=total_images)
 
         logger.info("Successfully tagged %d images", total_images)
-
-
-# Backward compatibility functions
-def read_tags(meta_path: Path, key: str) -> list[str]:
-    """Read tags from metadata (backward compatibility - not used in SHA256 version)."""
-    file = get_tags_file_path(meta_path, key)
-    if not file.exists():
-        return []
-    with file.open("r") as f:
-        return f.read().split(", ")
-
-
-def write_tags(meta_path: Path, key: str, tags: list[str]) -> None:
-    """Write tags to metadata (backward compatibility - not used in SHA256 version)."""
-    file = get_tags_file_path(meta_path, key)
-    file.parent.mkdir(parents=True, exist_ok=True)
-    with file.open("w") as f:
-        f.write(", ".join(tags))
-
-
-def get_tags_file_path(meta_path: Path, key: str) -> Path:
-    """Get tags file path (backward compatibility)."""
-    return Path(meta_path / "tags" / f"{key}.txt")
 
 
 if __name__ == "__main__":

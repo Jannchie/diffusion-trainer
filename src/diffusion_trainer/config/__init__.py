@@ -52,6 +52,10 @@ class BaseConfig:
     n_epochs: int = field(default=10, metadata={"help": "Number of epochs."})
     batch_size: int = field(default=8, metadata={"help": "Batch size."})
     gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps."})
+    dataloader_num_workers: int = field(
+        default=2,
+        metadata={"help": "Number of DataLoader worker processes. 0 loads latents on the main process (GPU stalls on disk IO). >0 prefetches in parallel."},
+    )
 
     mode: Literal["full-finetune", "lora", "lokr", "loha"] = field(default="lokr", metadata={"help": "Mode."})
 
@@ -134,7 +138,7 @@ class BaseConfig:
     )
     # SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0.
     # More details here: https://arxiv.org/abs/2303.09556.
-    snr_gamma: float = field(default=5.0, metadata={"help": "SNR gamma. Recommended value is 5.0."})
+    snr_gamma: float | None = field(default=5.0, metadata={"help": "SNR gamma. Recommended value is 5.0. Set to null or 0 to disable SNR weighting."})
     # Use debiased estimation technique to weight the loss by SNR, making the model focus more on high SNR (low noise) regions
     use_debiased_estimation: bool = field(
         default=False,
@@ -145,6 +149,7 @@ class BaseConfig:
         metadata={"help": "Enable zero terminal SNR (rescale_betas_zero_snr) to improve stability with v-prediction."},
     )
 
+    unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
     max_grad_norm: float = field(default=1.0, metadata={"help": "Max gradient norm."})
     use_ema: bool = field(default=False, metadata={"help": "Use EMA."})
     ema_start_step: int = field(default=0, metadata={"help": "Global step to start EMA updates."})
@@ -186,13 +191,11 @@ class BaseConfig:
 
 @dataclass
 class SDXLConfig(BaseConfig):
-    unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
     text_encoder_1_lr: float = field(default=1e-6, metadata={"help": "Text encoder 1 learning rate."})
     text_encoder_2_lr: float = field(default=1e-6, metadata={"help": "Text encoder 2 learning rate."})
 
 
 @dataclass
 class SD15Config(BaseConfig):
-    unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
     text_encoder_lr: float = field(default=1e-6, metadata={"help": "Text encoder learning rate."})
     clip_skip: int = field(default=2, metadata={"help": "Number of final CLIP blocks to skip (0 = use last hidden state)."})

@@ -152,7 +152,7 @@ class BaseTuner(ABC):
         # Initialize EMA models if enabled
         if self.config.use_ema:
             self.ema_unet = self.get_ema(self.pipeline.unet, self.pipeline.unet.config, decay=self.config.ema_decay_long)
-            if getattr(self.config, "use_dual_ema", False):
+            if self.config.use_dual_ema:
                 self.ema_unet_short = self.get_ema(self.pipeline.unet, self.pipeline.unet.config, decay=self.config.ema_decay_short)
 
         # Prepare optimizer
@@ -232,13 +232,16 @@ class BaseTuner(ABC):
         if self.accelerator.is_main_process:
             dataset.print_bucket_info()
         sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
+        num_workers = self.config.dataloader_num_workers
         with self.accelerator.main_process_first(): # type: ignore
             data_loader = DataLoader(
                 dataset,
                 batch_sampler=sampler,
-                num_workers=0,
+                num_workers=num_workers,
                 collate_fn=dataset.collate_fn,
                 pin_memory=True,
+                persistent_workers=num_workers > 0,
+                prefetch_factor=2 if num_workers > 0 else None,
             )
         return self.accelerator.prepare(data_loader)
 
@@ -285,9 +288,7 @@ class BaseTuner(ABC):
         lycoris_model.to(dtype=self.weight_dtype)
         logger.info("LoRA model dtype set to: %s", self.weight_dtype)
 
-        # Use getattr to safely access unet_lr which may be defined in subclasses
-        unet_lr = getattr(self.config, "unet_lr", 1e-5)
-        self.trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=unet_lr))
+        self.trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=self.config.unet_lr))
         self.lycoris_model = lycoris_model
 
         # Allow subclasses to perform additional setup
@@ -351,7 +352,7 @@ class BaseTuner(ABC):
         # Removed frequent cache clearing to improve performance
 
     def _should_step_ema(self, step: int) -> bool:
-        return self.config.use_ema and step >= getattr(self.config, "ema_start_step", 0)
+        return self.config.use_ema and step >= self.config.ema_start_step
 
     def _step_emas(self, step: int) -> None:
         if not self.accelerator.sync_gradients:
@@ -360,7 +361,7 @@ class BaseTuner(ABC):
             return
         if self.ema_unet is not None:
             self.ema_unet.step(self.pipeline.unet.parameters())
-        if getattr(self.config, "use_dual_ema", False) and self.ema_unet_short is not None:
+        if self.config.use_dual_ema and self.ema_unet_short is not None:
             self.ema_unet_short.step(self.pipeline.unet.parameters())
 
     def generate_initial_preview(self) -> None:
@@ -429,22 +430,25 @@ class BaseTuner(ABC):
             weights = weights * debias_weights  # Multiply by debiasing weights
 
         # 3. If SNR weighting is enabled, compute and apply SNR weights
-        if self.config.snr_gamma is not None:
-            # Extract SNR values for timesteps once
-            snr = self.all_snr[timesteps]
+        if self.config.snr_gamma is not None and self.config.snr_gamma > 0:
+            snr_gamma = self.config.snr_gamma
+            # Extract SNR values for timesteps once.
+            # Clamp away from zero: with rescale_betas_zero_snr the terminal SNR
+            # is 0, which would make the divisions below produce inf/nan.
+            snr = self.all_snr[timesteps].clamp(min=1e-8)
 
             # Use smooth Min-SNR if configured
-            if getattr(self.config, "use_smooth_min_snr", False):
+            if self.config.use_smooth_min_snr:
                 mse_loss_weights = smooth_min_snr_weights(
                     timesteps,
                     self.all_snr,
-                    min_snr_gamma=self.config.snr_gamma,
-                    smoothing_factor=getattr(self.config, "smooth_min_snr_factor", 0.1),
-                    mode=getattr(self.config, "smooth_min_snr_mode", "sigmoid"),
+                    min_snr_gamma=snr_gamma,
+                    smoothing_factor=self.config.smooth_min_snr_factor,
+                    mode=self.config.smooth_min_snr_mode,
                 )
             else:
-                # Standard Min-SNR clipping
-                mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0]
+                # Standard Min-SNR clipping (full_like keeps the float dtype of snr)
+                mse_loss_weights = torch.stack([snr, torch.full_like(snr, snr_gamma)], dim=1).min(dim=1)[0]
 
             # Adjust weights according to prediction_type
             if self.noise_scheduler.config.get("prediction_type") == "epsilon":
@@ -482,18 +486,18 @@ class BaseTuner(ABC):
     def sample_noise(self, latents: torch.Tensor) -> torch.Tensor:
         """Sample noise that will be added to the latents."""
         # Use Brownian noise if requested
-        if getattr(self.config, "use_brownian_noise", False):
+        if self.config.use_brownian_noise:
             noise = brownian_noise(
                 latents.shape,
                 device=latents.device,
                 dtype=latents.dtype,
-                scale=getattr(self.config, "brownian_noise_scale", 1.0),
+                scale=self.config.brownian_noise_scale,
             )
         # Use multi-resolution noise if enabled
-        elif getattr(self.config, "use_multires_noise", True):
+        elif self.config.use_multires_noise:
             # Check if custom scales are provided
-            custom_scales = getattr(self.config, "multires_noise_scales", None)
-            custom_weights = getattr(self.config, "multires_noise_weights", None)
+            custom_scales = self.config.multires_noise_scales
+            custom_weights = self.config.multires_noise_weights
 
             if custom_scales is not None:
                 # Use custom scales/weights method
@@ -508,8 +512,8 @@ class BaseTuner(ABC):
                 # Use pyramid method with iterations and discount
                 noise = pyramid_noise(
                     latents.shape,
-                    discount_factor=getattr(self.config, "multires_noise_discount", 0.8),
-                    num_levels=getattr(self.config, "multires_noise_iterations", 6),
+                    discount_factor=self.config.multires_noise_discount,
+                    num_levels=self.config.multires_noise_iterations,
                     device=latents.device,
                     dtype=latents.dtype,
                 )
@@ -518,15 +522,16 @@ class BaseTuner(ABC):
             noise = torch.randn_like(latents)
 
         # Apply traditional noise offset if configured with probability
-        if hasattr(self.config, "noise_offset") and self.config.noise_offset > 0:
+        if self.config.noise_offset > 0:
             # Apply noise offset with configured probability
-            noise_offset_prob = getattr(self.config, "noise_offset_probability", 1.0)
+            noise_offset_prob = self.config.noise_offset_probability
             if noise_offset_prob >= 1.0 or random.random() < noise_offset_prob:
                 # Add noise to the image latents
                 # https://www.crosslabs.org//blog/diffusion-with-offset-noise
                 noise += self.config.noise_offset * torch.randn(
                     (latents.shape[0], latents.shape[1], 1, 1),
                     device=latents.device,
+                    dtype=noise.dtype,
                 )
         return noise
 
@@ -549,12 +554,12 @@ class BaseTuner(ABC):
                 noise = noise + input_perturbation * torch.randn_like(noise)
 
         # Apply adaptive noise scheduling if configured
-        if getattr(self.config, "use_adaptive_noise", False):
+        if self.config.use_adaptive_noise:
             noise = adaptive_noise_schedule(
                 noise,
                 timesteps,
-                noise_schedule_type=getattr(self.config, "adaptive_noise_type", "cosine"),
-                strength_factor=getattr(self.config, "adaptive_noise_strength", 1.0),
+                noise_schedule_type=self.config.adaptive_noise_type,
+                strength_factor=self.config.adaptive_noise_strength,
             )
 
         return self.noise_scheduler.add_noise(latents, noise, timesteps)  # type: ignore
@@ -647,13 +652,16 @@ class BaseTuner(ABC):
         return result
 
     def _free_tensors(self, *tensors: torch.Tensor | None) -> None:
-        """Free memory by deleting tensors."""
+        """Drop local references to step tensors so Python can reclaim them.
+
+        Deliberately does NOT call ``torch.cuda.empty_cache()``: doing so on every
+        micro-step forces a CUDA sync and returns cached blocks to the driver,
+        which severely hurts throughput. Periodic cache cleanup is handled in
+        ``execute_training_epoch`` instead.
+        """
         for tensor in tensors:
             if tensor is not None:
                 del tensor
-        # Trigger garbage collection for CUDA tensors
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     @contextmanager
     def use_ema_weights(self) -> Generator[None, None, None]:
@@ -673,7 +681,7 @@ class BaseTuner(ABC):
         Sample a boolean mask for conditional dropout (CFG-style).
         True values indicate samples where text condition should be dropped.
         """
-        prob = getattr(self.config, "condition_dropout_prob", 0.0)
+        prob = self.config.condition_dropout_prob
         if prob <= 0:
             return torch.zeros(batch_size, device=device, dtype=torch.bool)
         return torch.rand(batch_size, device=device) < prob
@@ -768,11 +776,11 @@ class BaseTuner(ABC):
     def get_noise_scheduler(self) -> DDPMScheduler:
         """Set up the noise scheduler"""
         scheduler_config_updates = {}
-        prediction_type = getattr(self.config, "prediction_type", None)
+        prediction_type = self.config.prediction_type
         if prediction_type is not None:
             scheduler_config_updates["prediction_type"] = prediction_type
             scheduler_config_updates["timestep_spacing"] = "trailing"
-        if getattr(self.config, "rescale_betas_zero_snr", False):
+        if self.config.rescale_betas_zero_snr:
             scheduler_config_updates["rescale_betas_zero_snr"] = True
             scheduler_config_updates.setdefault("timestep_spacing", "trailing")
         if scheduler_config_updates:

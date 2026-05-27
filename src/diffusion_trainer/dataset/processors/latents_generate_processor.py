@@ -1,7 +1,6 @@
 """Prepare latent vectors for the dataset using SHA256-based directory structure."""
 
 import argparse
-import hashlib
 import threading
 import time
 from dataclasses import dataclass
@@ -18,8 +17,9 @@ from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from PIL import Image
 from torchvision import transforms
 
-from diffusion_trainer.dataset.utils import retrieve_image_paths
+from diffusion_trainer.dataset.utils import calculate_file_sha256, retrieve_image_paths, sharded_path
 from diffusion_trainer.shared import get_progress, logger
+from diffusion_trainer.utils.dtype import get_default_dtype, str_to_dtype
 
 
 @dataclass
@@ -226,18 +226,11 @@ class LatentsGenerateProcessor:
     @staticmethod
     def calculate_sha256(image_path: Path) -> str:
         """Calculate SHA256 hash of image content."""
-        hash_sha256 = hashlib.sha256()
-        with image_path.open("rb") as f:
-            while chunk := f.read(65536):  # 64KB chunks
-                hash_sha256.update(chunk)
-        return hash_sha256.hexdigest()
+        return calculate_file_sha256(image_path)
 
     def get_npz_save_path(self, image_path: Path) -> Path:
         """Get NPZ save path with SHA256-based directory structure."""
-        sha256_hash = self.calculate_sha256(image_path)
-        dir1 = sha256_hash[:2]
-        dir2 = sha256_hash[2:4]
-        return self.target_path / dir1 / dir2 / f"{sha256_hash}.npz"
+        return sharded_path(self.target_path, self.calculate_sha256(image_path), "npz")
 
     def read_image(self) -> None:
         """Read images and check for existing files."""
@@ -251,9 +244,12 @@ class LatentsGenerateProcessor:
                 # Check if output file already exists
                 if self.skip_existing and npz_save_path.exists():
                     try:
-                        # Verify the existing file is valid
+                        # Verify the existing file is valid: it must carry the
+                        # latents themselves, not just metadata. A half-written
+                        # file (resolution but no latents) would otherwise be
+                        # skipped and only blow up later during training.
                         npz = np.load(npz_save_path)
-                        if "train_resolution" in npz:
+                        if "train_resolution" in npz and "latents" in npz:
                             # File exists and is valid, send skip payload to write_npz for consistent progress tracking
                             skip_payload = WritePayload(
                                 save_path=None,  # Indicates skip case
@@ -516,13 +512,6 @@ def resolve_vae_path(vae_path: str) -> str:
     return vae_path
 
 
-def get_default_dtype() -> torch.dtype:
-    """Get the best default dtype based on hardware support."""
-    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
-        return torch.bfloat16
-    return torch.float16
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Latents processor with SHA256-based directory structure",
@@ -539,10 +528,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Parse dtype
-    vae_dtype = None
     if args.vae_dtype:
-        dtype_map = {"fp16": torch.float16, "fp32": torch.float32, "bf16": torch.bfloat16}
-        vae_dtype = dtype_map[args.vae_dtype]
+        vae_dtype = str_to_dtype(args.vae_dtype)
     else:
         vae_dtype = get_default_dtype()
         logger.info("Auto-detected dtype: %s", vae_dtype)

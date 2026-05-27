@@ -6,6 +6,20 @@ import torch
 import torch.nn.functional as F
 
 
+def _normalize_to_unit_std(noise: torch.Tensor) -> torch.Tensor:
+    """Rescale noise to unit standard deviation per sample.
+
+    DDPM's forward process ``x_t = sqrt(a_bar)*x_0 + sqrt(1-a_bar)*eps`` assumes
+    ``eps ~ N(0, I)``. Combining multi-scale noise breaks the unit-variance
+    assumption, so we renormalize before returning (matches sd-scripts'
+    ``noise / noise.std()``).
+    """
+    dims = tuple(range(1, noise.dim()))
+    std = noise.std(dim=dims, keepdim=True)
+    std = torch.where(std == 0, torch.ones_like(std), std)
+    return noise / std
+
+
 def pyramid_noise(
     shape: torch.Size | tuple[int, ...],
     discount_factor: float = 0.8,
@@ -66,7 +80,7 @@ def pyramid_noise(
         weight = discount_factor**level
         noise += weight * level_noise
 
-    return noise
+    return _normalize_to_unit_std(noise)
 
 
 def multi_resolution_noise(
@@ -137,7 +151,7 @@ def multi_resolution_noise(
         # Add weighted contribution
         combined_noise += weight * scale_noise
 
-    return combined_noise
+    return _normalize_to_unit_std(combined_noise)
 
 
 def brownian_noise(

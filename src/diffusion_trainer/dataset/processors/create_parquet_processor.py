@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 from rich import get_console
 from rich.console import Console
 
+from diffusion_trainer.dataset.utils import sharded_path
 from diffusion_trainer.shared import get_progress
 
 console = get_console()
@@ -49,19 +50,15 @@ class CreateParquetProcessor:
     def _find_corresponding_txt_file(self, npz_path: Path) -> Path | None:
         """Find corresponding txt file for NPZ file based on SHA256 hash."""
         sha256_hash = npz_path.stem
-        dir1 = sha256_hash[:2]
-        dir2 = sha256_hash[2:4]
 
-        # Look for tag file in various possible locations
+        # Look for tag file in possible locations (canonical first, then legacy flat).
         possible_tag_paths = [
-            # Tags directory at same level as latents
-            self.target_dir / "tags" / dir1 / dir2 / f"{sha256_hash}.txt",
+            # Tags directory at same level as latents (canonical layout)
+            sharded_path(self.target_dir / "tags", sha256_hash, "txt"),
             # Same directory structure but different root
-            self.target_dir.parent / "tags" / dir1 / dir2 / f"{sha256_hash}.txt",
-            # Legacy structure
+            sharded_path(self.target_dir.parent / "tags", sha256_hash, "txt"),
+            # Legacy flat structure
             self.target_dir / "tags" / f"{sha256_hash}.txt",
-            # Direct tags subdirectory (if target_dir is root)
-            Path(str(self.target_dir).replace("/latents", "/tags")) / dir1 / dir2 / f"{sha256_hash}.txt",
         ]
 
         for tag_path in possible_tag_paths:

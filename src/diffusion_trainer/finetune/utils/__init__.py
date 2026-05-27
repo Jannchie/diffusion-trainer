@@ -19,6 +19,7 @@ from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import
 from diffusers.utils.torch_utils import is_compiled_module
 
 from diffusion_trainer.config import SampleOptions
+from diffusion_trainer.utils.dtype import str_to_dtype as str_to_dtype  # re-export
 
 logger = getLogger("diffusion_trainer")
 
@@ -156,19 +157,6 @@ def prepare_accelerator(
     )
     logger.info("accelerator device: %s", accelerator.device)
     return accelerator
-
-
-def str_to_dtype(dtype: str) -> torch.dtype:
-    if dtype in ("float16", "half", "fp16"):
-        return torch.float16
-    if dtype in ("float32", "float", "fp32"):
-        return torch.float32
-    if dtype in ("float64", "double", "fp64"):
-        return torch.float64
-    if dtype in ("bfloat16", "bf16"):
-        return torch.bfloat16
-    msg = f"Unknown dtype {dtype}"
-    raise ValueError(msg)
 
 
 def get_sample_options_hash(sample_options: SampleOptions) -> str:
