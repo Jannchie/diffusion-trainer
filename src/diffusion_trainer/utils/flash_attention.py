@@ -114,53 +114,6 @@ def _try_set_attention_processors(model: nn.Module, model_type: str) -> bool:
     return False
 
 
-def disable_flash_attention_for_model(model: nn.Module, model_type: str = "unknown") -> bool:
-    """
-    Disable Flash Attention for a given model.
-
-    Args:
-        model: The model to disable Flash Attention for
-        model_type: Type of model for logging purposes
-
-    Returns:
-        True if Flash Attention was successfully disabled, False otherwise
-    """
-    try:
-        success = _try_disable_flash_attention_methods(model, model_type)
-
-        if not success:
-            logger.warning("Could not disable Flash Attention for %s - no compatible method found", model_type)
-
-        return success  # noqa: TRY300
-
-    except Exception as e:
-        logger.warning("Failed to disable Flash Attention for %s: %s", model_type, e)
-        return False
-
-
-def _try_disable_flash_attention_methods(model: nn.Module, model_type: str) -> bool:
-    """Try different methods to disable Flash Attention for a model."""
-    # Method 1: Native disable method
-    if hasattr(model, "disable_xformers_memory_efficient_attention"):
-        model.disable_xformers_memory_efficient_attention()  # type: ignore
-        logger.info("✓ Flash Attention disabled for %s", model_type)
-        return True
-
-    # Method 2: Legacy method
-    if hasattr(model, "set_use_memory_efficient_attention_xformers"):
-        model.set_use_memory_efficient_attention_xformers(False)  # type: ignore
-        logger.info("✓ Flash Attention disabled for %s (legacy method)", model_type)
-        return True
-
-    # Method 3: Default attention processors
-    if hasattr(model, "set_default_attn_processor"):
-        model.set_default_attn_processor()  # type: ignore
-        logger.info("✓ Flash Attention disabled for %s using default attention processors", model_type)
-        return True
-
-    return False
-
-
 def is_flash_attention_available() -> bool:
     """
     Check if Flash Attention (xformers) is available.

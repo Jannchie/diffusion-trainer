@@ -3,17 +3,15 @@
 import argparse
 import logging
 import sys
-import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Queue
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 from PIL import Image
 from wdtagger import Tagger
 
+from diffusion_trainer.dataset.processors.base import ThreadedPipelineProcessor
 from diffusion_trainer.dataset.utils import calculate_file_sha256, retrieve_image_paths, sharded_path
 from diffusion_trainer.shared import get_progress, logger
 
@@ -71,7 +69,7 @@ class SimpleTagger:
         return unique_tags
 
 
-class TaggingProcessor:
+class TaggingProcessor(ThreadedPipelineProcessor[Path, tuple[Path, Image.Image], "TaggingPayload"]):
     """Process images into SHA256-based tag files."""
 
     def __init__(  # noqa: PLR0913
@@ -80,7 +78,6 @@ class TaggingProcessor:
         target_path: str | None = None,
         *,
         num_workers: int = 4,
-        batch_size: int = 16,  # Kept for compatibility but not used in SHA256 version
         skip_existing: bool = True,
         ignore_hidden: bool = True,
         recursive: bool = True,
@@ -96,60 +93,51 @@ class TaggingProcessor:
         else:
             self.target_path = Path(target_path).absolute()
 
-        self.num_workers = num_workers
         self.skip_existing = skip_existing
-        self.batch_size = batch_size  # Kept for compatibility
         self.tag_source = tag_source
-
-        # Create output directory
         self.target_path.mkdir(parents=True, exist_ok=True)
 
-        # Threading components
-        self.reader_threads = []
-        self.process_threads = []
-        self.writer_threads = []
-
-        self.read_queue = Queue[Path | None](maxsize=num_workers * 2)
-        self.process_queue = Queue[tuple[Path, Image.Image] | None](maxsize=num_workers)
-        self.write_queue = Queue[TaggingPayload | None](maxsize=num_workers)
-
-        self.progress_counter = 0
-        self.progress_lock = threading.Lock()
-
-        self.gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
-        if self.tag_source == "wd_tagger":
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        if tag_source == "wd_tagger":
             self.tagger_list = [
-                SimpleTagger(
-                    general_threshold=general_threshold,
-                    character_threshold=character_threshold,
-                )
-                for _ in range(self.gpu_count)
+                SimpleTagger(general_threshold=general_threshold, character_threshold=character_threshold)
+                for _ in range(gpu_count)
             ]
         else:
             self.tagger_list = []
 
-        # Get image paths
         self.image_paths = list(retrieve_image_paths(self.img_path, ignore_hidden=ignore_hidden, recursive=recursive))
         logger.info("Found %d images in %s", len(self.image_paths), self.img_path)
         logger.info("Tag source: %s", self.tag_source)
 
-        self.skip_count = 0
+        self.skip_count = self._count_existing_tags() if skip_existing else 0
         if skip_existing:
-            # Count existing files for progress tracking
-            existing_count = 0
-            for image_path in self.image_paths:
-                tag_path = self.get_tag_save_path(image_path)
-                if tag_path.exists():
-                    try:
-                        with tag_path.open("r", encoding="utf-8") as f:
-                            if f.read().strip():  # Has content
-                                existing_count += 1
-                    except Exception:  # noqa: S110
-                        pass
-            self.skip_count = existing_count
             logger.info("Skipping %d existing files", self.skip_count)
 
-        self.lock = threading.Lock()
+        super().__init__(
+            num_reader=num_workers,
+            num_writer=num_workers,
+            num_process_workers=len(self.tagger_list),
+            description="Tagging...",
+            poll_interval=0.1,
+            stall_ticks=100,
+            initial_completed=self.skip_count,
+            enqueue_batch_size=1000,
+            enqueue_batch_pause=0.1,
+        )
+
+    def _count_existing_tags(self) -> int:
+        """Count images that already have non-empty tag files (for progress display)."""
+        existing_count = 0
+        for image_path in self.image_paths:
+            tag_path = self.get_tag_save_path(image_path)
+            if tag_path.exists():
+                try:
+                    if tag_path.read_text(encoding="utf-8").strip():
+                        existing_count += 1
+                except Exception:  # noqa: S110
+                    pass
+        return existing_count
 
     @staticmethod
     def calculate_sha256(image_path: Path) -> str:

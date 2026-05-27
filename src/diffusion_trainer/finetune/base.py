@@ -103,6 +103,10 @@ class BaseTuner(ABC):
         self.noise_scheduler: DDPMScheduler = self.get_noise_scheduler()
         self.all_snr = compute_snr(self.noise_scheduler, torch.arange(0, self.noise_scheduler.config.num_train_timesteps, dtype=torch.long)).to(self.device)  # type: ignore
         self.train_loss = 0.0
+        # On-device accumulator for the per-window loss; gathered+synced once per
+        # optimizer step instead of once per micro-step (see optimizer_step).
+        self._loss_accum: torch.Tensor | None = None
+        self._micro_step_count = 0
         self.trainable_models_with_lr: list[TrainableModel] = []
         self.training_models: list[torch.nn.Module] = []
         self.global_step = 0  # Track global training step for input perturbation decay
@@ -314,14 +318,19 @@ class BaseTuner(ABC):
             msg = "Loss is NaN."
             raise ValueError(msg)
 
-        avg_loss = self.accelerator.gather(loss.repeat(self.config.batch_size)).mean()  # type: ignore
-        self.train_loss += avg_loss.item() / self.config.gradient_accumulation_steps
+        # Accumulate the local loss on-device. The cross-process gather and the
+        # GPU->CPU sync are deferred to the optimizer-step boundary below, so they
+        # run once per optimizer step rather than once per micro-step.
+        if self._loss_accum is None:
+            self._loss_accum = torch.zeros((), device=loss.device, dtype=torch.float32)
+        self._loss_accum += loss.detach().float()
+        self._micro_step_count += 1
 
         # Backpropagate
         self.accelerator.backward(loss)
 
         # Free memory
-        del loss, avg_loss
+        del loss
 
         # Apply gradient clipping if configured
         if self.accelerator.sync_gradients and self.config.max_grad_norm > 0:
@@ -348,8 +357,14 @@ class BaseTuner(ABC):
         # Zero gradients
         self.optimizer.zero_grad(set_to_none=self.config.zero_grad_set_to_none)
 
-        # Clear CUDA cache only when necessary (not after every sync)
-        # Removed frequent cache clearing to improve performance
+        # Once per optimizer step: gather the window-mean loss across processes
+        # for logging. This is the only GPU->CPU sync on the loss path.
+        if self.accelerator.sync_gradients and self._loss_accum is not None:
+            mean_local = self._loss_accum / max(self._micro_step_count, 1)
+            avg_loss = self.accelerator.gather(mean_local.repeat(self.config.batch_size)).mean()  # type: ignore
+            self.train_loss = avg_loss.item()
+            self._loss_accum.zero_()
+            self._micro_step_count = 0
 
     def _should_step_ema(self, step: int) -> bool:
         return self.config.use_ema and step >= self.config.ema_start_step
@@ -1263,9 +1278,22 @@ class BaseTuner(ABC):
 
     def save_full_finetune_model(self, filename: str) -> None:
         self.save_path.mkdir(parents=True, exist_ok=True)
-        self.pipeline.to(self.save_dtype)
-        self.pipeline.save_pretrained(self.save_path / f"{filename}")
-        self.pipeline.to(self.weight_dtype)
+        # Fast path: when saving in the same dtype as training, save the live
+        # weights directly. Casting here would be a no-op that still rewrites
+        # every parameter tensor.
+        if self.save_dtype == self.weight_dtype:
+            self.pipeline.save_pretrained(self.save_path / f"{filename}")
+            return
+        # Different save dtype: diffusers' save_pretrained has no dtype argument,
+        # so we round-trip the live pipeline. This is an in-place cast, so for an
+        # intermediate checkpoint the training weights take a precision hit
+        # (notably fp32 -> fp16 -> fp32). Acceptable for the documented use of
+        # saving a lower-precision export; a lossless path would need a full
+        # CPU state_dict copy.
+        with torch.no_grad():
+            self.pipeline.to(self.save_dtype)
+            self.pipeline.save_pretrained(self.save_path / f"{filename}")
+            self.pipeline.to(self.weight_dtype)
 
     def create_prompts_str(self, batch: DiffusionBatch) -> list[str]:
         prompts = []

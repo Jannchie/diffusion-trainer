@@ -1,10 +1,8 @@
 import json
 import logging
-import threading
 from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Generator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
@@ -14,8 +12,7 @@ import torch
 from pyarrow import parquet as pq
 from torch.utils.data import Dataset, Sampler
 
-from diffusion_trainer.config import SDXLConfig
-from diffusion_trainer.dataset.utils import retrieve_npz_path, sharded_path
+from diffusion_trainer.dataset.utils import sharded_path
 from diffusion_trainer.shared import get_progress
 
 logger = logging.getLogger("diffusion_trainer.dataset")
@@ -140,52 +137,6 @@ class DiffusionDataset(Dataset):
             )
         return DiffusionDataset(buckets)
 
-    @staticmethod
-    def from_filesystem(
-        config: SDXLConfig,
-        max_workers: int = 8,
-    ) -> "DiffusionDataset":
-        buckets: dict[tuple[int, int], list[DiffusionTrainingItem]] = defaultdict(list)
-
-        if config.dataset_path is None and config.image_path is not None:
-            meta_dir = Path(config.image_path) / "metadata"
-        elif config.dataset_path is not None:
-            meta_dir = Path(config.dataset_path)
-        else:
-            msg = "Please specify the `dataset_path` in the config file."
-            raise ValueError(msg)
-
-        npz_path_list = list(retrieve_npz_path(Path(meta_dir)))
-        lock = threading.Lock()
-
-        with get_progress() as progress, ThreadPoolExecutor(max_workers=max_workers) as executor:
-            task = progress.add_task("Processing npz files", total=len(npz_path_list))
-
-            def process_metadata_files(
-                npz_path: Path,
-            ) -> None:
-                npz = np.load(npz_path)
-                # Extract SHA256 hash from filename (e.g., ab/cd/abcd...npz -> abcd...)
-                key = npz_path.stem
-                # Use SHA256-based directory structure for tags
-                tag_file = sharded_path(meta_dir / "tags", key, "txt")
-                caption_file = sharded_path(meta_dir / "caption", key, "txt")
-                caption = caption_file.read_text() if caption_file.exists() else ""
-                tags = tag_file.read_text().split(",") if tag_file.exists() else []
-                train_resolution = npz.get("train_resolution")
-                item = DiffusionTrainingItem(
-                    npz_path=npz_path.as_posix(),
-                    caption=caption,
-                    tags=tags,
-                )
-                with lock:
-                    buckets[tuple(train_resolution.tolist())].append(item)
-                    progress.update(task, advance=1)
-
-            for npz_path in npz_path_list:
-                executor.submit(process_metadata_files, npz_path)
-        return DiffusionDataset(buckets)
-
     def get_bucket_index(self, idx: int) -> int:
         # Use binary search to find the correct bucket
         return bisect_right(self.bucket_boundaries, idx)
@@ -198,19 +149,23 @@ class DiffusionDataset(Dataset):
 
     @staticmethod
     def _load_item(item: DiffusionTrainingItem) -> dict:
-        npz = np.load(item.npz_path)
-        img_latents = npz.get("latents")
-        if img_latents is None:
-            msg = f"npz {item.npz_path} is missing 'latents'"
-            raise KeyError(msg)
-        return {
-            "img_latents": img_latents,
-            "crop_ltrb": npz.get("crop_ltrb"),
-            "original_size": npz.get("original_size"),
-            "train_resolution": npz.get("train_resolution"),
-            "caption": item.caption,
-            "tags": item.tags,
-        }
+        # collate_fn stacks all four arrays unconditionally, so a file missing any
+        # of them must raise here (not return None) to trigger the bucket fallback
+        # in __getitem__ instead of crashing later in collate. The context manager
+        # also closes the underlying zip handle (zip-npz arrays are in-memory copies).
+        with np.load(item.npz_path) as npz:
+            missing = [key for key in ("latents", "crop_ltrb", "original_size", "train_resolution") if key not in npz]
+            if missing:
+                msg = f"npz {item.npz_path} is missing {missing}"
+                raise KeyError(msg)
+            return {
+                "img_latents": npz["latents"],
+                "crop_ltrb": npz["crop_ltrb"],
+                "original_size": npz["original_size"],
+                "train_resolution": npz["train_resolution"],
+                "caption": item.caption,
+                "tags": item.tags,
+            }
 
     def __getitem__(self, idx: int) -> dict:
         bucket_index = self.get_bucket_index(idx)
