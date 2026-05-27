@@ -998,7 +998,12 @@ class BaseTuner(ABC):
         self.saving_model(f"{self.config.model_name}")
 
     @abstractmethod
-    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> dict[str, torch.Tensor]:
+        """Return weighted prompt embeddings as pipeline kwargs.
+
+        SD1.5 returns ``prompt_embeds``/``negative_prompt_embeds``; SDXL also
+        returns the pooled pair. The dict is splatted directly into the pipeline.
+        """
 
     @torch.no_grad()
     def generate_preview(self, filename: str, global_step: int = 0) -> None:  # noqa: C901, PLR0912, PLR0915
@@ -1054,14 +1059,13 @@ class BaseTuner(ABC):
                     # Use the configured VAE dtype but add NaN checking
                     self.pipeline.vae.to(dtype=self.vae_dtype)
                     try:
-                        prompt_embeds, prompt_neg_embeds = self.get_preview_prompt_embeds(
+                        embeds_kwargs = self.get_preview_prompt_embeds(
                             sample_option.prompt,
                             sample_option.negative_prompt,
                             getattr(sample_option, "clip_skip", 2),
                         )
                         result = self.pipeline(
-                            prompt_embeds=prompt_embeds,
-                            negative_prompt_embeds=prompt_neg_embeds,
+                            **embeds_kwargs,
                             num_inference_steps=sample_option.steps,
                             generator=generator,
                             callback_on_step_end=callback_on_step_end,  # type: ignore

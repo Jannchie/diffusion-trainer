@@ -3,6 +3,7 @@
 import argparse
 import logging
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -173,85 +174,35 @@ class TaggingProcessor(ThreadedPipelineProcessor[Path, tuple[Path, Image.Image],
             raise FileNotFoundError(msg)
         return self.parse_tags_text(sidecar_tag_path.read_text(encoding="utf-8"))
 
-    def read_image(self) -> None:
-        """Read images and check for existing files."""
-        while image_path := self.read_queue.get():
-            if image_path is None:
-                break
+    # ----- ThreadedPipelineProcessor stages -----
 
+    def get_items(self) -> list[Path]:
+        return self.image_paths
+
+    def make_process_worker(self, index: int) -> object:
+        return self.tagger_list[index]
+
+    def read_item(self, item: Path) -> tuple[Path, Image.Image] | None:
+        tag_save_path = self.get_tag_save_path(item)
+        if self.skip_existing and tag_save_path.exists():
             try:
-                tag_save_path = self.get_tag_save_path(image_path)
+                if tag_save_path.read_text(encoding="utf-8").strip():
+                    return None  # already tagged
+            except Exception:
+                logger.warning("Corrupted file %s, reprocessing...", tag_save_path)
+        image = Image.open(item).convert("RGB")
+        return (item, image)
 
-                # Check if output file already exists
-                if self.skip_existing and tag_save_path.exists():
-                    try:
-                        # Verify the existing file is valid
-                        with tag_save_path.open("r", encoding="utf-8") as f:
-                            content = f.read().strip()
-                            if content:  # File exists and has content
-                                with self.progress_lock:
-                                    self.progress_counter += 1
-                                continue
-                    except Exception:
-                        logger.warning("Corrupted file %s, reprocessing...", tag_save_path)
+    def process_item(self, worker: object, loaded: tuple[Path, Image.Image]) -> "TaggingPayload":
+        image_path, image = loaded
+        tagger = cast("SimpleTagger", worker)
+        tags = tagger.tag_image(image)
+        return TaggingPayload(save_path=self.get_tag_save_path(image_path), tags=tags)
 
-                # Load and process image
-                image = Image.open(image_path).convert("RGB")
-                self.process_queue.put((image_path, image))
-
-            except Exception as e:
-                logger.error("Error reading %s: %s", image_path, e)
-                with self.progress_lock:
-                    self.progress_counter += 1
-
-    def process_image(self, tagger: SimpleTagger) -> None:
-        """Process images using WD Tagger."""
-        while True:
-            data = self.process_queue.get()
-            if data is None:
-                break
-
-            image_path, image = data
-
-            try:
-                # Tag the image
-                tags = tagger.tag_image(image)
-
-                # Get save path
-                tag_save_path = self.get_tag_save_path(image_path)
-
-                # Create payload for writing
-                payload = TaggingPayload(
-                    save_path=tag_save_path,
-                    tags=tags,
-                )
-
-                self.write_queue.put(payload)
-
-            except Exception as e:
-                logger.error("Error processing %s: %s", image_path, e)
-                with self.progress_lock:
-                    self.progress_counter += 1
-
-    def write_tags(self) -> None:
-        """Write tags to text files."""
-        while True:
-            payload = self.write_queue.get()
-            if payload is None:
-                break
-
-            try:
-                payload.save_path.parent.mkdir(parents=True, exist_ok=True)
-                with payload.save_path.open("w", encoding="utf-8") as f:
-                    f.write(", ".join(payload.tags))
-
-                with self.progress_lock:
-                    self.progress_counter += 1
-
-            except Exception as e:
-                logger.error("Error writing %s: %s", payload.save_path, e)
-                with self.progress_lock:
-                    self.progress_counter += 1
+    def write_item(self, payload: "TaggingPayload") -> None:
+        payload.save_path.parent.mkdir(parents=True, exist_ok=True)
+        with payload.save_path.open("w", encoding="utf-8") as f:
+            f.write(", ".join(payload.tags))
 
     def import_sidecar_tags(self) -> None:
         """Import existing same-name txt files into the SHA256-based tags directory."""
@@ -279,81 +230,12 @@ class TaggingProcessor(ThreadedPipelineProcessor[Path, tuple[Path, Image.Image],
                 completed += 1
                 progress.update(task, completed=completed)
 
-    def __call__(self) -> None:  # noqa: C901, PLR0912
+    def __call__(self) -> None:
         """Run the image tagging process."""
         if self.tag_source == "sidecar_txt":
             self.import_sidecar_tags()
             return
-
-        total_images = len(self.image_paths)
-
-        if total_images == 0:
-            logger.info("No images found in %s", self.img_path)
-            return
-
-        logger.info("Found %d images to process", total_images)
-
-        # Create and start threads
-        self.reader_threads = [threading.Thread(target=self.read_image, daemon=True) for _ in range(self.num_workers)]
-        self.process_threads = [
-            threading.Thread(target=self.process_image, args=(tagger,), daemon=True)
-            for tagger in self.tagger_list
-        ]
-        self.writer_threads = [threading.Thread(target=self.write_tags, daemon=True) for _ in range(self.num_workers)]
-
-        # Start all threads
-        for thread in self.reader_threads + self.process_threads + self.writer_threads:
-            thread.start()
-
-        # Process with progress tracking
-        with get_progress() as progress:
-            task = progress.add_task("Tagging...", total=total_images, completed=self.skip_count)
-
-            # Add image paths to queue in batches
-            batch_size = 1000
-            for i in range(0, len(self.image_paths), batch_size):
-                batch = self.image_paths[i:i + batch_size]
-                for image_path in batch:
-                    self.read_queue.put(image_path)
-
-                # Small delay to avoid overwhelming the queue
-                if i > 0:
-                    time.sleep(0.1)
-
-            # Monitor progress
-            last_count = self.skip_count
-            stall_count = 0
-            while self.progress_counter < total_images:
-                current_count = self.progress_counter
-                progress.update(task, completed=current_count)
-
-                # Check for stalled processing
-                if current_count == last_count:
-                    stall_count += 1
-                    if stall_count > 100:  # 10 seconds
-                        logger.warning("Processing seems stalled at %d/%d", current_count, total_images)
-                        stall_count = 0
-                else:
-                    stall_count = 0
-
-                last_count = current_count
-                time.sleep(0.1)
-
-            # Signal threads to stop
-            for _ in range(self.num_workers):
-                self.read_queue.put(None)
-            for _ in range(len(self.tagger_list)):
-                self.process_queue.put(None)
-            for _ in range(self.num_workers):
-                self.write_queue.put(None)
-
-            # Wait for all threads to complete
-            for thread in self.reader_threads + self.process_threads + self.writer_threads:
-                thread.join()
-
-            progress.update(task, completed=total_images)
-
-        logger.info("Successfully tagged %d images", total_images)
+        self.run()
 
 
 if __name__ == "__main__":

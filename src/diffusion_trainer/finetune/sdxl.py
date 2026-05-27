@@ -9,6 +9,7 @@ import torch
 from accelerate.logging import get_logger
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusion_prompt_embedder.clip import get_prompts_tokens_with_weights
 from transformers.models.clip import CLIPTextModel, CLIPTextModelWithProjection
 
 from diffusion_trainer.config import BaseConfig, SDXLConfig
@@ -234,7 +235,50 @@ class SDXLTuner(BaseTuner):
 
         return prompt_embeds, prompt_embeds_pooled_2
 
-    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]:
-        # return get_weighted_text_embeddings_sdxl(self.pipeline, prompt, neg_prompt, clip_skip=clip_skip)  # type: ignore
-        msg = "get_preview_prompt_embeds not yet implemented for SDXL"
-        raise NotImplementedError(msg)
+    def _encode_weighted_prompt(self, prompt: str, clip_skip: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode one prompt through both SDXL text encoders with per-token attention weights.
+
+        Mirrors the training-time encoding (penultimate hidden state, pooled
+        output from encoder 2, 77-token window) so previews reflect what the
+        model actually learned, but multiplies each token embedding by its
+        parsed ``(word:weight)`` attention weight. Long prompts are truncated to
+        the 77-token window, same as the training tokenizer.
+
+        Returns ``(prompt_embeds[1, 77, 2048], pooled_prompt_embeds[1, 1280])``.
+        """
+        device = self.accelerator.device
+        hidden_layer = max(clip_skip, 1)  # clip_skip=2 -> hidden_states[-2], matching process_batch
+        hidden_states: list[torch.Tensor] = []
+        pooled = torch.empty(0, device=device)
+        encoders = (
+            (self.pipeline.tokenizer, self.sdxl_models.text_encoder_1, False),
+            (self.pipeline.tokenizer_2, self.sdxl_models.text_encoder_2, True),
+        )
+        for tokenizer, text_encoder, is_encoder_2 in encoders:
+            tokens, weights = get_prompts_tokens_with_weights(tokenizer, prompt)
+            tokens, weights = tokens[:75], weights[:75]
+            pad_len = 75 - len(tokens)
+            input_ids = [tokenizer.bos_token_id, *tokens, tokenizer.eos_token_id, *([tokenizer.eos_token_id] * pad_len)]
+            token_weights = [1.0, *weights, 1.0, *([1.0] * pad_len)]
+
+            ids = torch.tensor([input_ids], dtype=torch.long, device=device)
+            output = self.get_runtime_model(text_encoder)(ids, output_hidden_states=True)
+
+            hidden = output.hidden_states[-hidden_layer]
+            weight_tensor = torch.tensor(token_weights, dtype=hidden.dtype, device=device).view(1, -1, 1)
+            hidden_states.append(hidden * weight_tensor)
+            if is_encoder_2:
+                pooled = output[0]  # text_embeds (projected pooled) from encoder 2
+
+        prompt_embeds = torch.cat(hidden_states, dim=-1)
+        return prompt_embeds, pooled
+
+    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> dict[str, torch.Tensor]:
+        prompt_embeds, pooled = self._encode_weighted_prompt(prompt, clip_skip)
+        neg_prompt_embeds, neg_pooled = self._encode_weighted_prompt(neg_prompt, clip_skip)
+        return {
+            "prompt_embeds": prompt_embeds,
+            "negative_prompt_embeds": neg_prompt_embeds,
+            "pooled_prompt_embeds": pooled,
+            "negative_pooled_prompt_embeds": neg_pooled,
+        }

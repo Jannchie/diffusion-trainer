@@ -1,11 +1,10 @@
 """Prepare latent vectors for the dataset using SHA256-based directory structure."""
 
 import argparse
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Queue
+from typing import cast
 from urllib.parse import urlparse
 
 import cv2
@@ -17,20 +16,21 @@ from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from PIL import Image
 from torchvision import transforms
 
+from diffusion_trainer.dataset.processors.base import ThreadedPipelineProcessor
 from diffusion_trainer.dataset.utils import calculate_file_sha256, retrieve_image_paths, sharded_path
-from diffusion_trainer.shared import get_progress, logger
+from diffusion_trainer.shared import logger
 from diffusion_trainer.utils.dtype import get_default_dtype, str_to_dtype
 
 
 @dataclass
 class WritePayload:
-    """Payload for writing latent vectors."""
+    """Payload for writing latent vectors. Only built for items that encoded successfully."""
 
-    save_path: Path | None  # None indicates error case
-    latents: torch.Tensor | None
-    crop_ltrb: tuple[int, int, int, int] | None
-    original_size: tuple[int, int] | None
-    resolution: tuple[int, int] | None
+    save_path: Path
+    latents: torch.Tensor
+    crop_ltrb: tuple[int, int, int, int]
+    original_size: tuple[int, int]
+    resolution: tuple[int, int]
 
 
 class SimpleLatentsProcessor:
@@ -172,7 +172,7 @@ class SimpleLatentsProcessor:
         np.savez_compressed(save_npz_path, **npz_data)
 
 
-class LatentsGenerateProcessor:
+class LatentsGenerateProcessor(ThreadedPipelineProcessor[Path, tuple[Path, np.ndarray], WritePayload]):
     """Latents processor with SHA256-based directory structure (replaces original)."""
 
     def __init__(  # noqa: PLR0913
@@ -190,38 +190,28 @@ class LatentsGenerateProcessor:
         self.ds_path = Path(img_path).absolute()
         self.meta_path = Path(target_path).absolute()  # Keep original name for compatibility
         self.target_path = self.meta_path  # SHA256-based output
-        self.num_reader = num_reader
-        self.num_writer = num_writer
         self.skip_existing = skip_existing
-
-        # Create output directory
         self.target_path.mkdir(parents=True, exist_ok=True)
 
-        # Threading components
-        self.reader_threads = []
-        self.process_threads = []
-        self.writer_threads = []
-
-        self.read_queue = Queue[Path | None](maxsize=num_reader * 2)
-        self.process_queue = Queue[tuple[Path, np.ndarray] | None](maxsize=num_reader)
-        self.write_queue = Queue[WritePayload | None](maxsize=num_writer)
-
-        self.progress_counter = 0
-        self.progress_lock = threading.Lock()
-        self.progress_callback = None  # Will be set during processing
-
-        # Create multiple GPU processors
-        self.gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        # One VAE processor per GPU; each process thread gets its own (see make_process_worker).
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
         self.processor_list = [
             SimpleLatentsProcessor(
                 model_name_or_path=vae_path,
                 dtype=vae_dtype,
                 device=f"cuda:{i}" if torch.cuda.is_available() else "cpu",
             )
-            for i in range(self.gpu_count)
+            for i in range(gpu_count)
         ]
 
-        self.lock = threading.Lock()
+        super().__init__(
+            num_reader=num_reader,
+            num_writer=num_writer,
+            num_process_workers=len(self.processor_list),
+            description="Processing images...",
+            poll_interval=0.05,
+            stall_ticks=200,
+        )
 
     @staticmethod
     def calculate_sha256(image_path: Path) -> str:
@@ -232,229 +222,63 @@ class LatentsGenerateProcessor:
         """Get NPZ save path with SHA256-based directory structure."""
         return sharded_path(self.target_path, self.calculate_sha256(image_path), "npz")
 
-    def read_image(self) -> None:
-        """Read images and check for existing files."""
-        while image_path := self.read_queue.get():
-            if image_path is None:
-                break
+    # ----- ThreadedPipelineProcessor stages -----
 
-            try:
-                npz_save_path = self.get_npz_save_path(image_path)
-
-                # Check if output file already exists
-                if self.skip_existing and npz_save_path.exists():
-                    try:
-                        # Verify the existing file is valid: it must carry the
-                        # latents themselves, not just metadata. A half-written
-                        # file (resolution but no latents) would otherwise be
-                        # skipped and only blow up later during training.
-                        npz = np.load(npz_save_path)
-                        if "train_resolution" in npz and "latents" in npz:
-                            # File exists and is valid, send skip payload to write_npz for consistent progress tracking
-                            skip_payload = WritePayload(
-                                save_path=None,  # Indicates skip case
-                                latents=None,
-                                crop_ltrb=None,
-                                original_size=None,
-                                resolution=None,
-                            )
-                            self.write_queue.put(skip_payload)
-                            continue
-                    except Exception:
-                        logger.warning("Corrupted file %s, reprocessing...", npz_save_path)
-
-                # Load and process image
-                image_np = SimpleLatentsProcessor.process(image_path)
-                self.process_queue.put((image_path, image_np))
-
-            except Exception as e:
-                logger.error("Error reading %s: %s", image_path, e)
-                # Send error payload to write_npz for consistent progress tracking
-                error_payload = WritePayload(
-                    save_path=None,
-                    latents=None,
-                    crop_ltrb=None,
-                    original_size=None,
-                    resolution=None,
-                )
-                self.write_queue.put(error_payload)
-
-    def process_image(self, processor: SimpleLatentsProcessor) -> None:
-        """Process images using VAE encoder."""
-        while True:
-            data = self.process_queue.get()
-            if data is None:
-                break
-
-            image_path, image_np = data
-
-            try:
-                # Get original image size
-                original_size = image_np.shape[1], image_np.shape[0]
-
-                # Select resolution and resize image
-                reso, resized_size = processor.select_reso(*original_size)
-                image_np = processor.resize_and_trim_image(image_np, reso, resized_size)
-
-                # Calculate crop parameters
-                crop_ltrb = processor.get_crop_ltrb(np.array(reso), original_size)
-
-                # Prepare tensor and encode
-                image_tensor = processor.prepare_image_tensor(image_np)
-                latents = processor.encode_image(image_tensor)
-
-                # Get save path
-                npz_save_path = self.get_npz_save_path(image_path)
-
-                # Create payload for writing
-                payload = WritePayload(
-                    save_path=npz_save_path,
-                    latents=latents,
-                    crop_ltrb=crop_ltrb,
-                    original_size=original_size,
-                    resolution=reso,
-                )
-
-                self.write_queue.put(payload)
-
-            except Exception as e:
-                logger.error("Error processing %s: %s", image_path, e)
-                # Send error payload to write_npz to increment progress counter
-                error_payload = WritePayload(
-                    save_path=None,
-                    latents=None,
-                    crop_ltrb=None,
-                    original_size=None,
-                    resolution=None,
-                )
-                self.write_queue.put(error_payload)
-
-    def write_npz(self) -> None:
-        """Write encoded latents to NPZ files."""
-        while True:
-            payload = self.write_queue.get()
-            if payload is None:
-                break
-
-            # Handle error cases (empty payload)
-            if payload.save_path is None:
-                with self.progress_lock:
-                    self.progress_counter += 1
-                    # Immediate callback for skip/error cases
-                    if self.progress_callback:
-                        self.progress_callback(self.progress_counter)
-                continue
-
-            try:
-                # Convert tensor to compatible dtype before converting to numpy
-                latents_tensor = payload.latents
-                if latents_tensor.dtype == torch.bfloat16:
-                    # Convert bfloat16 to float32 (NumPy doesn't support bfloat16)
-                    latents_tensor = latents_tensor.float()
-                # fp16 (float16) is supported by NumPy, so we keep it as-is
-
-                latents_np = latents_tensor.cpu().numpy()
-
-                new_npz = {
-                    "latents": latents_np,
-                    "crop_ltrb": payload.crop_ltrb,
-                    "original_size": payload.original_size,
-                    "train_resolution": payload.resolution,
-                }
-
-                payload.save_path.parent.mkdir(parents=True, exist_ok=True)
-                np.savez_compressed(payload.save_path, **new_npz)
-
-                with self.progress_lock:
-                    self.progress_counter += 1
-                    # Immediate callback for successful writes
-                    if self.progress_callback:
-                        self.progress_callback(self.progress_counter)
-
-            except Exception as e:
-                logger.error("Error writing %s: %s", payload.save_path, e)
-                with self.progress_lock:
-                    self.progress_counter += 1
-                    # Immediate callback for write errors
-                    if self.progress_callback:
-                        self.progress_callback(self.progress_counter)
-
-    def __call__(self) -> None:  # noqa: C901
-        """Run the processing pipeline."""
-        # Get all image paths
+    def get_items(self) -> list[Path]:
         logger.info("Scanning for images in %s", self.ds_path)
-        image_paths = list(retrieve_image_paths(self.ds_path, recursive=True))
-        total_images = len(image_paths)
+        return list(retrieve_image_paths(self.ds_path, recursive=True))
 
-        if total_images == 0:
-            logger.info("No images found in %s", self.ds_path)
-            return
+    def make_process_worker(self, index: int) -> object:
+        return self.processor_list[index]
 
-        logger.info("Found %d images to process", total_images)
+    def read_item(self, item: Path) -> tuple[Path, np.ndarray] | None:
+        npz_save_path = self.get_npz_save_path(item)
+        if self.skip_existing and npz_save_path.exists():
+            try:
+                # A valid cache must carry the latents themselves, not just
+                # metadata; a half-written file would otherwise be skipped and
+                # only blow up later during training.
+                with np.load(npz_save_path) as npz:
+                    if "train_resolution" in npz and "latents" in npz:
+                        return None  # valid existing latents
+            except Exception:
+                logger.warning("Corrupted file %s, reprocessing...", npz_save_path)
+        image_np = SimpleLatentsProcessor.process(item)
+        return (item, image_np)
 
-        # Create and start threads
-        self.reader_threads = [threading.Thread(target=self.read_image, daemon=True) for _ in range(self.num_reader)]
-        self.process_threads = [
-            threading.Thread(target=self.process_image, args=(processor,), daemon=True)
-            for processor in self.processor_list
-        ]
-        self.writer_threads = [threading.Thread(target=self.write_npz, daemon=True) for _ in range(self.num_writer)]
+    def process_item(self, worker: object, loaded: tuple[Path, np.ndarray]) -> WritePayload:
+        image_path, image_np = loaded
+        processor = cast("SimpleLatentsProcessor", worker)
+        original_size = image_np.shape[1], image_np.shape[0]
+        reso, resized_size = processor.select_reso(*original_size)
+        image_np = processor.resize_and_trim_image(image_np, reso, resized_size)
+        crop_ltrb = processor.get_crop_ltrb(np.array(reso), original_size)
+        image_tensor = processor.prepare_image_tensor(image_np)
+        latents = processor.encode_image(image_tensor)
+        return WritePayload(
+            save_path=self.get_npz_save_path(image_path),
+            latents=latents,
+            crop_ltrb=crop_ltrb,
+            original_size=original_size,
+            resolution=reso,
+        )
 
-        # Start all threads
-        for thread in self.reader_threads + self.process_threads + self.writer_threads:
-            thread.start()
+    def write_item(self, payload: WritePayload) -> None:
+        latents_tensor = payload.latents
+        if latents_tensor.dtype == torch.bfloat16:
+            # NumPy has no bfloat16; fp16 is supported so it stays as-is.
+            latents_tensor = latents_tensor.float()
+        new_npz = {
+            "latents": latents_tensor.cpu().numpy(),
+            "crop_ltrb": payload.crop_ltrb,
+            "original_size": payload.original_size,
+            "train_resolution": payload.resolution,
+        }
+        payload.save_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(payload.save_path, **new_npz)
 
-        # Process with progress tracking
-        with get_progress() as progress:
-            task = progress.add_task("Processing images...", total=total_images)
-
-            # Set up progress callback for immediate updates
-            def update_progress(current_count: int) -> None:
-                progress.update(task, completed=current_count)
-
-            self.progress_callback = update_progress
-
-            # Add all image paths to queue at once for immediate processing
-            for image_path in image_paths:
-                self.read_queue.put(image_path)
-
-            # Monitor progress with fallback updates in case callback misses
-            last_count = 0
-            stall_count = 0
-            while self.progress_counter < total_images:
-                current_count = self.progress_counter
-
-                # Only update if callback hasn't updated recently
-                if current_count != last_count:
-                    progress.update(task, completed=current_count)
-
-                # Check for stalled processing
-                if current_count == last_count:
-                    stall_count += 1
-                    if stall_count > 200:  # 10 seconds at 0.05s intervals
-                        logger.warning("Processing seems stalled at %d/%d", current_count, total_images)
-                        stall_count = 0
-                else:
-                    stall_count = 0
-
-                last_count = current_count
-                time.sleep(0.05)  # More frequent updates for better responsiveness
-
-            # Signal threads to stop
-            for _ in range(self.num_reader):
-                self.read_queue.put(None)
-            for _ in range(len(self.processor_list)):
-                self.process_queue.put(None)
-            for _ in range(self.num_writer):
-                self.write_queue.put(None)
-
-            # Wait for all threads to complete
-            for thread in self.reader_threads + self.process_threads + self.writer_threads:
-                thread.join()
-
-            progress.update(task, completed=total_images)
-
-        logger.info("Successfully processed %d images", total_images)
+    def __call__(self) -> None:
+        self.run()
 
 
 def is_remote_url(path: str) -> bool:

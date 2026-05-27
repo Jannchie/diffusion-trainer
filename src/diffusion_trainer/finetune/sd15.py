@@ -126,14 +126,15 @@ class SD15Tuner(BaseTuner):
             return_dict=False,
         )[0]
 
-    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> tuple[torch.Tensor, torch.Tensor]:
-        return get_embeddings_sd15(
+    def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> dict[str, torch.Tensor]:
+        prompt_embeds, neg_prompt_embeds = get_embeddings_sd15(
             self.pipeline.tokenizer,
             self.pipeline.text_encoder,
             prompt=prompt,
             neg_prompt=neg_prompt,
             clip_skip=clip_skip,
         )
+        return {"prompt_embeds": prompt_embeds, "negative_prompt_embeds": neg_prompt_embeds}
 
     def get_prompt_embeds(self, prompts_str: list[str]) -> torch.Tensor:
         runtime_text_encoder = self.get_runtime_model(self.sd15_models.text_encoder)

@@ -14,21 +14,19 @@ item reach a terminal stage.
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from queue import Queue
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING
 
 from diffusion_trainer.shared import get_progress, logger
 
-TItem = TypeVar("TItem")
-TLoaded = TypeVar("TLoaded")
-TPayload = TypeVar("TPayload")
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
-class ThreadedPipelineProcessor(ABC, Generic[TItem, TLoaded, TPayload]):
+class ThreadedPipelineProcessor[TItem, TLoaded, TPayload](ABC):
     """Three-stage (read/process/write) threaded pipeline over a list of items."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         num_reader: int,
