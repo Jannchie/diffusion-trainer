@@ -175,5 +175,8 @@ class SD15Tuner(BaseTuner):
         target_index = max(target_index, -len(hidden_states))
 
         selected_hidden_state = hidden_states[target_index]
-        final_layer_norm = self.pipeline.text_encoder.text_model.final_layer_norm
+        # transformers 5.x flattened CLIPTextModel (no .text_model wrapper);
+        # fall back to the wrapped layout for transformers 4.x.
+        text_encoder = self.pipeline.text_encoder
+        final_layer_norm = getattr(text_encoder, "text_model", text_encoder).final_layer_norm
         return final_layer_norm(selected_hidden_state)
