@@ -825,6 +825,13 @@ class BaseTuner(ABC):
             scheduler_config_updates["prediction_type"] = prediction_type
             scheduler_config_updates["timestep_spacing"] = "trailing"
         if self.config.rescale_betas_zero_snr:
+            effective_prediction = prediction_type or self.pipeline.scheduler.config.get("prediction_type", "epsilon")
+            if effective_prediction != "v_prediction":
+                logger.warning(
+                    "rescale_betas_zero_snr with %s prediction is unsound: x0 cannot be recovered at SNR=0, "
+                    "and previews may intermittently render black (NaN at the terminal step). Use v_prediction or disable it.",
+                    effective_prediction,
+                )
             scheduler_config_updates["rescale_betas_zero_snr"] = True
             scheduler_config_updates.setdefault("timestep_spacing", "trailing")
         if scheduler_config_updates:

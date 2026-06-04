@@ -149,8 +149,11 @@ class BaseConfig:
         metadata={"help": "Use debiased estimation technique to reweight loss. Focuses learning on high SNR (low noise) regions."},
     )
     rescale_betas_zero_snr: bool = field(
-        default=True,
-        metadata={"help": "Enable zero terminal SNR (rescale_betas_zero_snr) to improve stability with v-prediction."},
+        default=False,
+        metadata={
+            "help": "Enable zero terminal SNR. Only sound with v-prediction: epsilon models cannot recover x0 at SNR=0 "
+            "and intermittently render black previews (NaN at the terminal step).",
+        },
     )
 
     unet_lr: float = field(default=1e-5, metadata={"help": "UNet learning rate."})
