@@ -68,11 +68,11 @@ noise_offset = 0.05
 input_perturbation = 0.05
 timestep_bias_strategy = "logit"
 
-save_every_n_epochs = 1
+save_every_n_epochs = 2      # 10 full saves (~2GB fp16 each); the 5-15 epoch window still has per-2-epoch granularity for picking the best
 save_every_n_steps = 0
 preview_every_n_epochs = 0
-preview_every_n_steps = 200
-checkpoint_every_n_steps = 500
+preview_every_n_steps = 500  # ~12 preview events; early v-pred conversion output is washed anyway
+checkpoint_every_n_steps = 1000  # resume state is ~9GB on a network mount; worst-case loss on crash ≈ 17 min
 
 # Baseline generic prompt.
 [[preview_sample_options]]
