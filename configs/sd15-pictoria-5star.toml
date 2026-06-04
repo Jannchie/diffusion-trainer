@@ -3,7 +3,8 @@
 #   1. git clone <this repo> && uv sync
 #   2. uv run hf auth login        # private repo needs a read token
 #   3. uv run python run_train.py --config configs/sd15-pictoria-5star.toml --model_family sd15
-# Streaming is single-GPU for now; all shards are prefetched into the local HF cache at startup.
+# Streaming is single-GPU for now; epoch 1 downloads shards lazily (overlapped
+# with training), later epochs hit the local HF cache.
 
 seed = 47
 

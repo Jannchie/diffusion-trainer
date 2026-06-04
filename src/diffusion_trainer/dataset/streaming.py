@@ -5,10 +5,12 @@ The streaming dataset consumes the distribution format produced by
 
 - ``metadata.parquet`` is loaded fully into memory (it is small) and acts as
   the per-sample metadata lookup, exactly like the map-style dataset.
-- ``from_hub`` prefetches every shard into the local HF cache in the MAIN
-  process and pins the resolved commit sha, so DataLoader workers only ever
-  perform local filesystem reads (downloads inside workers have proven
-  unreliable; interrupted prefetches resume for free on the next run).
+- Shards download lazily inside the (spawn-started) DataLoader workers, so
+  epoch 1 overlaps training with the transfer and later epochs hit the local
+  HF cache; interrupted downloads resume for free. ``from_hub`` pins the
+  resolved commit sha so cached shards resolve without any network call.
+  Call :meth:`StreamingDiffusionDataset.prefetch_shards` to warm the cache
+  up front instead (fail-fast, fully local epoch 1).
 - Shards are bucket-pure (one training resolution per shard), so batches are
   assembled from consecutive samples and stay resolution-consistent. Partial
   batches are flushed at shard boundaries, which keeps ``len()`` exact and
@@ -56,10 +58,10 @@ class LocalShardSource:
 
 @dataclass(frozen=True)
 class HfShardSource:
-    """Shards in a HuggingFace dataset repo, resolved through the local HF cache.
+    """Shards in a HuggingFace dataset repo, downloaded lazily and cached by the hub client.
 
-    ``from_hub`` warms the cache and pins ``revision`` to a commit sha, making
-    ``__call__`` a pure cache lookup (no network) inside DataLoader workers.
+    ``from_hub`` pins ``revision`` to a commit sha, so already-cached shards
+    resolve as a pure filesystem lookup (no network) inside DataLoader workers.
     """
 
     repo_id: str
@@ -131,18 +133,22 @@ class StreamingDiffusionDataset(IterableDataset):
     ) -> "StreamingDiffusionDataset":
         metadata_path = hf_hub_download(repo_id, METADATA_FILENAME, repo_type="dataset", revision=revision)
         rows = pq.read_table(metadata_path).to_pylist()
-        # Pin the resolved commit (snapshots/<sha>/metadata.parquet): with a
-        # commit hash + warm cache, hf_hub_download returns without any network
-        # call, which matters because forked DataLoader workers have proven
-        # unreliable at performing downloads (hangs after fork).
+        # Pin the resolved commit (snapshots/<sha>/metadata.parquet): every
+        # sample of the run comes from one revision, and cached shards resolve
+        # through the commit-hash fast path without any network round-trip.
         commit_sha = Path(metadata_path).parent.name
-        dataset = cls(rows, HfShardSource(repo_id, commit_sha), batch_size, seed=seed, shuffle_buffer_size=shuffle_buffer_size)
-        # Prefetch every shard in the main process so workers only ever read
-        # local files. Cached shards resolve instantly on later runs.
-        logger.info("Prefetching %d shards from %s to the local HF cache", len(dataset.shard_names), repo_id)
-        for shard_name in dataset.shard_names:
-            dataset.shard_source(shard_name)
-        return dataset
+        return cls(rows, HfShardSource(repo_id, commit_sha), batch_size, seed=seed, shuffle_buffer_size=shuffle_buffer_size)
+
+    def prefetch_shards(self) -> None:
+        """Resolve every shard up front (e.g. warm the HF cache before training).
+
+        Optional: workers download lazily by default, overlapping epoch 1 with
+        the transfer. Prefetching trades that overlap for a fully local epoch 1
+        (useful on flaky networks or to fail fast on missing shards).
+        """
+        logger.info("Prefetching %d shards", len(self.shard_names))
+        for shard_name in self.shard_names:
+            self.shard_source(shard_name)
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
