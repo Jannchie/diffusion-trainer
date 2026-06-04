@@ -16,8 +16,15 @@ dataset_path = "hf://Jannchie/pictoria-5star-768"
 # NOTE: single-file .safetensors paths are broken under transformers 5.x +
 # diffusers 0.37 (from_single_file expects the old CLIP layout) — avoid for now.
 model_path = "Jannchie/AOM3B2-orangemixs-fp16"
-model_name = "pictoria-0.1"
+model_name = "pictoria-v0.1"
 save_dir = "./out"
+
+# v-prediction + zero terminal SNR — the only sound pairing (epsilon cannot
+# recover x0 at SNR=0). This converts the epsilon base model during the
+# finetune: expect washed-out/odd previews for the first ~1-2k steps while
+# the parameterization migrates, then true blacks and better dynamic range.
+prediction_type = "v_prediction"
+rescale_betas_zero_snr = true
 
 # Must match the VAE used at latents-encoding time (see the dataset card):
 # raw latents are decoded/previewed with this VAE; scaling_factor applied at training time.
