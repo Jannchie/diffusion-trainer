@@ -111,6 +111,8 @@ def prepare_accelerator(
     gradient_accumulation_steps: int,
     dtype: torch.dtype = torch.float16,
     log_with: Literal["wandb", "tensorboard", "none"] = "none",
+    *,
+    torch_compile: bool = False,
 ) -> Accelerator:
     """Prepare training tools, such as logger, accelerator, deepspeed, etc."""
     logging_dir = Path("./.logs")
@@ -128,12 +130,11 @@ def prepare_accelerator(
         msg = f"Unsupported dtype: {dtype}"
         raise ValueError(msg)
 
-    # Enable torch.compile (PyTorch 2.0+)
+    # torch.compile is opt-in: bucketed multi-resolution batches force dynamic
+    # shapes, which inductor mis-compiles on some torch versions (e.g. CantSplit
+    # on 2.12); eager + xformers is the safe default.
     dynamo_backend = None
-    torch_compile = torch.__version__ >= "2.0.0"
-
     if torch_compile:
-        # Use the inductor backend, which is the fastest backend in PyTorch 2.0
         dynamo_backend = "inductor"
         logger.info("Torch compile enabled with %s backend", dynamo_backend)
 

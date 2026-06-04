@@ -31,8 +31,9 @@ caption_dropout = 0.0
 
 mode = "full-finetune" # or "lora" (+ lora_dim/lora_alpha) / "lokr"
 
-# Tuned for a single 80GB A100: VRAM is abundant, so trade memory for speed —
-# no gradient checkpointing, large batch, EMA copy held in VRAM.
+# Tuned for a single 80GB A100. Activations at 768-base run ~3GB/sample without
+# checkpointing, so batch 32 NEEDS gradient_checkpointing (measured OOM at 77GB
+# without it); the large batch keeps the GPU saturated despite the recompute.
 optimizer = "adamW8bit"
 unet_lr = 3e-5          # scaled up with effective batch 32 (was 2e-5 @ 16)
 text_encoder_lr = 1.5e-5 # half of unet_lr; improves tag binding on booru-style data
@@ -50,7 +51,7 @@ dataloader_num_workers = 4
 mixed_precision = "bf16"
 weight_dtype = "fp32"
 save_dtype = "fp16"
-gradient_checkpointing = false # 80GB: skip recompute, ~30-40% faster steps; re-enable if OOM
+gradient_checkpointing = true
 enable_flash_attention = true
 
 use_ema = true          # fp32 EMA copy (~3.4GB) — smoother full-finetune results, saved weights use it

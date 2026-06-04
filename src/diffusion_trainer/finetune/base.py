@@ -94,6 +94,7 @@ class BaseTuner(ABC):
             self.config.gradient_accumulation_steps,
             self.mixed_precision,
             self.config.log_with,
+            torch_compile=self.config.torch_compile,
         )
         self.device = self.accelerator.device
 

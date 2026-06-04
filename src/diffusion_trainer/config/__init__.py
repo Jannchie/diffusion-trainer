@@ -116,6 +116,10 @@ class BaseConfig:
     )
     flash_attention_unet: bool = field(default=True, metadata={"help": "Enable Flash Attention for UNet (recommended)."})
     gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing."})
+    torch_compile: bool = field(
+        default=False,
+        metadata={"help": "Compile models with torch.compile (inductor). Multi-resolution buckets can hit inductor dynamic-shape bugs on some torch versions."},
+    )
     timestep_bias_strategy: Literal["uniform", "logit", "lognormal"] = field(
         default="lognormal",
         metadata={"help": "Timestep bias strategy (default lognormal for EDM-style sigma sampling)."},
