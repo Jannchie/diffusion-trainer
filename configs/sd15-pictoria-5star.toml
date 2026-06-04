@@ -46,7 +46,10 @@ optimizer = "adamW8bit"
 unet_lr = 3e-5          # scaled up with effective batch 32 (was 2e-5 @ 16)
 text_encoder_lr = 1.5e-5 # half of unet_lr; improves tag binding on booru-style data
 optimizer_warmup_steps = 300
-optimizer_num_cycles = 4
+# Single-cycle cosine: restarts mainly help from-scratch training; for a
+# finetune with EMA they just inject high-LR turbulence, and a monotonic
+# tail makes per-epoch saves monotonically comparable.
+optimizer_num_cycles = 1
 
 # ~9.6k samples; batch 32 -> ~305 steps/epoch. Watch previews and stop early.
 n_epochs = 20
