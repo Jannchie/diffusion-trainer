@@ -365,11 +365,11 @@ wheels = [
 
 [[package]]
 name = "diffusion-prompt-embedder"
-version = "0.2.0"
+version = "0.2.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/74/b5/ddcf561c46b6e7f172c4cf9677d098e1e26466f6c56c66658c4335d2e974/diffusion_prompt_embedder-0.2.0.tar.gz", hash = "sha256:5f55ec3905b71bfd74762970f587067ca9b7ad6eddf2032e8a8d34d47f2c4bf8", size = 59994, upload-time = "2025-05-07T11:16:34.363Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/e4/440cb906a165d3b3b88db96648d706f41ef51823303ef71bbd519896ffee/diffusion_prompt_embedder-0.2.1.tar.gz", hash = "sha256:fced60334ecd25403fb2ff6005aaf9858835466e21cba8ca7f3e8531afbc1269", size = 65012, upload-time = "2026-06-04T15:40:49.782Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7d/2f/a3b142999bcb0b883b866dc9f61721c69b051ea93affa9650b6a4c9a5c45/diffusion_prompt_embedder-0.2.0-py3-none-any.whl", hash = "sha256:e81ba071432aa41149d36bd8aeff50960e9e99b3f567fc5c3d5569a5a4b7c866", size = 11217, upload-time = "2025-05-07T11:16:32.783Z" },
+    { url = "https://files.pythonhosted.org/packages/91/4b/ab8d41ead03591420e088bef3c35cd08e19a83eecc218033f1277158b2a1/diffusion_prompt_embedder-0.2.1-py3-none-any.whl", hash = "sha256:e149e378eadd5b12cac4cf9015929e02bb4b96577b2703a6d38fb59d56b07ee9", size = 13371, upload-time = "2026-06-04T15:40:48.774Z" },
 ]
 
 [[package]]
@@ -418,7 +418,7 @@ requires-dist = [
     { name = "bitsandbytes", specifier = ">=0.45.0" },
     { name = "deepspeed", specifier = ">=0.16.2" },
     { name = "diffusers", specifier = ">=0.31.0" },
-    { name = "diffusion-prompt-embedder", specifier = ">=0.2.0" },
+    { name = "diffusion-prompt-embedder", specifier = ">=0.2.1" },
     { name = "einops", specifier = ">=0.8.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=0.30.0" },
