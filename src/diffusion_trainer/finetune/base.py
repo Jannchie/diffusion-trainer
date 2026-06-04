@@ -25,6 +25,7 @@ from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, Diffusion
 from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
 from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
 from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
+from diffusion_trainer.dataset.streaming import StreamingDiffusionDataset
 from diffusion_trainer.finetune.utils import (
     TrainableModel,
     compute_sqrt_inv_snr_weights,
@@ -235,18 +236,34 @@ class BaseTuner(ABC):
         dataset = self.prepare_dataset(self.config)
         if self.accelerator.is_main_process:
             dataset.print_bucket_info()
-        sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
         num_workers = self.config.dataloader_num_workers
         with self.accelerator.main_process_first(): # type: ignore
-            data_loader = DataLoader(
-                dataset,
-                batch_sampler=sampler,
-                num_workers=num_workers,
-                collate_fn=dataset.collate_fn,
-                pin_memory=True,
-                persistent_workers=num_workers > 0,
-                prefetch_factor=2 if num_workers > 0 else None,
-            )
+            if isinstance(dataset, StreamingDiffusionDataset):
+                if self.accelerator.num_processes > 1:
+                    msg = "Streaming datasets (hf://) are not supported with multi-GPU training yet; import the dataset locally instead."
+                    raise NotImplementedError(msg)
+                # The dataset yields ready-made bucket-consistent batches, so automatic
+                # batching is disabled. Workers must be re-created each epoch (no
+                # persistent_workers) so set_epoch() reaches them via re-pickling.
+                data_loader = DataLoader(
+                    dataset,
+                    batch_size=None,
+                    num_workers=num_workers,
+                    collate_fn=DiffusionDataset.collate_fn,
+                    pin_memory=True,
+                    prefetch_factor=2 if num_workers > 0 else None,
+                )
+            else:
+                sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)
+                data_loader = DataLoader(
+                    dataset,
+                    batch_sampler=sampler,
+                    num_workers=num_workers,
+                    collate_fn=dataset.collate_fn,
+                    pin_memory=True,
+                    persistent_workers=num_workers > 0,
+                    prefetch_factor=2 if num_workers > 0 else None,
+                )
         return self.accelerator.prepare(data_loader)
 
     def train(self) -> None:
@@ -739,7 +756,14 @@ class BaseTuner(ABC):
             else:
                 logger.warning("cannot checkpointing!")
 
-    def prepare_dataset(self, config: BaseConfig) -> DiffusionDataset:
+    def prepare_dataset(self, config: BaseConfig) -> DiffusionDataset | StreamingDiffusionDataset:
+        if config.dataset_path and config.dataset_path.startswith("hf://"):
+            # Stream an exported dataset straight from a HuggingFace dataset repo
+            # ("hf://user/repo" or "hf://user/repo@revision"). Shards download
+            # lazily on first epoch and hit the local HF cache afterwards.
+            repo_id, _, revision = config.dataset_path.removeprefix("hf://").partition("@")
+            logger.info("Streaming dataset from HuggingFace Hub repo %s", repo_id)
+            return StreamingDiffusionDataset.from_hub(repo_id, config.batch_size, revision=revision or None, seed=config.seed)
         if config.dataset_path:
             dataset_root = Path(config.dataset_path)
         elif config.image_path:
@@ -1335,10 +1359,15 @@ class BaseTuner(ABC):
         return prompts
 
     def _set_data_loader_epoch(self, data_loader: torch.utils.data.DataLoader, epoch: int) -> None:
-        """Propagate epoch information to custom samplers used for deterministic resume."""
+        """Propagate epoch information to custom samplers/datasets used for deterministic resume."""
         batch_sampler = getattr(data_loader, "batch_sampler", None)
         if batch_sampler is not None and hasattr(batch_sampler, "set_epoch"):
             batch_sampler.set_epoch(epoch)
+
+        # Streaming datasets reshuffle per epoch through the dataset itself.
+        dataset = getattr(data_loader, "dataset", None)
+        if dataset is not None and hasattr(dataset, "set_epoch"):
+            dataset.set_epoch(epoch)
 
         inner_data_loader = getattr(data_loader, "base_dataloader", None)
         if inner_data_loader is not None and inner_data_loader is not data_loader:

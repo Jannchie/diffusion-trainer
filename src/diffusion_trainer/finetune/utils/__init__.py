@@ -12,7 +12,7 @@ from typing import Literal, NamedTuple, NotRequired, Protocol, Self, TypedDict, 
 
 import torch
 import wandb
-from accelerate import Accelerator, DeepSpeedPlugin, DistributedDataParallelKwargs, InitProcessGroupKwargs
+from accelerate import Accelerator, DataLoaderConfiguration, DeepSpeedPlugin, DistributedDataParallelKwargs, InitProcessGroupKwargs
 from accelerate.utils import PrecisionType, ProfileKwargs
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
@@ -154,6 +154,10 @@ def prepare_accelerator(
         kwargs_handlers=[*ddp_kwargs, profile_kwargs],
         dynamo_backend=dynamo_backend,
         deepspeed_plugin=deepspeed_plugin,
+        # Streaming datasets (IterableDataset) yield pre-assembled, possibly
+        # uneven batches; accelerate's dispatch mode cannot split those. This is
+        # already the default for map-style datasets, so nothing changes there.
+        dataloader_config=DataLoaderConfiguration(dispatch_batches=False),
     )
     logger.info("accelerator device: %s", accelerator.device)
     return accelerator
