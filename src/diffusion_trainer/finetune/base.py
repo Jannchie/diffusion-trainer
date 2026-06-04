@@ -1,6 +1,7 @@
 import logging
 import math
 import random
+import re
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Callable, Generator, Sequence
@@ -53,6 +54,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger("diffusion_trainer")
 
 ModelPredFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+_ATTENTION_SYNTAX_RE = re.compile(r"([\\()\[\]])")
+
+
+def escape_attention_syntax(text: str) -> str:
+    """Escape A1111 attention syntax so booru tags like ``ask_(askzy)`` tokenize literally.
+
+    The enhanced embedder (``diffusion_prompt_embedder``) parses ``(...)``/``[...]``
+    as attention weights, which would strip the parentheses from booru tags and
+    scale their embeddings by 1.1. Escaping keeps training text identical to the
+    plain-tokenizer path and to WebUI inference with ``\\(...\\)`` escapes.
+    """
+    return _ATTENTION_SYNTAX_RE.sub(r"\\\1", text)
 
 
 class BaseTuner(ABC):
@@ -1365,6 +1379,11 @@ class BaseTuner(ABC):
                 prompt = true_caption
             else:
                 prompt = ", ".join(true_tags)
+
+            # The enhanced embedder parses A1111 attention syntax; keep dataset
+            # text literal (the plain tokenizer path must NOT see backslashes).
+            if self.config.use_enhanced_embeddings:
+                prompt = escape_attention_syntax(prompt)
 
             prompts.append(prompt)
 

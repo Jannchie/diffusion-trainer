@@ -90,7 +90,9 @@ clip_skip = 2
 
 # 768x768, key f25e9c58
 [[preview_sample_options]]
-prompt = "1girl, arm_guards, ask_(askzy), black_bow, bow, breasts, cleavage, cleavage_cutout, closed_mouth, clothing_cutout, dark-skinned_female, dark_skin, floating_hair, hair_between_eyes, hair_bow, hair_ornament, hair_spread_out, high_collar, katana, large_breasts, long_hair, long_sleeves, looking_at_viewer, okita_souji_(fate), okita_souji_alter_(fate), parted_bangs, petals, red_eyes, simple_background, solo, sword, tassel, upper_body, very_long_hair, weapon, white_background, white_hair, wide_sleeves"
+# Parens escaped: previews go through the A1111-style parser, and unescaped
+# (...) would strip the parens and 1.1x-weight the tag (mismatching training).
+prompt = '1girl, arm_guards, ask_\(askzy\), black_bow, bow, breasts, cleavage, cleavage_cutout, closed_mouth, clothing_cutout, dark-skinned_female, dark_skin, floating_hair, hair_between_eyes, hair_bow, hair_ornament, hair_spread_out, high_collar, katana, large_breasts, long_hair, long_sleeves, looking_at_viewer, okita_souji_\(fate\), okita_souji_alter_\(fate\), parted_bangs, petals, red_eyes, simple_background, solo, sword, tassel, upper_body, very_long_hair, weapon, white_background, white_hair, wide_sleeves'
 negative_prompt = "worst quality, bad quality, blurry, low resolution"
 seed = 47
 steps = 25
@@ -110,7 +112,7 @@ clip_skip = 2
 
 # 576x1024 (tall portrait), key 06f39e51
 [[preview_sample_options]]
-prompt = "1girl, absurdres, adjusting_clothes, adjusting_gloves, animal_ears, ascot, belt, black_hair, black_thighhighs, breasts, brown_hair, cape, closed_mouth, cowboy_shot, epaulettes, gloves, green_jacket, green_skirt, hair_between_eyes, highres, horse_ears, horse_girl, horse_tail, large_breasts, long_hair, long_sleeves, looking_at_viewer, medium_breasts, multicolored_hair, purple_eyes, single_epaulette, skirt, solo, streaked_hair, symboli_rudolf_(umamusume), tail, thighhighs, thighs, white_gloves, white_hair, zettai_ryouiki"
+prompt = '1girl, absurdres, adjusting_clothes, adjusting_gloves, animal_ears, ascot, belt, black_hair, black_thighhighs, breasts, brown_hair, cape, closed_mouth, cowboy_shot, epaulettes, gloves, green_jacket, green_skirt, hair_between_eyes, highres, horse_ears, horse_girl, horse_tail, large_breasts, long_hair, long_sleeves, looking_at_viewer, medium_breasts, multicolored_hair, purple_eyes, single_epaulette, skirt, solo, streaked_hair, symboli_rudolf_\(umamusume\), tail, thighhighs, thighs, white_gloves, white_hair, zettai_ryouiki'
 negative_prompt = "worst quality, bad quality, blurry, low resolution"
 seed = 49
 steps = 25
@@ -120,7 +122,7 @@ clip_skip = 2
 
 # 1024x576 (landscape scene), key 6e92ad73
 [[preview_sample_options]]
-prompt = "1girl, architecture, black_hair, bowl, cat, chinese_clothes, chopsticks, cloak, closed_eyes, day, east_asian_architecture, eating, flower, food, hair_ornament, hanfu, highres, holding, jade_(ghostblade), outdoors, plate, short_hair, sitting, solo, table, teapot, wlop"
+prompt = '1girl, architecture, black_hair, bowl, cat, chinese_clothes, chopsticks, cloak, closed_eyes, day, east_asian_architecture, eating, flower, food, hair_ornament, hanfu, highres, holding, jade_\(ghostblade\), outdoors, plate, short_hair, sitting, solo, table, teapot, wlop'
 negative_prompt = "worst quality, bad quality, blurry, low resolution"
 seed = 50
 steps = 25
