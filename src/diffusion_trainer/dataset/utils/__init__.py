@@ -46,6 +46,13 @@ def write_latents_meta(latents_dir: Path | str, meta: dict[str, dict[str, list[i
     tmp_path.replace(path)
 
 
+def row_latents_meta(row: dict) -> dict[str, list[int]] | None:
+    """Extract the latent-metadata fields from a manifest row, or ``None`` when any is missing."""
+    if any(not row.get(field) for field in LATENTS_META_FIELDS):
+        return None
+    return {field: [int(v) for v in row[field]] for field in LATENTS_META_FIELDS}
+
+
 def get_meta_key_from_path(path: Path, base_path: Path) -> str:
     """Get the metadata key from a path."""
     return path.relative_to(base_path.resolve()).with_suffix("").as_posix()

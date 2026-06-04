@@ -12,6 +12,7 @@ models/
 
 datasets
 .dt_cache
+exports
 
 CLAUDE.md
 docs/.vitepress/cache
