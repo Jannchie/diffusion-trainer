@@ -210,4 +210,4 @@ class SDXLConfig(BaseConfig):
 @dataclass
 class SD15Config(BaseConfig):
     text_encoder_lr: float = field(default=1e-6, metadata={"help": "Text encoder learning rate."})
-    clip_skip: int = field(default=2, metadata={"help": "Number of final CLIP blocks to skip (0 = use last hidden state)."})
+    clip_skip: int = field(default=2, metadata={"help": "CLIP skip, A1111/WebUI semantics: 1 = last layer, 2 = penultimate layer (NAI convention)."})

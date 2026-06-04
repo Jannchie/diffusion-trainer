@@ -1353,6 +1353,15 @@ class BaseTuner(ABC):
             self.pipeline.save_pretrained(self.save_path / f"{filename}")
             self.pipeline.to(self.weight_dtype)
 
+    @property
+    def training_prompts_use_attention_parser(self) -> bool:
+        """Whether training prompts go through the A1111 attention-syntax parser.
+
+        Trainers whose encoding path parses ``(word:weight)`` syntax must
+        override this so dataset text gets escaped (booru parens stay literal).
+        """
+        return False
+
     def create_prompts_str(self, batch: DiffusionBatch) -> list[str]:
         prompts = []
         caption_dropout_ratio = self.config.caption_dropout
@@ -1386,7 +1395,7 @@ class BaseTuner(ABC):
 
             # The enhanced embedder parses A1111 attention syntax; keep dataset
             # text literal (the plain tokenizer path must NOT see backslashes).
-            if self.config.use_enhanced_embeddings:
+            if self.training_prompts_use_attention_parser:
                 prompt = escape_attention_syntax(prompt)
 
             prompts.append(prompt)

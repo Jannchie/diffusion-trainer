@@ -84,6 +84,10 @@ class SD15Tuner(BaseTuner):
         """Add lycoris model to the models list for SD15."""
         self.models.append(lycoris_model)
 
+    @property
+    def training_prompts_use_attention_parser(self) -> bool:
+        return self.config.use_enhanced_embeddings
+
     def process_batch(self, batch: DiffusionBatch) -> SD15Batch:
         prompts_str = self.create_prompts_str(batch)
         prompts_str = self.apply_condition_dropout_to_prompts(prompts_str)
@@ -127,12 +131,15 @@ class SD15Tuner(BaseTuner):
         )[0]
 
     def get_preview_prompt_embeds(self, prompt: str, neg_prompt: str, clip_skip: int = 2) -> dict[str, torch.Tensor]:
+        # pad_last_block=True pads short prompts to the full 77-token block with
+        # EOS, which (unmasked) is bit-identical to the training-path conditioning.
         prompt_embeds, neg_prompt_embeds = get_embeddings_sd15(
             self.pipeline.tokenizer,
             self.pipeline.text_encoder,
             prompt=prompt,
             neg_prompt=neg_prompt,
             clip_skip=clip_skip,
+            pad_last_block=True,
         )
         return {"prompt_embeds": prompt_embeds, "negative_prompt_embeds": neg_prompt_embeds}
 
@@ -149,7 +156,11 @@ class SD15Tuner(BaseTuner):
                     clip_skip=self.config.clip_skip,
                 )
 
-        # Use the native CLIPTextModel path when enhanced embeddings are disabled
+        # Use the native CLIPTextModel path when enhanced embeddings are disabled.
+        # No attention_mask: the SD1.x ecosystem (CompVis training, diffusers,
+        # sd-scripts, WebUI) encodes EOS-padded sequences unmasked, and masked
+        # padding embeddings diverge wildly (~20x norm) from what any inference
+        # stack will feed the cross-attention at sampling time.
         text_inputs = self.pipeline.tokenizer(
             prompts_str,
             padding="max_length",
@@ -158,22 +169,20 @@ class SD15Tuner(BaseTuner):
             return_tensors="pt",
         )
         text_input_ids = text_inputs["input_ids"].to(self.accelerator.device)
-        attention_mask = text_inputs["attention_mask"].to(self.accelerator.device)
         with text_encoder_context:
             prompt_embeds_output = runtime_text_encoder(
                 text_input_ids,
-                attention_mask=attention_mask,
                 output_hidden_states=True,
             )
         hidden_states = prompt_embeds_output.hidden_states
-        clip_skip = max(self.config.clip_skip, 0)
-        if clip_skip == 0 or hidden_states is None:
+        # A1111/WebUI semantics: clip_skip=1 -> last layer, clip_skip=2 ->
+        # penultimate layer (NAI convention). hidden_states[0] is the embedding
+        # output, so clamp the index to the deepest real layer.
+        clip_skip = max(self.config.clip_skip, 1)
+        if clip_skip == 1 or hidden_states is None:
             return prompt_embeds_output.last_hidden_state
 
-        target_index = -(clip_skip + 1)
-        # Ensure the index is within hidden_states range
-        target_index = max(target_index, -len(hidden_states))
-
+        target_index = max(-clip_skip, -(len(hidden_states) - 1))
         selected_hidden_state = hidden_states[target_index]
         # transformers 5.x flattened CLIPTextModel (no .text_model wrapper);
         # fall back to the wrapped layout for transformers 4.x.

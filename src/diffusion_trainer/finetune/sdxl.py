@@ -62,6 +62,8 @@ class SDXLTuner(BaseTuner):
         # Keep mode as it needs type conversion
         self.mode: Literal["full-finetune", "lora", "lokr", "loha"] = config.mode
         self.logger = get_logger("diffusion_trainer.finetune.sdxl")
+        if config.use_enhanced_embeddings:
+            self.logger.warning("use_enhanced_embeddings is ignored for SDXL: the training path tokenizes literally (no attention parser).")
 
     def _setup_models(self) -> None:
         """Setup SDXL-specific models."""
@@ -258,7 +260,12 @@ class SDXLTuner(BaseTuner):
             tokens, weights = get_prompts_tokens_with_weights(tokenizer, prompt)
             tokens, weights = tokens[:75], weights[:75]
             pad_len = 75 - len(tokens)
-            input_ids = [tokenizer.bos_token_id, *tokens, tokenizer.eos_token_id, *([tokenizer.eos_token_id] * pad_len)]
+            # Pad with the tokenizer's own pad token: CLIP-L pads with EOS but
+            # OpenCLIP bigG (tokenizer_2) pads with "!" (id 0) - the training
+            # path goes through tokenizer(..., padding="max_length"), and the
+            # pad embeddings differ, so previews must match it.
+            pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+            input_ids = [tokenizer.bos_token_id, *tokens, tokenizer.eos_token_id, *([pad_id] * pad_len)]
             token_weights = [1.0, *weights, 1.0, *([1.0] * pad_len)]
 
             ids = torch.tensor([input_ids], dtype=torch.long, device=device)
