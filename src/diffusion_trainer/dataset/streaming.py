@@ -5,9 +5,10 @@ The streaming dataset consumes the distribution format produced by
 
 - ``metadata.parquet`` is loaded fully into memory (it is small) and acts as
   the per-sample metadata lookup, exactly like the map-style dataset.
-- Shards are fetched lazily one at a time. The HuggingFace source downloads
-  through ``hf_hub_download``, so epoch 1 streams shard-by-shard while later
-  epochs hit the local HF cache; an interrupted download resumes for free.
+- ``from_hub`` prefetches every shard into the local HF cache in the MAIN
+  process and pins the resolved commit sha, so DataLoader workers only ever
+  perform local filesystem reads (downloads inside workers have proven
+  unreliable; interrupted prefetches resume for free on the next run).
 - Shards are bucket-pure (one training resolution per shard), so batches are
   assembled from consecutive samples and stay resolution-consistent. Partial
   batches are flushed at shard boundaries, which keeps ``len()`` exact and
@@ -55,7 +56,11 @@ class LocalShardSource:
 
 @dataclass(frozen=True)
 class HfShardSource:
-    """Shards in a HuggingFace dataset repo, downloaded lazily and cached by the hub client."""
+    """Shards in a HuggingFace dataset repo, resolved through the local HF cache.
+
+    ``from_hub`` warms the cache and pins ``revision`` to a commit sha, making
+    ``__call__`` a pure cache lookup (no network) inside DataLoader workers.
+    """
 
     repo_id: str
     revision: str | None = None

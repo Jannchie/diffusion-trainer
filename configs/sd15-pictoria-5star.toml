@@ -3,7 +3,7 @@
 #   1. git clone <this repo> && uv sync
 #   2. uv run hf auth login        # private repo needs a read token
 #   3. uv run python run_train.py --config configs/sd15-pictoria-5star.toml --model_family sd15
-# Streaming is single-GPU for now; epoch 1 downloads shards lazily, later epochs hit the HF cache.
+# Streaming is single-GPU for now; all shards are prefetched into the local HF cache at startup.
 
 seed = 47
 
@@ -15,7 +15,7 @@ dataset_path = "hf://Jannchie/pictoria-5star-768"
 # NOTE: single-file .safetensors paths are broken under transformers 5.x +
 # diffusers 0.37 (from_single_file expects the old CLIP layout) — avoid for now.
 model_path = "Jannchie/AOM3B2-orangemixs-fp16"
-model_name = "pictoria-5star-768"
+model_name = "pictoria-0.1"
 save_dir = "./out"
 
 # Must match the VAE used at latents-encoding time (see the dataset card):

@@ -17,10 +17,10 @@ A diffusion model trainer framework for Stable Diffusion models (SD 1.5 and SDXL
 - Lint/format: `uv run ruff check --fix .`
 - Type check: `pyright` (configured in pyproject.toml).
 - Tests: `uv run pytest tests/` (single test file: `uv run pytest tests/diffusion_trainer/finetune/utils/test_compute_all_snr.py`).
-- Data prep: `uv run python run_prepare.py --image_path <input> --target_path <output> --vae_path <vae_model>`
+- Data prep: `uv run python run_prepare.py --image_path <input> --target_path <output> --vae_path <vae_model>` (`--base_resolution 512/768/1024` selects the bucket table; default 1024 for SDXL).
 - Train SDXL: `uv run python run_train.py --config configs/sdxl.toml --model_family sdxl`
 - Train SD1.5: `uv run python run_train.py --config configs/sd15.toml --model_family sd15`
-- Load dataset from external source: `uv run python scripts/load_dataset_from_pictoria.py`; convert legacy sd-scripts metadata: `uv run python scripts/convert_ss_meta_to_trainer_meta.py`.
+- Load dataset from external source: `uv run python scripts/load_dataset_from_pictoria.py` (live API) or `uv run python scripts/load_dataset_from_pictoria_db.py` (SQLite snapshot; filters by star score / short edge, tags from the DB); convert legacy sd-scripts metadata: `uv run python scripts/convert_ss_meta_to_trainer_meta.py`.
 - Share datasets: `uv run python scripts/export_dataset.py --dataset-dir <prepared> --output-dir <export> --vae-name <vae>` packs latents into bucket-grouped tar shards (uploadable to a HF dataset repo as-is); `uv run python scripts/import_dataset.py --source <dir-or-hf-repo-id> --target-dir <dataset_path>` restores the local layout.
 
 ## Architecture Overview
@@ -40,7 +40,7 @@ A diffusion model trainer framework for Stable Diffusion models (SD 1.5 and SDXL
 - `DiffusionDataset` loads image-latent/text pairs; `BucketBasedBatchSampler` groups images by aspect-ratio bucket (resolutions from 640×1536 to 1536×640).
 - Long-running processors extend `ThreadedPipelineProcessor` (`dataset/processors/base.py`), a reader→processor→writer threaded pipeline base class.
 - Dataset sharing (`dataset/sharing.py`): `export_dataset()` packs latent NPZ files into bucket-grouped tar shards (`shards/<W>x<H>-<idx>.tar`, deterministic tar metadata) and adds `shard`/`npz_sha256` columns to `metadata.parquet`; `import_dataset()` restores the local prepared layout (npz tree, sidecar tags, `latents_meta.parquet`) with checksum verification and idempotent re-runs.
-- Streaming training (`dataset/streaming.py`): `StreamingDiffusionDataset` (IterableDataset) trains directly from exported shards — set `dataset_path = "hf://user/repo"` (optionally `@revision`) in the config. Shards download lazily via `hf_hub_download` (epoch 1 streams, later epochs hit the HF cache); bucket-pure shards yield resolution-consistent pre-assembled batches (`DataLoader` with `batch_size=None`, no `persistent_workers` so `set_epoch` reaches workers); `len()` is exact (partial batches flush per shard). Single-GPU only for now; requires `dispatch_batches=False` (set globally in `prepare_accelerator`).
+- Streaming training (`dataset/streaming.py`): `StreamingDiffusionDataset` (IterableDataset) trains directly from exported shards — set `dataset_path = "hf://user/repo"` (optionally `@revision`) in the config. `from_hub` prefetches all shards into the local HF cache in the main process and pins the commit sha, so DataLoader workers never touch the network; workers use `multiprocessing_context="spawn"` (forked workers deadlock on inherited locks from the thread-heavy parent) and no `persistent_workers` (so `set_epoch` reaches workers). Bucket-pure shards yield resolution-consistent pre-assembled batches (`DataLoader` with `batch_size=None`); `len()` is exact (partial batches flush per shard). Single-GPU only for now; requires `dispatch_batches=False` (set globally in `prepare_accelerator`).
 
 ### Configuration System
 
