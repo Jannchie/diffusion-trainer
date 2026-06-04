@@ -51,6 +51,12 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="VAE data type (auto-detects best option if not specified)",
     )
     parser.add_argument(
+        "--base_resolution",
+        type=int,
+        default=1024,
+        help="Bucket base resolution: 1024 for SDXL, 768/512 for SD 1.5",
+    )
+    parser.add_argument(
         "--num_reader",
         type=int,
         default=4,
@@ -177,6 +183,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 vae_dtype=vae_dtype,
                 num_reader=args.num_reader,
                 num_writer=args.num_writer,
+                base_resolution=args.base_resolution,
             )
             latent_generator()
             logger.info("✅ Latents generation completed")

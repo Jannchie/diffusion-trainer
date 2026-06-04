@@ -60,28 +60,63 @@ def latents_to_numpy(latents: torch.Tensor) -> np.ndarray:
     return latents.cpu().numpy()
 
 
+# Bucket tables keyed by base resolution. Every side is a multiple of 64 (the
+# UNet needs latent dims divisible by 8) and every area stays within base².
+PREDEFINED_RESOS: dict[int, tuple[tuple[int, int], ...]] = {
+    512: (
+        (320, 768),
+        (384, 640),
+        (448, 576),
+        (512, 512),
+        (576, 448),
+        (640, 384),
+        (768, 320),
+    ),
+    768: (
+        (512, 1152),
+        (576, 1024),
+        (640, 896),
+        (704, 832),
+        (768, 768),
+        (832, 704),
+        (896, 640),
+        (1024, 576),
+        (1152, 512),
+    ),
+    1024: (
+        (640, 1536),
+        (768, 1344),
+        (832, 1216),
+        (896, 1152),
+        (1024, 1024),
+        (1152, 896),
+        (1216, 832),
+        (1344, 768),
+        (1536, 640),
+    ),
+}
+
+
 class SimpleLatentsProcessor:
     """Simple latents processor using SHA256-based storage."""
 
-    def __init__(self, model_name_or_path: str, dtype: torch.dtype | None = None, device: str | torch.device = "cuda") -> None:
+    def __init__(
+        self,
+        model_name_or_path: str,
+        dtype: torch.dtype | None = None,
+        device: str | torch.device = "cuda",
+        base_resolution: int = 1024,
+    ) -> None:
         """Initialize the processor."""
         self.model_name_or_path = resolve_vae_path(model_name_or_path)
         self.device = device
         self.dtype = dtype
         self.vae = self.load_vae_model()
 
-        # Predefined resolutions for bucketing (same as original)
-        self.predefined_resos = np.array([
-            (640, 1536),
-            (768, 1344),
-            (832, 1216),
-            (896, 1152),
-            (1024, 1024),
-            (1152, 896),
-            (1216, 832),
-            (1344, 768),
-            (1536, 640),
-        ])
+        if base_resolution not in PREDEFINED_RESOS:
+            msg = f"Unsupported base_resolution {base_resolution}; choose one of {sorted(PREDEFINED_RESOS)}"
+            raise ValueError(msg)
+        self.predefined_resos = np.array(PREDEFINED_RESOS[base_resolution])
         self.predefined_ars = np.array([w / h for w, h in self.predefined_resos])
 
     def load_vae_model(self) -> AutoencoderKL:
@@ -201,6 +236,7 @@ class LatentsGenerateProcessor(ThreadedPipelineProcessor[Path, tuple[Path, np.nd
         num_reader: int = 4,
         num_writer: int = 4,
         skip_existing: bool = True,
+        base_resolution: int = 1024,
     ) -> None:
         """Initialize the processor (compatible with original interface)."""
         self.ds_path = Path(img_path).absolute()
@@ -222,6 +258,7 @@ class LatentsGenerateProcessor(ThreadedPipelineProcessor[Path, tuple[Path, np.nd
                 model_name_or_path=vae_path,
                 dtype=vae_dtype,
                 device=f"cuda:{i}" if torch.cuda.is_available() else "cpu",
+                base_resolution=base_resolution,
             )
             for i in range(gpu_count)
         ]
@@ -372,6 +409,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_reader", type=int, default=4, help="Number of reader threads")
     parser.add_argument("--num_writer", type=int, default=4, help="Number of writer threads")
     parser.add_argument("--vae_dtype", type=str, choices=["fp16", "fp32", "bf16"], default=None, help="VAE dtype")
+    parser.add_argument("--base_resolution", type=int, default=1024, help="Bucket base resolution: 1024 for SDXL, 768/512 for SD 1.5")
 
     args = parser.parse_args()
 
@@ -389,6 +427,7 @@ if __name__ == "__main__":
         vae_dtype=vae_dtype,
         num_reader=args.num_reader,
         num_writer=args.num_writer,
+        base_resolution=args.base_resolution,
     )
 
     start_time = time.time()
