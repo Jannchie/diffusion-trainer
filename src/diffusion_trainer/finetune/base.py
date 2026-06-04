@@ -246,6 +246,9 @@ class BaseTuner(ABC):
                 # The dataset yields ready-made bucket-consistent batches, so automatic
                 # batching is disabled. Workers must be re-created each epoch (no
                 # persistent_workers) so set_epoch() reaches them via re-pickling.
+                # spawn (not fork): the parent is thread-heavy (CUDA, wandb, rich)
+                # by the time workers start, and forked workers have been observed
+                # deadlocking on inherited locks before yielding their first batch.
                 data_loader = DataLoader(
                     dataset,
                     batch_size=None,
@@ -253,6 +256,7 @@ class BaseTuner(ABC):
                     collate_fn=DiffusionDataset.collate_fn,
                     pin_memory=True,
                     prefetch_factor=2 if num_workers > 0 else None,
+                    multiprocessing_context="spawn" if num_workers > 0 else None,
                 )
             else:
                 sampler = BucketBasedBatchSampler(dataset, self.config.batch_size)

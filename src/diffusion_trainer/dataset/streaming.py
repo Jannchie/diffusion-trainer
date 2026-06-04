@@ -106,7 +106,7 @@ class StreamingDiffusionDataset(IterableDataset):
             msg = "No usable rows in the manifest; was the dataset exported with scripts/export_dataset.py?"
             raise ValueError(msg)
         self._group_counts = dict(group_counts)
-        self._shard_names = sorted({shard for shard, _ in self._group_counts})
+        self.shard_names = sorted({shard for shard, _ in self._group_counts})
 
     @classmethod
     def from_export_dir(cls, export_dir: str | PathLike, batch_size: int, *, seed: int = 47, shuffle_buffer_size: int = 256) -> "StreamingDiffusionDataset":
@@ -126,7 +126,18 @@ class StreamingDiffusionDataset(IterableDataset):
     ) -> "StreamingDiffusionDataset":
         metadata_path = hf_hub_download(repo_id, METADATA_FILENAME, repo_type="dataset", revision=revision)
         rows = pq.read_table(metadata_path).to_pylist()
-        return cls(rows, HfShardSource(repo_id, revision), batch_size, seed=seed, shuffle_buffer_size=shuffle_buffer_size)
+        # Pin the resolved commit (snapshots/<sha>/metadata.parquet): with a
+        # commit hash + warm cache, hf_hub_download returns without any network
+        # call, which matters because forked DataLoader workers have proven
+        # unreliable at performing downloads (hangs after fork).
+        commit_sha = Path(metadata_path).parent.name
+        dataset = cls(rows, HfShardSource(repo_id, commit_sha), batch_size, seed=seed, shuffle_buffer_size=shuffle_buffer_size)
+        # Prefetch every shard in the main process so workers only ever read
+        # local files. Cached shards resolve instantly on later runs.
+        logger.info("Prefetching %d shards from %s to the local HF cache", len(dataset.shard_names), repo_id)
+        for shard_name in dataset.shard_names:
+            dataset.shard_source(shard_name)
+        return dataset
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
@@ -156,9 +167,9 @@ class StreamingDiffusionDataset(IterableDataset):
     def _epoch_shard_order(self) -> list[str]:
         """Per-epoch shard permutation; identical in every worker so slices stay disjoint."""
         if not self.shuffle:
-            return self._shard_names
+            return self.shard_names
         rng = np.random.default_rng((self.seed, self.epoch))
-        return [self._shard_names[i] for i in rng.permutation(len(self._shard_names))]
+        return [self.shard_names[i] for i in rng.permutation(len(self.shard_names))]
 
     def _iter_shard_batches(self, shard_name: str, rng: np.random.Generator) -> Iterator[list[dict]]:
         try:
