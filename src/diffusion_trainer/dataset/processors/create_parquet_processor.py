@@ -10,7 +10,7 @@ import pyarrow.parquet as pq
 from rich import get_console
 from rich.console import Console
 
-from diffusion_trainer.dataset.utils import sharded_path
+from diffusion_trainer.dataset.utils import LATENTS_META_FIELDS, load_latents_meta, sharded_path
 from diffusion_trainer.shared import get_progress
 
 console = get_console()
@@ -66,11 +66,23 @@ class CreateParquetProcessor:
                 return tag_path
         return None
 
+    def _resolve_latent_meta(self, npz_path: Path, latents_meta: dict[str, dict[str, list[int]]]) -> dict[str, list[int]] | None:
+        """Resolve metadata for one NPZ: latents_meta first, then legacy embedded fields."""
+        meta = latents_meta.get(npz_path.stem)
+        if meta is not None:
+            return meta
+        # Legacy NPZ files embed their metadata alongside the latents.
+        with np.load(npz_path) as npz:
+            if all(field in npz for field in LATENTS_META_FIELDS):
+                return {field: npz[field].tolist() for field in LATENTS_META_FIELDS}
+        return None
+
     def process(self, max_workers: int) -> None:
         """Process all NPZ files and create parquet metadata."""
         items = defaultdict(list)
         progress = get_progress()
         npz_path_list = self._find_all_npz_files()
+        latents_meta = load_latents_meta(self.target_dir / "latents")
 
         self.console.log(f"Found {len(npz_path_list)} NPZ files in {self.target_dir}")
 
@@ -83,7 +95,10 @@ class CreateParquetProcessor:
         def process_metadata_files(npz_path: Path) -> None:
             try:
                 sha256_hash = npz_path.stem
-                npz = np.load(npz_path)
+                meta = self._resolve_latent_meta(npz_path, latents_meta)
+                if meta is None:
+                    self.console.log(f"No metadata found for {npz_path} (re-run latents generation), skipping")
+                    return
 
                 # Find corresponding tag file
                 tag_file = self._find_corresponding_txt_file(npz_path)
@@ -98,14 +113,15 @@ class CreateParquetProcessor:
                 with self.lock:
                     items["key"].append(sha256_hash)  # Use SHA256 hash as key
                     items["tags"].append(tags)
-                    items["train_resolution"].append(npz.get("train_resolution").tolist())
-                    items["original_size"].append(npz.get("original_size").tolist())
-                    items["crop_ltrb"].append(npz.get("crop_ltrb").tolist())
+                    items["train_resolution"].append(meta["train_resolution"])
+                    items["original_size"].append(meta["original_size"])
+                    items["crop_ltrb"].append(meta["crop_ltrb"])
 
             except Exception as e:
                 self.console.log(f"Error processing {npz_path}: {e}")
 
-            progress.update(task, advance=1)
+            finally:
+                progress.update(task, advance=1)
 
         with progress, ThreadPoolExecutor(max_workers=max_workers) as executor:
             for npz_path in npz_path_list:

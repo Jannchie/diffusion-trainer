@@ -6,6 +6,45 @@ from collections.abc import Generator
 from functools import cache
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+LATENTS_META_FILENAME = "latents_meta.parquet"
+
+LATENTS_META_FIELDS = ("train_resolution", "original_size", "crop_ltrb")
+
+
+def latents_meta_path(latents_dir: Path | str) -> Path:
+    """Resolve the path of the latents metadata parquet inside a latents directory."""
+    return Path(latents_dir) / LATENTS_META_FILENAME
+
+
+def load_latents_meta(latents_dir: Path | str) -> dict[str, dict[str, list[int]]]:
+    """Load per-image latent metadata (keyed by SHA256) from a latents directory.
+
+    Returns an empty dict when the metadata parquet does not exist yet, so
+    callers can treat a fresh directory and a legacy one uniformly.
+    """
+    path = latents_meta_path(latents_dir)
+    if not path.exists():
+        return {}
+    table = pq.read_table(path)
+    return {row["key"]: {field: row[field] for field in LATENTS_META_FIELDS} for row in table.to_pylist()}
+
+
+def write_latents_meta(latents_dir: Path | str, meta: dict[str, dict[str, list[int]]]) -> None:
+    """Atomically persist per-image latent metadata to a latents directory."""
+    path = latents_meta_path(latents_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keys = sorted(meta)
+    table = pa.table({
+        "key": keys,
+        **{field: [meta[key][field] for key in keys] for field in LATENTS_META_FIELDS},
+    })
+    tmp_path = path.with_suffix(".parquet.tmp")
+    pq.write_table(table, tmp_path)
+    tmp_path.replace(path)
+
 
 def get_meta_key_from_path(path: Path, base_path: Path) -> str:
     """Get the metadata key from a path."""

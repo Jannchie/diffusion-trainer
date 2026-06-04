@@ -6,11 +6,15 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from pyarrow import parquet as pq
 from torch.utils.data import Dataset, Sampler
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from diffusion_trainer.dataset.utils import sharded_path
 from diffusion_trainer.shared import get_progress
@@ -35,6 +39,11 @@ class DiffusionTrainingItem:
     npz_path: str
     caption: str | None
     tags: list[str] | None
+    # Metadata from the parquet manifest (single source of truth). None falls
+    # back to legacy NPZ files that embed these fields next to the latents.
+    crop_ltrb: list[int] | None = None
+    original_size: list[int] | None = None
+    train_resolution: list[int] | None = None
 
 
 @dataclass
@@ -110,6 +119,14 @@ class DiffusionDataset(Dataset):
         return DiffusionDataset(buckets)
 
     @staticmethod
+    def _row_int_list(row: "pd.Series", column: str) -> list[int] | None:
+        """Read an int-list column from a parquet row, tolerating missing columns."""
+        value = row.get(column)
+        if value is None:
+            return None
+        return [int(v) for v in (value.tolist() if hasattr(value, "tolist") else value)]
+
+    @staticmethod
     def from_parquet(parquet_path: str | PathLike) -> "DiffusionDataset":
         parquet_path = Path(parquet_path)
         logger.info('Reading dataset from "%s"', parquet_path)
@@ -120,7 +137,10 @@ class DiffusionDataset(Dataset):
             key = row["key"]
             # Use SHA256-based directory structure: ab/cd/abcd...npz
             npz_path = sharded_path(parquet_path.parent / "latents", key, "npz")
-            train_resolution = tuple(row["train_resolution"].tolist())
+            train_resolution = DiffusionDataset._row_int_list(row, "train_resolution")
+            if train_resolution is None:
+                logger.warning("Skipping %s: missing train_resolution", key)
+                continue
             tags_value = row.get("tags", [])
             if isinstance(tags_value, list):
                 tags_list = tags_value
@@ -128,11 +148,14 @@ class DiffusionDataset(Dataset):
                 tags_list = list(tags_value.tolist())
             else:
                 tags_list = [str(tags_value)] if tags_value is not None else []
-            buckets[tuple(train_resolution)].append(
+            buckets[(train_resolution[0], train_resolution[1])].append(
                 DiffusionTrainingItem(
                     npz_path=npz_path.as_posix(),
                     caption=row.get("caption", ""),  # Use empty string if caption doesn't exist
                     tags=tags_list,
+                    crop_ltrb=DiffusionDataset._row_int_list(row, "crop_ltrb"),
+                    original_size=DiffusionDataset._row_int_list(row, "original_size"),
+                    train_resolution=train_resolution,
                 ),
             )
         return DiffusionDataset(buckets)
@@ -153,16 +176,28 @@ class DiffusionDataset(Dataset):
         # of them must raise here (not return None) to trigger the bucket fallback
         # in __getitem__ instead of crashing later in collate. The context manager
         # also closes the underlying zip handle (zip-npz arrays are in-memory copies).
+        # Metadata comes from the parquet manifest when present (latent-only NPZ);
+        # legacy NPZ files that embed the fields are the fallback.
         with np.load(item.npz_path) as npz:
-            missing = [key for key in ("latents", "crop_ltrb", "original_size", "train_resolution") if key not in npz]
+            if "latents" not in npz:
+                msg = f"npz {item.npz_path} is missing ['latents']"
+                raise KeyError(msg)
+            meta: dict[str, np.ndarray] = {}
+            missing = []
+            for key in ("crop_ltrb", "original_size", "train_resolution"):
+                value = getattr(item, key)
+                if value is not None:
+                    meta[key] = np.asarray(value, dtype=np.int64)
+                elif key in npz:
+                    meta[key] = npz[key]
+                else:
+                    missing.append(key)
             if missing:
-                msg = f"npz {item.npz_path} is missing {missing}"
+                msg = f"npz {item.npz_path} is missing {missing} (neither in manifest nor embedded)"
                 raise KeyError(msg)
             return {
                 "img_latents": npz["latents"],
-                "crop_ltrb": npz["crop_ltrb"],
-                "original_size": npz["original_size"],
-                "train_resolution": npz["train_resolution"],
+                **meta,
                 "caption": item.caption,
                 "tags": item.tags,
             }

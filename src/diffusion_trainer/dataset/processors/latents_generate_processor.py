@@ -1,6 +1,7 @@
 """Prepare latent vectors for the dataset using SHA256-based directory structure."""
 
 import argparse
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,14 @@ from PIL import Image
 from torchvision import transforms
 
 from diffusion_trainer.dataset.processors.base import ThreadedPipelineProcessor
-from diffusion_trainer.dataset.utils import calculate_file_sha256, retrieve_image_paths, sharded_path
+from diffusion_trainer.dataset.utils import (
+    LATENTS_META_FIELDS,
+    calculate_file_sha256,
+    load_latents_meta,
+    retrieve_image_paths,
+    sharded_path,
+    write_latents_meta,
+)
 from diffusion_trainer.shared import logger
 from diffusion_trainer.utils.dtype import get_default_dtype, str_to_dtype
 
@@ -31,6 +39,25 @@ class WritePayload:
     crop_ltrb: tuple[int, int, int, int]
     original_size: tuple[int, int]
     resolution: tuple[int, int]
+
+
+def meta_row(resolution: tuple[int, int], original_size: tuple[int, int], crop_ltrb: tuple[int, int, int, int]) -> dict[str, list[int]]:
+    """Build a latents-metadata row (plain ints for parquet; crop values arrive as np.int64)."""
+    return {
+        "train_resolution": [int(v) for v in resolution],
+        "original_size": [int(v) for v in original_size],
+        "crop_ltrb": [int(v) for v in crop_ltrb],
+    }
+
+
+def latents_to_numpy(latents: torch.Tensor) -> np.ndarray:
+    """Convert a latents tensor to a NumPy-compatible array.
+
+    NumPy has no bfloat16, so bf16 is widened to fp32; fp16 stays as-is.
+    """
+    if latents.dtype == torch.bfloat16:
+        latents = latents.float()
+    return latents.cpu().numpy()
 
 
 class SimpleLatentsProcessor:
@@ -131,45 +158,34 @@ class SimpleLatentsProcessor:
         return vae_out.latent_dist.sample()[0]
 
     @torch.no_grad()
-    def process_by_pil(self, image: Image.Image, save_npz_path: Path) -> None:
-        """Process a PIL image and save encoded latents to NPZ file."""
-        # Convert PIL image to numpy array
-        image_np = np.array(image.convert("RGB"))
+    def encode_np(self, image_np: np.ndarray) -> tuple[torch.Tensor, tuple[int, int, int, int], tuple[int, int], tuple[int, int]]:
+        """Bucket, resize and encode an RGB image array.
 
-        # Get original image size
+        Returns ``(latents, crop_ltrb, original_size, train_resolution)``.
+        """
         original_size = image_np.shape[1], image_np.shape[0]
-
-        # Select resolution and resize image
         reso, resized_size = self.select_reso(*original_size)
         image_np = self.resize_and_trim_image(image_np, reso, resized_size)
-
-        # Calculate crop parameters
         crop_ltrb = self.get_crop_ltrb(np.array(reso), original_size)
-
-        # Prepare tensor and encode
         image_tensor = self.prepare_image_tensor(image_np)
         latents = self.encode_image(image_tensor)
+        return latents, crop_ltrb, original_size, (int(reso[0]), int(reso[1]))
 
-        # Convert tensor to compatible dtype before converting to numpy
-        latents_tensor = latents
-        if latents_tensor.dtype == torch.bfloat16:
-            # Convert bfloat16 to float32 (NumPy doesn't support bfloat16)
-            latents_tensor = latents_tensor.float()
-        # fp16 (float16) is supported by NumPy, so we keep it as-is
+    @torch.no_grad()
+    def process_by_pil(self, image: Image.Image, save_npz_path: Path) -> dict[str, list[int]]:
+        """Encode a PIL image to a latent-only NPZ file and return its metadata row.
 
-        latents_np = latents_tensor.cpu().numpy()
+        The returned row (``train_resolution`` / ``original_size`` / ``crop_ltrb``)
+        must be persisted by the caller (e.g. via ``write_latents_meta``); the NPZ
+        itself carries only the latents.
+        """
+        image_np = np.array(image.convert("RGB"))
+        latents, crop_ltrb, original_size, reso = self.encode_np(image_np)
 
-        # Prepare NPZ data
-        npz_data = {
-            "latents": latents_np,
-            "crop_ltrb": crop_ltrb,
-            "original_size": original_size,
-            "train_resolution": reso,
-        }
-
-        # Create directory and save NPZ file
         save_npz_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(save_npz_path, **npz_data)
+        np.savez_compressed(save_npz_path, latents=latents_to_numpy(latents))
+
+        return meta_row(reso, original_size, crop_ltrb)
 
 
 class LatentsGenerateProcessor(ThreadedPipelineProcessor[Path, tuple[Path, np.ndarray], WritePayload]):
@@ -192,6 +208,12 @@ class LatentsGenerateProcessor(ThreadedPipelineProcessor[Path, tuple[Path, np.nd
         self.target_path = self.meta_path  # SHA256-based output
         self.skip_existing = skip_existing
         self.target_path.mkdir(parents=True, exist_ok=True)
+
+        # Single source of truth for per-image metadata (crop/size/resolution):
+        # NPZ files carry only the latents, rows accumulate here and are flushed
+        # to latents_meta.parquet when the run finishes.
+        self.latents_meta = load_latents_meta(self.target_path)
+        self.meta_lock = threading.Lock()
 
         # One VAE processor per GPU; each process thread gets its own (see make_process_worker).
         gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
@@ -234,13 +256,23 @@ class LatentsGenerateProcessor(ThreadedPipelineProcessor[Path, tuple[Path, np.nd
     def read_item(self, item: Path) -> tuple[Path, np.ndarray] | None:
         npz_save_path = self.get_npz_save_path(item)
         if self.skip_existing and npz_save_path.exists():
+            key = npz_save_path.stem
             try:
                 # A valid cache must carry the latents themselves, not just
                 # metadata; a half-written file would otherwise be skipped and
                 # only blow up later during training.
                 with np.load(npz_save_path) as npz:
-                    if "train_resolution" in npz and "latents" in npz:
-                        return None  # valid existing latents
+                    if "latents" in npz:
+                        if key in self.latents_meta:
+                            return None  # valid existing latents with known metadata
+                        if all(field in npz for field in LATENTS_META_FIELDS):
+                            # Legacy NPZ that still embeds its metadata: harvest it
+                            # into latents_meta instead of re-encoding the image.
+                            with self.meta_lock:
+                                self.latents_meta[key] = {field: [int(v) for v in npz[field]] for field in LATENTS_META_FIELDS}
+                            return None
+                        # Latent-only NPZ whose metadata row was lost (e.g. crash
+                        # before flush): fall through and re-encode.
             except Exception:
                 logger.warning("Corrupted file %s, reprocessing...", npz_save_path)
         image_np = SimpleLatentsProcessor.process(item)
@@ -249,12 +281,7 @@ class LatentsGenerateProcessor(ThreadedPipelineProcessor[Path, tuple[Path, np.nd
     def process_item(self, worker: object, loaded: tuple[Path, np.ndarray]) -> WritePayload:
         image_path, image_np = loaded
         processor = cast("SimpleLatentsProcessor", worker)
-        original_size = image_np.shape[1], image_np.shape[0]
-        reso, resized_size = processor.select_reso(*original_size)
-        image_np = processor.resize_and_trim_image(image_np, reso, resized_size)
-        crop_ltrb = processor.get_crop_ltrb(np.array(reso), original_size)
-        image_tensor = processor.prepare_image_tensor(image_np)
-        latents = processor.encode_image(image_tensor)
+        latents, crop_ltrb, original_size, reso = processor.encode_np(image_np)
         return WritePayload(
             save_path=self.get_npz_save_path(image_path),
             latents=latents,
@@ -264,21 +291,18 @@ class LatentsGenerateProcessor(ThreadedPipelineProcessor[Path, tuple[Path, np.nd
         )
 
     def write_item(self, payload: WritePayload) -> None:
-        latents_tensor = payload.latents
-        if latents_tensor.dtype == torch.bfloat16:
-            # NumPy has no bfloat16; fp16 is supported so it stays as-is.
-            latents_tensor = latents_tensor.float()
-        new_npz = {
-            "latents": latents_tensor.cpu().numpy(),
-            "crop_ltrb": payload.crop_ltrb,
-            "original_size": payload.original_size,
-            "train_resolution": payload.resolution,
-        }
         payload.save_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(payload.save_path, **new_npz)
+        np.savez_compressed(payload.save_path, latents=latents_to_numpy(payload.latents))
+        with self.meta_lock:
+            self.latents_meta[payload.save_path.stem] = meta_row(payload.resolution, payload.original_size, payload.crop_ltrb)
 
     def __call__(self) -> None:
-        self.run()
+        try:
+            self.run()
+        finally:
+            # Flush even on failure so already-encoded items keep their metadata.
+            if self.latents_meta:
+                write_latents_meta(self.target_path, self.latents_meta)
 
 
 def is_remote_url(path: str) -> bool:
