@@ -84,6 +84,7 @@ steps = 25
 width = 768
 height = 768
 clip_skip = 2
+guidance_rescale = 0.7 # required for ZTSNR + v-pred; plain CFG skews exposure
 
 # The following prompts are real tag sets sampled from the dataset (one per
 # bucket, width/height = the sample's training bucket) so previews track the
@@ -102,6 +103,7 @@ steps = 25
 width = 768
 height = 768
 clip_skip = 2
+guidance_rescale = 0.7 # required for ZTSNR + v-pred; plain CFG skews exposure
 
 # 640x896 (portrait), key f9d68dd1
 [[preview_sample_options]]
@@ -112,6 +114,7 @@ steps = 25
 width = 640
 height = 896
 clip_skip = 2
+guidance_rescale = 0.7 # required for ZTSNR + v-pred; plain CFG skews exposure
 
 # 576x1024 (tall portrait), key 06f39e51
 [[preview_sample_options]]
@@ -122,6 +125,7 @@ steps = 25
 width = 576
 height = 1024
 clip_skip = 2
+guidance_rescale = 0.7 # required for ZTSNR + v-pred; plain CFG skews exposure
 
 # 1024x576 (landscape scene), key 6e92ad73
 [[preview_sample_options]]
@@ -132,6 +136,7 @@ steps = 25
 width = 1024
 height = 576
 clip_skip = 2
+guidance_rescale = 0.7 # required for ZTSNR + v-pred; plain CFG skews exposure
 
 # 512x1152 (extreme tall), key ec994643
 [[preview_sample_options]]
@@ -142,3 +147,4 @@ steps = 25
 width = 512
 height = 1152
 clip_skip = 2
+guidance_rescale = 0.7 # required for ZTSNR + v-pred; plain CFG skews exposure

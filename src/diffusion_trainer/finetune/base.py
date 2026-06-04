@@ -1121,6 +1121,8 @@ class BaseTuner(ABC):
                             callback_on_step_end=callback_on_step_end,  # type: ignore
                             width=sample_option.width,
                             height=sample_option.height,
+                            guidance_scale=sample_option.guidance_scale,
+                            guidance_rescale=sample_option.guidance_rescale,
                         )
                     except NotImplementedError:
                         logger.info("Using prompts directly for preview generation")
@@ -1132,6 +1134,8 @@ class BaseTuner(ABC):
                             callback_on_step_end=callback_on_step_end,  # type: ignore
                             width=sample_option.width,
                             height=sample_option.height,
+                            guidance_scale=sample_option.guidance_scale,
+                            guidance_rescale=sample_option.guidance_rescale,
                         )
 
                     # Check if the pipeline output contains NaN values and handle them

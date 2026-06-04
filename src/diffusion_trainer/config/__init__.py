@@ -13,6 +13,11 @@ class SampleOptions:
     width: int | None = field(default=None)
     height: int | None = field(default=None)
     clip_skip: int = field(default=2)
+    guidance_scale: float = field(default=7.5)
+    # ZTSNR + v-prediction models need CFG rescale (~0.7) to avoid washed-out
+    # or overexposed samples (Lin et al., "Common Diffusion Noise Schedules
+    # and Sample Steps are Flawed"). Keep 0.0 for epsilon models.
+    guidance_rescale: float = field(default=0.0)
 
 
 @dataclass
