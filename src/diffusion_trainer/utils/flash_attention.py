@@ -54,7 +54,7 @@ def enable_flash_attention_for_model(model: nn.Module, model_type: str = "unknow
         logger.warning("xformers not available - Flash Attention cannot be enabled")
         return False
 
-    xformers, xformers_ops = xformers_modules
+    xformers, _ = xformers_modules
 
     try:
         logger.info("xformers version: %s", xformers.__version__)
@@ -125,7 +125,7 @@ def is_flash_attention_available() -> bool:
     if xformers_modules is None:
         return False
 
-    xformers, xformers_ops = xformers_modules
+    _, xformers_ops = xformers_modules
 
     try:
         # Simple test to make sure xformers works

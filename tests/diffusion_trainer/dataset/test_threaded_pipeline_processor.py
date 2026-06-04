@@ -28,7 +28,7 @@ class _FakeProcessor(ThreadedPipelineProcessor[int, int, int]):
             return None  # skip, counted by base
         return item
 
-    def process_item(self, worker: object, loaded: int) -> int | None:
+    def process_item(self, worker: object, loaded: int) -> int | None:  # noqa: ARG002  # override must keep the base signature
         if self._err_mod and loaded % self._err_mod == 0:
             return None  # handled error, counted by base
         return loaded * 2
@@ -81,7 +81,8 @@ def test_per_worker_object_used() -> None:
             return f"worker-{index}"
 
         def process_item(self, worker: object, loaded: int) -> int | None:
-            assert isinstance(worker, str) and worker.startswith("worker-")
+            assert isinstance(worker, str)
+            assert worker.startswith("worker-")
             return loaded * 2
 
     proc = _WorkerProcessor(list(range(1, 11)))

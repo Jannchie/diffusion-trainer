@@ -151,11 +151,11 @@ def retrieve_text_path(dir_path: Path | str, *, ignore_hidden: bool = True, recu
                 path = Path(root) / file
                 if ignore_hidden and is_hidden_file(path):
                     continue
-                if path.suffix[1:].lower() in ("txt",):
+                if path.suffix[1:].lower() == "txt":
                     yield path
     else:
         for path in dir_path.iterdir():
             if ignore_hidden and is_hidden_file(path):
                 continue
-            if path.suffix[1:].lower() in ("txt",):
+            if path.suffix[1:].lower() == "txt":
                 yield path
