@@ -81,7 +81,10 @@ class BaseConfig:
     lokr_linear_dim: int = field(default=10000, metadata={"help": "LoKr linear dimension (use large value for full dimension)."})
     lokr_feedforward_factor_ratio: float = field(default=0.5, metadata={"help": "Ratio for FeedForward factor relative to Attention factor in LoKr."})
 
-    noise_offset: float = field(default=0.02, metadata={"help": "Noise offset for improved training quality. 0.02-0.1 recommended."})
+    noise_offset: float = field(
+        default=0.0,
+        metadata={"help": "Noise offset. 0.02-0.1 typical for epsilon models; keep 0 with rescale_betas_zero_snr (ZTSNR already restores full dynamic range)."},
+    )
     noise_offset_probability: float = field(
         default=1.0,
         metadata={"help": "Probability of applying noise offset. 0.25 means 25% of the time. 1.0 means always."},
@@ -96,7 +99,10 @@ class BaseConfig:
     )
 
     # Multi-resolution noise settings
-    use_multires_noise: bool = field(default=True, metadata={"help": "Enable multi-resolution noise for improved training quality."})
+    use_multires_noise: bool = field(
+        default=False,
+        metadata={"help": "Enable multi-resolution (pyramid) noise. Spatially correlated noise mismatches the white noise fed at inference; opt-in only."},
+    )
     multires_noise_iterations: int = field(default=6, metadata={"help": "Number of noise levels/iterations. Higher = more detail, more computation."})
     multires_noise_discount: float = field(default=0.8, metadata={"help": "Discount factor between levels. Lower = more variation. Range: 0.1-0.9."})
     multires_noise_scales: list[float] | None = field(default=None, metadata={"help": "Custom scales [1.0, 0.5, 0.25]. Overrides iterations if set."})
@@ -126,8 +132,8 @@ class BaseConfig:
         metadata={"help": "Compile models with torch.compile (inductor). Multi-resolution buckets can hit inductor dynamic-shape bugs on some torch versions."},
     )
     timestep_bias_strategy: Literal["uniform", "logit", "lognormal"] = field(
-        default="lognormal",
-        metadata={"help": "Timestep bias strategy (default lognormal for EDM-style sigma sampling)."},
+        default="uniform",
+        metadata={"help": "Timestep bias strategy. uniform keeps the high-noise tail trained (needed for ZTSNR); logit/lognormal focus on mid timesteps."},
     )
     timestep_lognormal_mean: float = field(
         default=-1.2,
@@ -145,9 +151,13 @@ class BaseConfig:
         default=1.0,
         metadata={"help": "Scale (s) parameter for logit timestep bias. Controls the spread of the log-normal distribution."},
     )
-    # SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0.
-    # More details here: https://arxiv.org/abs/2303.09556.
-    snr_gamma: float | None = field(default=5.0, metadata={"help": "SNR gamma. Recommended value is 5.0. Set to null or 0 to disable SNR weighting."})
+    # Min-SNR loss rebalancing (https://arxiv.org/abs/2303.09556). Off by default:
+    # under v-prediction the weight min(SNR, gamma)/(SNR+1) goes to 0 at the ZTSNR
+    # terminal step, starving exactly the timesteps ZTSNR exists to train.
+    snr_gamma: float | None = field(
+        default=None,
+        metadata={"help": "Min-SNR gamma (5.0 typical for epsilon models). 0 or unset disables. Avoid with v_prediction + rescale_betas_zero_snr."},
+    )
     # Use debiased estimation technique to weight the loss by SNR, making the model focus more on high SNR (low noise) regions
     use_debiased_estimation: bool = field(
         default=False,

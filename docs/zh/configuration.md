@@ -97,11 +97,11 @@ text_encoder_2_lr = 0
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `noise_offset` | `0.02` | 噪声偏移强度 |
+| `noise_offset` | `0.0` | 噪声偏移强度（epsilon 模型常用 0.02–0.1；ZTSNR 下保持 0，二者修正同一问题） |
 | `noise_offset_probability` | `1.0` | 应用噪声偏移的概率 |
 | `input_perturbation` | `0.01` | 输入扰动强度 |
 | `input_perturbation_steps` | `0` | 输入扰动线性衰减步数 |
-| `use_multires_noise` | `true` | 是否启用多分辨率噪声 |
+| `use_multires_noise` | `false` | 是否启用多分辨率（金字塔）噪声；空间相关噪声与推理时的白噪声不一致，按需开启 |
 | `multires_noise_iterations` | `6` | 多分辨率噪声层数 |
 | `multires_noise_discount` | `0.8` | 多层权重折扣 |
 | `multires_noise_scales` | `None` | 自定义多分辨率缩放列表 |
@@ -114,14 +114,14 @@ text_encoder_2_lr = 0
 | `use_adaptive_noise` | `false` | 是否使用自适应噪声调度 |
 | `adaptive_noise_type` | `cosine` | `linear` / `cosine` / `exponential` |
 | `adaptive_noise_strength` | `1.0` | 自适应噪声强度 |
-| `timestep_bias_strategy` | `lognormal` | `uniform` / `logit` / `lognormal` |
+| `timestep_bias_strategy` | `uniform` | `uniform` / `logit` / `lognormal`；ZTSNR 需要 `uniform` 保证高噪声尾部被采样 |
 | `timestep_lognormal_mean` | `-1.2` | lognormal timestep 采样均值 |
 | `timestep_lognormal_std` | `1.2` | lognormal timestep 采样标准差 |
 | `timestep_bias_m` | `0.0` | logit 策略参数 m |
 | `timestep_bias_s` | `1.0` | logit 策略参数 s |
-| `snr_gamma` | `5.0` | SNR 重加权 gamma |
+| `snr_gamma` | `None` | Min-SNR gamma（epsilon 模型常用 5.0；v-pred + ZTSNR 下会把终端步权重压成 0，勿开启） |
 | `use_debiased_estimation` | `false` | 是否启用 debiased estimation |
-| `rescale_betas_zero_snr` | `true` | 是否启用 zero terminal SNR |
+| `rescale_betas_zero_snr` | `false` | 是否启用 zero terminal SNR（仅与 v_prediction 搭配才是健全的） |
 
 ## 显存与性能
 

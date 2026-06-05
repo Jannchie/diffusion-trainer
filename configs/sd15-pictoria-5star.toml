@@ -77,9 +77,16 @@ enable_flash_attention = true
 
 use_ema = true          # fp32 EMA copy (~3.4GB) — smoother full-finetune results, saved weights use it
 
-noise_offset = 0.05
-input_perturbation = 0.05
-timestep_bias_strategy = "logit"
+# Noise/weighting hygiene for v-pred + ZTSNR (framework defaults are already
+# safe; stated explicitly for reproducibility). Min-SNR's v-pred weight
+# min(SNR,γ)/(SNR+1) → 0 at the ZTSNR terminal step, and logit-normal sampling
+# rarely visits the tail — together they starve the high-noise steps that set
+# global structure/color (symptom: growing fragmentation + oversaturation).
+snr_gamma = 0
+timestep_bias_strategy = "uniform"
+noise_offset = 0.0          # ZTSNR already restores full dynamic range; offset double-corrects
+use_multires_noise = false  # correlated noise ≠ the white noise fed at inference
+input_perturbation = 0.05   # sound under v-pred: the target still uses the unperturbed noise
 
 save_every_n_epochs = 2      # 10 full saves (~2GB fp16 each); the 5-15 epoch window still has per-2-epoch granularity for picking the best
 save_every_n_steps = 0
