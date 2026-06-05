@@ -37,6 +37,7 @@ from huggingface_hub import hf_hub_download
 from pyarrow import parquet as pq
 from torch.utils.data import IterableDataset, get_worker_info
 
+from diffusion_trainer.dataset.dataset import TagFilters
 from diffusion_trainer.dataset.sharing import METADATA_FILENAME, SHARD_MEMBER_RE, SHARDS_DIR_NAME, read_verified_member
 from diffusion_trainer.dataset.utils import row_latents_meta
 
@@ -98,22 +99,47 @@ class StreamingDiffusionDataset(IterableDataset):
         self.epoch = 0
 
         self.rows_by_key: dict[str, dict] = {}
-        group_counts: dict[tuple[str, tuple[int, int]], int] = defaultdict(int)
         skipped = 0
         for row in rows:
             if not row.get("shard") or row_latents_meta(row) is None:
                 skipped += 1
                 continue
             self.rows_by_key[row["key"]] = row
-            train_resolution = row["train_resolution"]
-            group_counts[(row["shard"], (int(train_resolution[0]), int(train_resolution[1])))] += 1
         if skipped:
             logger.warning("Ignored %d manifest rows without shard/metadata fields", skipped)
         if not self.rows_by_key:
             msg = "No usable rows in the manifest; was the dataset exported with scripts/export_dataset.py?"
             raise ValueError(msg)
+        self._rebuild_groups()
+
+    def _rebuild_groups(self) -> None:
+        """Recompute per-(shard, bucket) counts and the shard list from rows_by_key."""
+        group_counts: dict[tuple[str, tuple[int, int]], int] = defaultdict(int)
+        for row in self.rows_by_key.values():
+            train_resolution = row["train_resolution"]
+            group_counts[(row["shard"], (int(train_resolution[0]), int(train_resolution[1])))] += 1
         self._group_counts = dict(group_counts)
         self.shard_names = sorted({shard for shard, _ in self._group_counts})
+
+    def apply_tag_filters(self, tag_filters: TagFilters | None) -> "StreamingDiffusionDataset":
+        """Drop manifest rows not matching the filters (chainable, returns self).
+
+        Filtered rows leave ``rows_by_key``, so ``_read_member`` skips their
+        shard members and ``len()`` stays exact for the subset — one exported
+        dataset can serve many runs (e.g. a best-quality-only experiment).
+        """
+        if not tag_filters:
+            return self
+        kept = {key: row for key, row in self.rows_by_key.items() if tag_filters.matches(list(row.get("tags") or []))}
+        filtered_out = len(self.rows_by_key) - len(kept)
+        if not kept:
+            msg = f"Tag filters {tag_filters} match no samples in the manifest"
+            raise ValueError(msg)
+        if filtered_out:
+            logger.info("Tag filters excluded %d samples (%d kept)", filtered_out, len(kept))
+            self.rows_by_key = kept
+            self._rebuild_groups()
+        return self
 
     @classmethod
     def from_export_dir(cls, export_dir: str | PathLike, batch_size: int, *, seed: int = 47, shuffle_buffer_size: int = 256) -> "StreamingDiffusionDataset":
@@ -240,4 +266,5 @@ class StreamingDiffusionDataset(IterableDataset):
             "train_resolution": np.asarray(row["train_resolution"], dtype=np.int64),
             "caption": row.get("caption") or "",
             "tags": list(row.get("tags") or []),
+            "tag_categories": list(row.get("tag_categories") or []),
         }

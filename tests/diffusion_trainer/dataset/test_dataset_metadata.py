@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from diffusion_trainer.dataset.dataset import DiffusionDataset, DiffusionTrainingItem
@@ -37,7 +38,14 @@ def write_legacy_npz(latents_dir: Path, key: str, meta: dict[str, list[int]]) ->
 
 def test_load_item_uses_manifest_metadata(tmp_path: Path) -> None:
     npz_path = write_latent_only_npz(tmp_path / "latents", KEY_A)
-    item = DiffusionTrainingItem(npz_path=npz_path.as_posix(), caption="", tags=[], **META_A)
+    item = DiffusionTrainingItem(
+        npz_path=npz_path.as_posix(),
+        caption="",
+        tags=[],
+        crop_ltrb=META_A["crop_ltrb"],
+        original_size=META_A["original_size"],
+        train_resolution=META_A["train_resolution"],
+    )
 
     loaded = DiffusionDataset._load_item(item)  # noqa: SLF001
 
@@ -86,6 +94,36 @@ def test_create_parquet_from_latents_meta_end_to_end(tmp_path: Path) -> None:
     loaded = dataset[0]
     assert loaded["img_latents"].shape == (4, 8, 8)
     assert loaded["train_resolution"].tolist() in (META_A["train_resolution"], META_B["train_resolution"])
+
+
+def test_from_parquet_reads_tag_categories(tmp_path: Path) -> None:
+    latents_dir = tmp_path / "latents"
+    write_latent_only_npz(latents_dir, KEY_A)
+    write_latents_meta(latents_dir, {KEY_A: META_A})
+    CreateParquetProcessor(tmp_path)(max_workers=2)
+
+    parquet_path = tmp_path / "metadata.parquet"
+    table = pq.read_table(parquet_path)
+    tags = pa.array([["best quality", "wlop", "1girl"]], type=pa.list_(pa.string()))
+    categories = pa.array([["quality", "artist", "general"]], type=pa.list_(pa.string()))
+    table = table.set_column(table.column_names.index("tags"), "tags", tags)
+    table = table.append_column("tag_categories", categories)
+    pq.write_table(table, parquet_path)
+
+    dataset = DiffusionDataset.from_parquet(parquet_path)
+    loaded = dataset[0]
+    assert loaded["tags"] == ["best quality", "wlop", "1girl"]
+    assert loaded["tag_categories"] == ["quality", "artist", "general"]
+
+
+def test_from_parquet_without_tag_categories_yields_empty_list(tmp_path: Path) -> None:
+    latents_dir = tmp_path / "latents"
+    write_latent_only_npz(latents_dir, KEY_A)
+    write_latents_meta(latents_dir, {KEY_A: META_A})
+    CreateParquetProcessor(tmp_path)(max_workers=2)
+
+    dataset = DiffusionDataset.from_parquet(tmp_path / "metadata.parquet")
+    assert dataset[0]["tag_categories"] == []
 
 
 def test_create_parquet_falls_back_to_legacy_npz(tmp_path: Path) -> None:

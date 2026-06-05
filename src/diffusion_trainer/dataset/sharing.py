@@ -216,7 +216,7 @@ VAE latents packed into bucket-grouped tar shards, plus a parquet manifest.
 
 | file | description |
 | --- | --- |
-| `metadata.parquet` | one row per image: `key` (SHA256), `tags`, `train_resolution`, `original_size`, `crop_ltrb`, `shard`, `npz_sha256` |
+| `metadata.parquet` | one row per image: `key` (SHA256), `tags`, `train_resolution`, `original_size`, `crop_ltrb`, `shard`, `npz_sha256`, optional extras |
 | `shards/<W>x<H>-<idx>.tar` | latent `.npz` files (member path `ab/cd/<sha256>.npz`), grouped by training resolution |
 
 ## Buckets

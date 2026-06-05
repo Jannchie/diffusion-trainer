@@ -2,7 +2,7 @@ import json
 import logging
 from bisect import bisect_right
 from collections import defaultdict
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
@@ -29,6 +29,28 @@ def process_tags(tags: list[str] | str | None) -> list[str]:
     return tags.split(",") if isinstance(tags, str) else tags
 
 
+@dataclass(frozen=True)
+class TagFilters:
+    """Declarative manifest subsetting: keep a sample iff it has at least one
+    ``include_any`` entry (when given) and none of ``exclude``.
+
+    Lets one exported dataset serve many runs (e.g. ``("best quality",)`` for
+    a top-tier-only experiment) instead of maintaining parallel exports.
+    """
+
+    include_any: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.include_any or self.exclude)
+
+    def matches(self, tags: Sequence[str]) -> bool:
+        tag_set = set(tags)
+        if self.include_any and tag_set.isdisjoint(self.include_any):
+            return False
+        return not (self.exclude and not tag_set.isdisjoint(self.exclude))
+
+
 def process_caption(caption: str | None) -> str:
     """Process caption."""
     return caption if caption is not None else ""
@@ -44,6 +66,10 @@ class DiffusionTrainingItem:
     crop_ltrb: list[int] | None = None
     original_size: list[int] | None = None
     train_resolution: list[int] | None = None
+    # Per-tag category names parallel to ``tags`` (quality/artist/copyright/
+    # character/general/meta). Empty for datasets prepared without categories;
+    # prompt assembly then treats every tag as "general" (legacy behavior).
+    tag_categories: list[str] | None = None
 
 
 @dataclass
@@ -54,6 +80,7 @@ class DiffusionBatch:
     train_resolution: torch.Tensor
     caption: list[str]
     tags: list[list[str]]
+    tag_categories: list[list[str]]
 
 
 class DiffusionDataset(Dataset):
@@ -82,6 +109,7 @@ class DiffusionDataset(Dataset):
         train_resolution = torch.stack([torch.from_numpy(item["train_resolution"]) for item in batch])
         caption = [item["caption"] for item in batch]
         tags = [item["tags"] for item in batch]
+        tag_categories = [item.get("tag_categories") or [] for item in batch]
         return DiffusionBatch(
             img_latents=img_latents,
             crop_ltrb=crop_ltrb,
@@ -89,6 +117,7 @@ class DiffusionDataset(Dataset):
             train_resolution=train_resolution,
             caption=caption,
             tags=tags,
+            tag_categories=tag_categories,
         )
 
     @staticmethod
@@ -127,12 +156,25 @@ class DiffusionDataset(Dataset):
         return [int(v) for v in (value.tolist() if hasattr(value, "tolist") else value)]
 
     @staticmethod
-    def from_parquet(parquet_path: str | PathLike) -> "DiffusionDataset":
+    def _row_str_list(row: "pd.Series", column: str) -> list[str]:
+        """Read a string-list column from a parquet row, tolerating missing columns."""
+        value = row.get(column)
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        if hasattr(value, "tolist"):
+            return [str(v) for v in value.tolist()]
+        return [str(value)]
+
+    @staticmethod
+    def from_parquet(parquet_path: str | PathLike, *, tag_filters: TagFilters | None = None) -> "DiffusionDataset":
         parquet_path = Path(parquet_path)
         logger.info('Reading dataset from "%s"', parquet_path)
         table = pq.read_table(parquet_path)
         metadata = table.to_pandas()
         buckets: dict[tuple[int, int], list[DiffusionTrainingItem]] = defaultdict(list)
+        filtered_out = 0
         for _idx, row in metadata.iterrows():
             key = row["key"]
             # Use SHA256-based directory structure: ab/cd/abcd...npz
@@ -141,23 +183,23 @@ class DiffusionDataset(Dataset):
             if train_resolution is None:
                 logger.warning("Skipping %s: missing train_resolution", key)
                 continue
-            tags_value = row.get("tags", [])
-            if isinstance(tags_value, list):
-                tags_list = tags_value
-            elif hasattr(tags_value, "tolist"):
-                tags_list = list(tags_value.tolist())
-            else:
-                tags_list = [str(tags_value)] if tags_value is not None else []
+            tags = DiffusionDataset._row_str_list(row, "tags")
+            if tag_filters and not tag_filters.matches(tags):
+                filtered_out += 1
+                continue
             buckets[(train_resolution[0], train_resolution[1])].append(
                 DiffusionTrainingItem(
                     npz_path=npz_path.as_posix(),
                     caption=row.get("caption", ""),  # Use empty string if caption doesn't exist
-                    tags=tags_list,
+                    tags=tags,
                     crop_ltrb=DiffusionDataset._row_int_list(row, "crop_ltrb"),
                     original_size=DiffusionDataset._row_int_list(row, "original_size"),
                     train_resolution=train_resolution,
+                    tag_categories=DiffusionDataset._row_str_list(row, "tag_categories"),
                 ),
             )
+        if filtered_out:
+            logger.info("Tag filters excluded %d samples (%d kept)", filtered_out, sum(len(v) for v in buckets.values()))
         return DiffusionDataset(buckets)
 
     def get_bucket_index(self, idx: int) -> int:
@@ -200,6 +242,7 @@ class DiffusionDataset(Dataset):
                 **meta,
                 "caption": item.caption,
                 "tags": item.tags,
+                "tag_categories": item.tag_categories or [],
             }
 
     def __getitem__(self, idx: int) -> dict:
