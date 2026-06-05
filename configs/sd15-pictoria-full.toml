@@ -42,9 +42,15 @@ droppable_tag_categories = ["general"]
 
 # Declarative subsets: one exported dataset serves many runs. Uncomment to
 # train only the manually-curated top tier (the old "5star" dataset becomes
-# just a filter), or to drop the sparse oldest era:
+# just a filter):
 # dataset_include_any_tags = ["best quality"]
-# dataset_exclude_tags = ["oldest"]
+
+# Multi-panel layouts teach the model to slice the canvas and grow speech
+# bubbles (a major source of fragmented compositions); photo/3d are not
+# illustrations. ~2.7% of samples. Watermark/signature/monochrome etc. stay
+# IN on purpose: they are tagged, so negative prompts control them at
+# inference and the data is not wasted.
+dataset_exclude_tags = ["comic", "4koma", "2koma", "silent_comic", "photo_(medium)", "3d"]
 
 # Chunked >77-token prompts during training (A1111-style).
 use_enhanced_embeddings = true
