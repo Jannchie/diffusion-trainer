@@ -37,6 +37,32 @@ class BaseConfig:
     single_tag_dropout: float = field(default=0.0, metadata={"help": "Single tag dropout."})
     all_tags_dropout: float = field(default=0.0, metadata={"help": "All tags dropout."})
     caption_dropout: float = field(default=0.0, metadata={"help": "Caption dropout."})
+    # Category-aware prompt assembly. Datasets prepared without a
+    # tag_categories column treat every tag as "general", which reproduces the
+    # historical flat behavior exactly (full shuffle, full dropout scope).
+    tag_category_order: list[str] = field(
+        default_factory=lambda: ["quality", "year", "artist", "copyright", "character", "general"],
+        metadata={"help": "Prompt order of tag categories; categories not listed (e.g. meta) never enter the prompt."},
+    )
+    shuffled_tag_categories: list[str] = field(
+        default_factory=lambda: ["general"],
+        metadata={"help": "Categories whose tags are shuffled when shuffle_tags is on; the rest keep their dataset order."},
+    )
+    droppable_tag_categories: list[str] = field(
+        default_factory=lambda: ["general"],
+        metadata={"help": "Categories subject to single_tag_dropout; the rest (quality/artist/...) are never dropped individually."},
+    )
+    # Declarative train-time subsetting: one exported dataset can serve many
+    # runs (e.g. a best-quality-only experiment) by filtering manifest rows;
+    # works for both local parquet and hf:// streaming datasets.
+    dataset_include_any_tags: list[str] = field(
+        default_factory=list,
+        metadata={"help": "Keep only samples containing at least one of these tags (empty = keep all). E.g. ['best quality']."},
+    )
+    dataset_exclude_tags: list[str] = field(
+        default_factory=list,
+        metadata={"help": "Drop samples containing any of these tags."},
+    )
     use_enhanced_embeddings: bool = field(default=False, metadata={"help": "Whether to use enhanced prompt embeddings for training."})
     condition_dropout_prob: float = field(
         default=0.0,

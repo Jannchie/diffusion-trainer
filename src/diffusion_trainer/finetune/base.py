@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,7 +23,7 @@ from diffusers.training_utils import EMAModel, compute_snr, free_memory
 from torch.utils.data import DataLoader
 
 from diffusion_trainer.config import BaseConfig, SampleOptions
-from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset
+from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset, TagFilters
 from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
 from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
 from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
@@ -67,6 +68,53 @@ def escape_attention_syntax(text: str) -> str:
     plain-tokenizer path and to WebUI inference with ``\\(...\\)`` escapes.
     """
     return _ATTENTION_SYNTAX_RE.sub(r"\\\1", text)
+
+
+@dataclass(frozen=True)
+class TagCompositionRules:
+    """Category-aware prompt assembly rules derived from the training config."""
+
+    category_order: tuple[str, ...]
+    shuffled_categories: frozenset[str]
+    droppable_categories: frozenset[str]
+    single_tag_dropout: float
+
+    @classmethod
+    def from_config(cls, config: BaseConfig) -> "TagCompositionRules":
+        return cls(
+            category_order=tuple(config.tag_category_order),
+            # Folding the global switches in here keeps compose_prompt_tags branch-free.
+            shuffled_categories=frozenset(config.shuffled_tag_categories) if config.shuffle_tags else frozenset(),
+            droppable_categories=frozenset(config.droppable_tag_categories) if config.single_tag_dropout > 0 else frozenset(),
+            single_tag_dropout=config.single_tag_dropout,
+        )
+
+
+def compose_prompt_tags(tags: Sequence[str], categories: Sequence[str], rules: TagCompositionRules) -> list[str]:
+    """Assemble one sample's tags in category order with per-category augmentation.
+
+    Categories absent from ``rules.category_order`` (e.g. booru ``meta`` noise)
+    never enter the prompt. Shuffle and single-tag dropout apply only inside
+    the listed categories, so quality/artist/copyright/character conditioning
+    stays pinned at the front while the free-form tail randomizes.
+
+    Datasets without category info (``categories`` empty or misaligned) treat
+    every tag as ``general`` — identical to the historical flat behavior.
+    """
+    if len(categories) != len(tags):
+        categories = ["general"] * len(tags)
+    grouped: dict[str, list[str]] = {}
+    for tag, category in zip(tags, categories, strict=True):
+        grouped.setdefault(category, []).append(tag)
+    result: list[str] = []
+    for category in rules.category_order:
+        category_tags = grouped.get(category, [])
+        if category in rules.droppable_categories:
+            category_tags = [tag for tag in category_tags if random.random() >= rules.single_tag_dropout]
+        if category in rules.shuffled_categories:
+            random.shuffle(category_tags)  # per-sample lists built above; mutation is local
+        result.extend(category_tags)
+    return result
 
 
 class BaseTuner(ABC):
@@ -776,13 +824,21 @@ class BaseTuner(ABC):
                 logger.warning("cannot checkpointing!")
 
     def prepare_dataset(self, config: BaseConfig) -> DiffusionDataset | StreamingDiffusionDataset:
+        # Declarative subsetting: one exported dataset serves many runs (e.g.
+        # ["best quality"] trains the top-tier subset from the full manifest).
+        tag_filters = TagFilters(include_any=tuple(config.dataset_include_any_tags), exclude=tuple(config.dataset_exclude_tags))
         if config.dataset_path and config.dataset_path.startswith("hf://"):
             # Stream an exported dataset straight from a HuggingFace dataset repo
             # ("hf://user/repo" or "hf://user/repo@revision"). Shards download
             # lazily on first epoch and hit the local HF cache afterwards.
             repo_id, _, revision = config.dataset_path.removeprefix("hf://").partition("@")
             logger.info("Streaming dataset from HuggingFace Hub repo %s", repo_id)
-            return StreamingDiffusionDataset.from_hub(repo_id, config.batch_size, revision=revision or None, seed=config.seed)
+            return StreamingDiffusionDataset.from_hub(
+                repo_id,
+                config.batch_size,
+                revision=revision or None,
+                seed=config.seed,
+            ).apply_tag_filters(tag_filters)
         if config.dataset_path:
             dataset_root = Path(config.dataset_path)
         elif config.image_path:
@@ -796,7 +852,7 @@ class BaseTuner(ABC):
         with self.accelerator.main_process_first():
             if not self.accelerator.is_main_process:
                 # Wait for the main process to finish preparing, then load the dataset.
-                return DiffusionDataset.from_parquet(parquet_path)
+                return DiffusionDataset.from_parquet(parquet_path, tag_filters=tag_filters)
             if config.image_path and config.skip_prepare_image is False:
                 logger.info("Prepare image from %s", config.image_path)
                 if not config.vae_path:
@@ -820,7 +876,7 @@ class BaseTuner(ABC):
                 CreateParquetProcessor(target_dir=dataset_root)(max_workers=8)
             else:
                 logger.info('found parquet file at "%s"', parquet_path)
-        return DiffusionDataset.from_parquet(parquet_path)
+        return DiffusionDataset.from_parquet(parquet_path, tag_filters=tag_filters)
 
     def freeze_model(self, models: Sequence[torch.nn.Module]) -> None:
         """
@@ -1366,24 +1422,15 @@ class BaseTuner(ABC):
         prompts = []
         caption_dropout_ratio = self.config.caption_dropout
         all_tags_dropout_ratio = self.config.all_tags_dropout
-        single_tag_dropout_ratio = self.config.single_tag_dropout
-        shuffle_tags = self.config.shuffle_tags
+        rules = TagCompositionRules.from_config(self.config)
 
-        for caption, tags in zip(batch.caption, batch.tags, strict=True):
+        for caption, tags, tag_categories in zip(batch.caption, batch.tags, batch.tag_categories, strict=True):
             # Decide if the caption should be dropped
             true_caption = "" if random.random() < caption_dropout_ratio else caption
 
-            # Decide if all tags should be dropped or process individual tag dropout
-            if random.random() < all_tags_dropout_ratio:
-                true_tags = []
-            elif single_tag_dropout_ratio > 0:
-                true_tags = [tag for tag in tags if random.random() >= single_tag_dropout_ratio]
-            else:
-                true_tags = tags
-
-            # Shuffle tags if necessary
-            if shuffle_tags:
-                random.shuffle(true_tags)
+            # Decide if all tags should be dropped, otherwise assemble them in
+            # category order with per-category shuffle/dropout.
+            true_tags = [] if random.random() < all_tags_dropout_ratio else compose_prompt_tags(tags, tag_categories, rules)
 
             # Create prompt string
             if true_caption and true_tags:
