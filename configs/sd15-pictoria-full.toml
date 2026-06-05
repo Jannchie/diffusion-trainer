@@ -101,11 +101,15 @@ preview_every_n_epochs = 0
 preview_every_n_steps = 1000
 checkpoint_every_n_steps = 2000
 
-# Quality words now come from the dataset itself (space form, NAI lineage),
-# so positive/negative quality prompting matches training exactly.
+# All previews condition on "best quality" (trained tag); negatives use the
+# trained quality/noise words. Tags are underscore booru form to match the
+# training distribution. The baseline stays era-less so it also tracks the
+# dataset-average default output.
+
+# Baseline: simple prompt, dataset-average era.
 [[preview_sample_options]]
-prompt = "best quality, 1girl, solo, looking at viewer, long hair, smile"
-negative_prompt = "worst quality, bad quality, blurry, low resolution"
+prompt = "best quality, 1girl, solo, looking_at_viewer, long_hair, smile"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
 seed = 47
 steps = 25
 width = 768
@@ -113,25 +117,48 @@ height = 768
 clip_skip = 2
 guidance_rescale = 0.7
 
-# Era axis exercised here ("newest"); the baseline prompt above stays era-less
-# so previews also track the dataset-average output.
+# ZTSNR exposure test, dark end: true blacks instead of washed-out grey.
 [[preview_sample_options]]
-prompt = "best quality, newest, wlop, 1girl, architecture, black_hair, chinese_clothes, east_asian_architecture, hanfu, outdoors, short_hair, sitting, solo"
-negative_prompt = "worst quality, bad quality, blurry, low resolution"
+prompt = "best quality, newest, 1girl, solo, black_dress, dark, night, moonlight, black_background, looking_at_viewer"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 48
+steps = 25
+width = 640
+height = 896
+clip_skip = 2
+guidance_rescale = 0.7
+
+# ZTSNR exposure test, bright end: high-key lighting without blowout.
+[[preview_sample_options]]
+prompt = "best quality, newest, 1girl, solo, white_dress, sunlight, day, blue_sky, cloud, field, flower, wind, smile, backlighting"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 49
+steps = 25
+width = 896
+height = 640
+clip_skip = 2
+guidance_rescale = 0.7
+
+# Complex character prompt sampled from a real dataset row (parens escaped:
+# previews go through the A1111-style parser, unescaped (...) would strip and
+# 1.1x-weight the tag, mismatching training).
+[[preview_sample_options]]
+prompt = 'best quality, newest, ask_\(askzy\), 1girl, arm_guards, black_bow, bow, breasts, cleavage, cleavage_cutout, closed_mouth, clothing_cutout, dark-skinned_female, dark_skin, floating_hair, hair_between_eyes, hair_bow, hair_ornament, high_collar, katana, large_breasts, long_hair, long_sleeves, looking_at_viewer, okita_souji_\(fate\), okita_souji_alter_\(fate\), parted_bangs, petals, red_eyes, solo, sword, tassel, upper_body, very_long_hair, weapon, white_hair, wide_sleeves'
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
 seed = 50
+steps = 25
+width = 576
+height = 1024
+clip_skip = 2
+guidance_rescale = 0.7
+
+# Complex scene prompt sampled from a real dataset row (artist + many objects).
+[[preview_sample_options]]
+prompt = 'best quality, newest, wlop, 1girl, architecture, black_hair, bowl, cat, chinese_clothes, chopsticks, cloak, closed_eyes, day, east_asian_architecture, eating, flower, food, hair_ornament, hanfu, holding, jade_\(ghostblade\), outdoors, plate, short_hair, sitting, solo, table, teapot'
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 51
 steps = 25
 width = 1024
 height = 576
-clip_skip = 2
-guidance_rescale = 0.7
-
-# Quality-axis control check: same seed/prompt, opposite quality word.
-[[preview_sample_options]]
-prompt = "worst quality, 1girl, solo, looking at viewer, long hair, smile"
-negative_prompt = "blurry, low resolution"
-seed = 47
-steps = 25
-width = 768
-height = 768
 clip_skip = 2
 guidance_rescale = 0.7
