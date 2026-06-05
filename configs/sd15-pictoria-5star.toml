@@ -62,7 +62,7 @@ optimizer_warmup_steps = 300
 optimizer_num_cycles = 1
 
 # ~9.6k samples; batch 32 -> ~305 steps/epoch. Watch previews and stop early.
-n_epochs = 20
+n_epochs = 40
 batch_size = 32
 gradient_accumulation_steps = 1
 # Streaming workers split shards [id::num_workers]; the dataset has 9 shards,

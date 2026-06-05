@@ -1,0 +1,131 @@
+# SD 1.5 training on the full pictoria library (~142k images, 768 base) with
+# category-aware prompts: quality tags from manual scores + SILVA fallback,
+# pinned quality/artist/copyright/character prefix, shuffled general tail.
+#
+# Build the dataset first:
+#   uv run python scripts/load_dataset_from_pictoria_db.py \
+#       --db ~/datasets-cache/pictoria-snapshot.sqlite \
+#       --images-root /mnt/e/pictoria/server/illustration/images \
+#       --output-dir datasets/pictoria-full-768 \
+#       --vae-path https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors \
+#       --vae-dtype bf16 --base-resolution 768 --min-short-edge 768
+
+seed = 47
+
+dataset_path = "datasets/pictoria-full-768"
+
+model_path = "Jannchie/AOM3B2-orangemixs-fp16"
+model_name = "pictoria-v0.3"
+save_dir = "./out"
+
+clip_skip = 2
+
+prediction_type = "v_prediction"
+rescale_betas_zero_snr = true
+
+# Must match the VAE used at latents-encoding time.
+vae_path = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"
+vae_dtype = "bf16"
+
+# Category-aware text augmentation: the prompt is assembled as
+# quality -> year(era) -> artist -> copyright -> character -> general; meta
+# tags (highres/commentary/bad_id/...) are not listed, so they never enter
+# the prompt. Only the general tail shuffles and drops tags — quality/era/
+# artist/copyright/character conditioning always survives at the prompt front.
+shuffle_tags = true
+single_tag_dropout = 0.05
+all_tags_dropout = 0.05
+caption_dropout = 0.0
+tag_category_order = ["quality", "year", "artist", "copyright", "character", "general"]
+shuffled_tag_categories = ["general"]
+droppable_tag_categories = ["general"]
+
+# Declarative subsets: one exported dataset serves many runs. Uncomment to
+# train only the manually-curated top tier (the old "5star" dataset becomes
+# just a filter), or to drop the sparse oldest era:
+# dataset_include_any_tags = ["best quality"]
+# dataset_exclude_tags = ["oldest"]
+
+# Chunked >77-token prompts during training (A1111-style).
+use_enhanced_embeddings = true
+
+mode = "full-finetune"
+
+optimizer = "adamW8bit"
+# Lower peak than the 5star run (3e-5): the ~18k-step schedule moves the model
+# through data coverage, not LR heat; 3e-5 over long runs grinds away the base
+# model's high-frequency detail (fragmentation). TE at half of UNet — an
+# overtrained TE bleeds tag semantics into each other (mushy boundaries).
+unet_lr = 2e-5
+text_encoder_lr = 1e-5
+optimizer_warmup_steps = 500
+optimizer_num_cycles = 1
+
+# ~142k samples; batch 32 -> ~4.4k steps/epoch. Watch previews and stop early.
+n_epochs = 4
+batch_size = 32
+gradient_accumulation_steps = 1
+dataloader_num_workers = 4
+
+mixed_precision = "bf16"
+weight_dtype = "fp32"
+save_dtype = "fp16"
+gradient_checkpointing = true
+enable_flash_attention = true
+
+use_ema = true
+# Skip warmup + the epsilon->v-pred conversion phase: EMA's horizon at 0.9999
+# is ~10k steps, so averaging from step 0 dilutes the final weights with
+# half-converted early states (the 5star run's residual base-model artifacts
+# and soft detail were partly this).
+ema_start_step = 2000
+
+# Noise/weighting hygiene for v-pred + ZTSNR (see sd15-pictoria-5star.toml).
+snr_gamma = 0
+timestep_bias_strategy = "uniform"
+noise_offset = 0.0
+use_multires_noise = false
+# 0.05 was small-data insurance on the 5star run; it softens fine detail.
+# 142k samples regularize on their own.
+input_perturbation = 0.02
+
+save_every_n_epochs = 1
+save_every_n_steps = 0
+preview_every_n_epochs = 0
+preview_every_n_steps = 1000
+checkpoint_every_n_steps = 2000
+
+# Quality words now come from the dataset itself (space form, NAI lineage),
+# so positive/negative quality prompting matches training exactly.
+[[preview_sample_options]]
+prompt = "best quality, 1girl, solo, looking at viewer, long hair, smile"
+negative_prompt = "worst quality, bad quality, blurry, low resolution"
+seed = 47
+steps = 25
+width = 768
+height = 768
+clip_skip = 2
+guidance_rescale = 0.7
+
+# Era axis exercised here ("newest"); the baseline prompt above stays era-less
+# so previews also track the dataset-average output.
+[[preview_sample_options]]
+prompt = "best quality, newest, wlop, 1girl, architecture, black_hair, chinese_clothes, east_asian_architecture, hanfu, outdoors, short_hair, sitting, solo"
+negative_prompt = "worst quality, bad quality, blurry, low resolution"
+seed = 50
+steps = 25
+width = 1024
+height = 576
+clip_skip = 2
+guidance_rescale = 0.7
+
+# Quality-axis control check: same seed/prompt, opposite quality word.
+[[preview_sample_options]]
+prompt = "worst quality, 1girl, solo, looking at viewer, long hair, smile"
+negative_prompt = "blurry, low resolution"
+seed = 47
+steps = 25
+width = 768
+height = 768
+clip_skip = 2
+guidance_rescale = 0.7
