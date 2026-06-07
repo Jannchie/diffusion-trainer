@@ -79,7 +79,9 @@ def prepare_logger(log_with: str, logging_dir: Path) -> None:
     elif log_with == "tensorboard":
         msg = "Tensorboard logging is not implemented yet."
         raise NotImplementedError(msg)
-    elif log_with == "none":
+    elif log_with in ("pandm", "none"):
+        # pandm is local-first (writes to ./.pandm); the run is initialized by
+        # the tuner on the main process, not through accelerate's trackers.
         pass
 
 
@@ -110,7 +112,7 @@ def prepare_ddp_kwargs(
 def prepare_accelerator(
     gradient_accumulation_steps: int,
     dtype: torch.dtype = torch.float16,
-    log_with: Literal["wandb", "tensorboard", "none"] = "none",
+    log_with: Literal["pandm", "wandb", "tensorboard", "none"] = "none",
     *,
     torch_compile: bool = False,
 ) -> Accelerator:
@@ -150,7 +152,8 @@ def prepare_accelerator(
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
-        log_with=log_with if log_with != "none" else None,
+        # pandm is not an accelerate tracker; its run is driven by the tuner.
+        log_with=log_with if log_with not in ("none", "pandm") else None,
         project_dir=logging_dir,
         kwargs_handlers=[*ddp_kwargs, profile_kwargs],
         dynamo_backend=dynamo_backend,

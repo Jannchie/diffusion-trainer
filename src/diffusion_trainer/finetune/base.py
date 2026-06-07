@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import random
@@ -5,7 +6,7 @@ import re
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel, compute_snr, free_memory
+from PIL import Image
 from torch.utils.data import DataLoader
 
 from diffusion_trainer.config import BaseConfig, SampleOptions
@@ -29,6 +31,7 @@ from diffusion_trainer.dataset.processors.latents_generate_processor import Late
 from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
 from diffusion_trainer.dataset.streaming import StreamingDiffusionDataset
 from diffusion_trainer.finetune.utils import (
+    DummyProgressBar,
     TrainableModel,
     compute_sqrt_inv_snr_weights,
     get_sample_options_hash,
@@ -164,6 +167,8 @@ class BaseTuner(ABC):
         """Initialize pipeline, models, and training-related attributes."""
         self.pipeline = self.get_pipeline()
         self.lycoris_model: LycorisNetwork | None = None
+        # pandm run handle; set on the main process when log_with == "pandm".
+        self.pandm_run: Any | None = None
         self.noise_scheduler: DDPMScheduler = self.get_noise_scheduler()
         self.all_snr = compute_snr(self.noise_scheduler, torch.arange(0, self.noise_scheduler.config.num_train_timesteps, dtype=torch.long)).to(self.device)  # type: ignore
         self.train_loss = 0.0
@@ -260,15 +265,28 @@ class BaseTuner(ABC):
 
         # Initialize trackers
         timestamp = datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
-        self.accelerator.init_trackers(
-            "diffusion-trainer",
-            config=self.config.__dict__,
-            init_kwargs={
-                "wandb": {
-                    "name": timestamp,  # Set run name to timestamp
+        if self.config.log_with == "pandm":
+            if self.accelerator.is_main_process:
+                import pandm
+
+                # Round-trip through JSON so non-scalar config entries (paths,
+                # nested sample options, ...) serialize instead of erroring.
+                config_snapshot = json.loads(json.dumps(self.config.__dict__, default=str))
+                self.pandm_run = pandm.init(
+                    project="diffusion-trainer",
+                    name=f"{self.config.model_name}-{timestamp}",
+                    config=config_snapshot,
+                )
+        else:
+            self.accelerator.init_trackers(
+                "diffusion-trainer",
+                config=self.config.__dict__,
+                init_kwargs={
+                    "wandb": {
+                        "name": timestamp,  # Set run name to timestamp
+                    },
                 },
-            },
-        )
+            )
 
         return num_update_steps_per_epoch, n_total_steps
 
@@ -345,6 +363,10 @@ class BaseTuner(ABC):
             num_update_steps_per_epoch,
             n_total_steps,
         )
+        # On exceptions we fall through WITHOUT finishing: pandm's excepthook /
+        # heartbeat then marks the run crashed instead of falsely "finished".
+        if self.pandm_run is not None:
+            self.pandm_run.finish()
 
     def _configure_models(self) -> None:
         """Configure which models should be trainable with their learning rates."""
@@ -522,6 +544,20 @@ class BaseTuner(ABC):
 
         # Initialize weights to 1
         weights = torch.ones_like(loss_per_sample)
+
+        # Epsilon-equivalent allocation for v-pred: plain MSE on v carries an
+        # implicit (SNR+1) weight on the x0 error, vs SNR for epsilon — which
+        # shifts gradient share from the high-SNR detail regime to low-SNR
+        # structure steps. Multiplying by SNR/(SNR+1) restores the epsilon
+        # allocation exactly; the floor keeps the ZTSNR terminal step (SNR=0)
+        # trainable at low weight instead of dropping it entirely.
+        if (
+            self.config.vpred_epsilon_equivalent_weighting
+            and self.noise_scheduler.config.get("prediction_type") == "v_prediction"
+            and self.global_step >= self.config.vpred_epsilon_equivalent_weighting_start_step
+        ):
+            snr = self.all_snr[timesteps]
+            weights = weights * (snr.clamp(min=1e-2) / (snr + 1.0))
 
         # 2. If Debiased Estimation is enabled, compute and apply debiasing weights
         if self.config.use_debiased_estimation:
@@ -1055,7 +1091,10 @@ class BaseTuner(ABC):
                     global_step += 1
                     self.global_step = global_step  # Update instance variable for input perturbation decay
                     log_data = {"train_loss": self.train_loss, "lr": current_lr}
-                    self.accelerator.log(log_data, step=global_step)
+                    if self.pandm_run is not None:
+                        self.pandm_run.log(log_data, step=global_step)
+                    else:
+                        self.accelerator.log(log_data, step=global_step)
 
                     self.train_loss = 0.0
 
@@ -1112,6 +1151,53 @@ class BaseTuner(ABC):
         """
 
     @torch.no_grad()
+    def _decode_preview_latents(self, latents: torch.Tensor) -> "Image.Image":
+        """Decode pipeline latents to PIL in fp32, outside any autocast.
+
+        Half-precision VAE decode intermittently overflows to NaN (pure-black
+        frames) at 640+ resolutions, so previews decode through a temporary
+        fp32 cast and restore the configured VAE dtype afterwards.
+        """
+        vae = self.pipeline.vae
+        original_dtype = next(vae.parameters()).dtype
+        vae.to(dtype=torch.float32)
+        try:
+            image = vae.decode(latents.to(torch.float32) / vae.config.scaling_factor).sample
+            return self.pipeline.image_processor.postprocess(image, output_type="pil")[0]  # type: ignore[attr-defined]
+        finally:
+            vae.to(dtype=original_dtype)
+
+    @torch.no_grad()
+    def _hires_preview(
+        self,
+        image: "Image.Image",
+        prompt_kwargs: dict[str, Any],
+        sample_option: SampleOptions,
+        generator: torch.Generator,
+        make_autocast: Callable[[], AbstractContextManager[Any]],
+    ) -> "Image.Image":
+        """A1111-style hires fix for previews: lanczos-upscale, then img2img."""
+        from diffusers import AutoPipelineForImage2Image
+
+        width = int(image.width * sample_option.hires_scale) // 8 * 8
+        height = int(image.height * sample_option.hires_scale) // 8 * 8
+        upscaled = image.resize((width, height), Image.LANCZOS)
+        img2img = AutoPipelineForImage2Image.from_pipe(self.pipeline)
+        img2img.progress_bar = DummyProgressBar  # type: ignore[method-assign]
+        with make_autocast():
+            result = img2img(
+                **prompt_kwargs,
+                image=upscaled,
+                strength=sample_option.hires_strength,
+                num_inference_steps=sample_option.hires_steps,
+                generator=generator,
+                guidance_scale=sample_option.guidance_scale,
+                guidance_rescale=sample_option.guidance_rescale,
+                output_type="latent",
+            )
+        return self._decode_preview_latents(result.images)
+
+    @torch.no_grad()
     def generate_preview(self, filename: str, global_step: int = 0) -> None:  # noqa: C901, PLR0912, PLR0915
         # Release memory to ensure sufficient VRAM for preview generation
         free_memory()
@@ -1157,34 +1243,31 @@ class BaseTuner(ABC):
                     model.eval()  # Switch to evaluation mode for inference
 
                 # Use automatic mixed precision to generate preview images
-                autocast_ctx = nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
                 generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
 
-                with self.use_ema_weights(), autocast_ctx:
+                def make_autocast() -> AbstractContextManager[Any]:
+                    return nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
+
+                with self.use_ema_weights():
                     self.pipeline.to(self.accelerator.device)
-                    # Use the configured VAE dtype but add NaN checking
                     self.pipeline.vae.to(dtype=self.vae_dtype)
+                    # Resolve conditioning once; the same kwargs feed the base
+                    # pass and the optional hires img2img pass.
                     try:
-                        embeds_kwargs = self.get_preview_prompt_embeds(
-                            sample_option.prompt,
-                            sample_option.negative_prompt,
-                            getattr(sample_option, "clip_skip", 2),
-                        )
-                        result = self.pipeline(
-                            **embeds_kwargs,
-                            num_inference_steps=sample_option.steps,
-                            generator=generator,
-                            callback_on_step_end=callback_on_step_end,  # type: ignore
-                            width=sample_option.width,
-                            height=sample_option.height,
-                            guidance_scale=sample_option.guidance_scale,
-                            guidance_rescale=sample_option.guidance_rescale,
-                        )
+                        with make_autocast():
+                            prompt_kwargs: dict[str, Any] = dict(
+                                self.get_preview_prompt_embeds(
+                                    sample_option.prompt,
+                                    sample_option.negative_prompt,
+                                    getattr(sample_option, "clip_skip", 2),
+                                ),
+                            )
                     except NotImplementedError:
                         logger.info("Using prompts directly for preview generation")
+                        prompt_kwargs = {"prompt": sample_option.prompt, "negative_prompt": sample_option.negative_prompt}
+                    with make_autocast():
                         result = self.pipeline(
-                            prompt=sample_option.prompt,
-                            negative_prompt=sample_option.negative_prompt,
+                            **prompt_kwargs,
                             num_inference_steps=sample_option.steps,
                             generator=generator,
                             callback_on_step_end=callback_on_step_end,  # type: ignore
@@ -1192,47 +1275,32 @@ class BaseTuner(ABC):
                             height=sample_option.height,
                             guidance_scale=sample_option.guidance_scale,
                             guidance_rescale=sample_option.guidance_rescale,
+                            output_type="latent",
                         )
-
-                    # Check if the pipeline output contains NaN values and handle them
-                    if hasattr(result, "images") and result.images:
-                        import numpy as np
-
-                        image_array = np.array(result.images[0])
-                        if np.any(np.isnan(image_array)) or np.any(np.isinf(image_array)):
-                            logger.warning("Pipeline output contains NaN/Inf values, may cause conversion warnings")
+                    # Decode in fp32 OUTSIDE autocast: half-precision VAE decode
+                    # intermittently overflows to NaN (pure-black previews) at
+                    # 640+ resolutions; the UNet latents themselves are clean.
+                    image = self._decode_preview_latents(result.images)
+                    if sample_option.hires_scale > 1.0:
+                        try:
+                            image = self._hires_preview(image, prompt_kwargs, sample_option, generator, make_autocast)
+                        except Exception:
+                            logger.exception("Hires preview pass failed; keeping the base image")
 
                 logger.info("Preview generated for %s", filename_with_hash)
 
                 path.parent.mkdir(parents=True, exist_ok=True)
 
-                # Clean up any potential NaN/Inf values in the image before saving
-                image = result.images[0]
+                image.save(path)
 
-                # Convert to numpy array for NaN checking and cleanup
-                import numpy as np
-                from PIL import Image as PILImage
-
-                image_array = np.array(image)
-
-                # Check for and replace NaN/Inf values
-                if np.any(np.isnan(image_array)) or np.any(np.isinf(image_array)):
-                    logger.warning("Found NaN/Inf values in preview image, cleaning up...")
-                    image_array = np.nan_to_num(image_array, nan=128.0, posinf=255.0, neginf=0.0)
-
-                # Ensure values are in valid range [0, 255]
-                image_array = np.clip(image_array, 0, 255).astype(np.uint8)
-
-                # Convert back to PIL Image and save
-                clean_image = PILImage.fromarray(image_array)
-                clean_image.save(path)
-
-                if self.config.log_with == "wandb":
+                if self.pandm_run is not None:
+                    self.pandm_run.log_image(hash_hex, image, step=global_step, caption=sample_option.prompt)
+                elif self.config.log_with == "wandb":
                     import wandb
 
                     self.accelerator.log(
                         {
-                            f"{hash_hex}": [wandb.Image(clean_image, caption=f"{sample_option.prompt}")],
+                            f"{hash_hex}": [wandb.Image(image, caption=f"{sample_option.prompt}")],
                         },
                         step=global_step,
                     )

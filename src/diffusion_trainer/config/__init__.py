@@ -18,6 +18,13 @@ class SampleOptions:
     # or overexposed samples (Lin et al., "Common Diffusion Noise Schedules
     # and Sample Steps are Flawed"). Keep 0.0 for epsilon models.
     guidance_rescale: float = field(default=0.0)
+    # A1111-style hires fix for previews: lanczos-upscale the base output by
+    # hires_scale and img2img it at hires_strength. Off when <= 1. Small faces
+    # in full-body previews live below the 8x-VAE latent resolution at base
+    # size, so single-pass previews understate the model's detail ceiling.
+    hires_scale: float = field(default=0.0)
+    hires_strength: float = field(default=0.45)
+    hires_steps: int = field(default=20)
 
 
 @dataclass
@@ -137,6 +144,23 @@ class BaseConfig:
     brownian_noise_scale: float = field(default=1.0, metadata={"help": "Scale factor for Brownian noise amplitude."})
 
     # Advanced SNR options
+    vpred_epsilon_equivalent_weighting: bool = field(
+        default=False,
+        metadata={
+            "help": "v_prediction only: multiply the loss by SNR/(SNR+1) so the implicit x0-loss weight "
+            "matches epsilon training (SNR instead of SNR+1). Restores the detail-regime gradient share "
+            "that plain-MSE v-pred reallocates to low-SNR structure steps. A small SNR floor keeps the "
+            "ZTSNR terminal step trainable at low weight. Use with snr_gamma=0 (Min-SNR pulls the other way).",
+        },
+    )
+    vpred_epsilon_equivalent_weighting_start_step: int = field(
+        default=0,
+        metadata={
+            "help": "Curriculum for the epsilon-equivalent weighting: keep full (plain v-pred) weight until this "
+            "step so the epsilon->v affine remap and the ZTSNR terminal regime train at full strength, then switch "
+            "to SNR/(SNR+1) for the rest of the run to protect the detail regime. 0 applies it from the start.",
+        },
+    )
     use_smooth_min_snr: bool = field(default=True, metadata={"help": "Use smooth Min-SNR weighting instead of hard clipping when SNR gamma is set."})
     smooth_min_snr_mode: Literal["clip", "sigmoid", "tanh"] = field(default="sigmoid", metadata={"help": "Smoothing mode for Min-SNR."})
     smooth_min_snr_factor: float = field(default=0.15, metadata={"help": "Smoothing factor for Min-SNR (higher = less smooth, more stable)."})
@@ -210,7 +234,10 @@ class BaseConfig:
     preview_every_n_epochs: int = field(default=1, metadata={"help": "Preview every n epochs."})
     preview_before_training: bool = field(default=True, metadata={"help": "Generate preview before training starts."})
 
-    log_with: Literal["wandb", "tensorboard", "none"] = field(default="wandb", metadata={"help": "Logger."})
+    log_with: Literal["pandm", "wandb", "tensorboard", "none"] = field(
+        default="pandm",
+        metadata={"help": "Logger (pandm is local-first: metrics land in ./.pandm, view with `pandm ui`)."},
+    )
 
     optimizer: Literal["adamW8bit", "adafactor", "prodigy", "lion", "lion8bit"] = field(
         default="adamW8bit",
