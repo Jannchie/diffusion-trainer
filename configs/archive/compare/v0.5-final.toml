@@ -1,0 +1,101 @@
+# v0.5 sign-off comparison: ancestor, the damaged lineage, and the rebuilt
+# two-stage v0.5. Hires mode + CFG 9.5 (sweep-validated inference recipe).
+# Run AFTER both v0.5 stages finish.
+
+output_dir = "out/comparisons/v0.5-final"
+seeds = [47, 1024]
+steps = 28
+guidance_scale = 9.5
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+hires_scale = 1.6
+hires_strength = 0.45
+hires_steps = 20
+
+[[models]]
+name = "AOM3B2"
+path = "models/AOM3B2_orangemixs_fp16"
+guidance_rescale = 0.0
+guidance_scale = 7.5  # epsilon model: high CFG without rescale fries it
+clip_skip = 2
+
+[[models]]
+name = "v0.3"
+path = "out/pictoria-v0.3/pictoria-v0.3"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[models]]
+name = "v0.4-artist5"
+path = "out/pictoria-v0.4-artist5/pictoria-v0.4-artist5"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[models]]
+name = "v0.5-base"
+path = "out/pictoria-v0.5-base/pictoria-v0.5-base"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[models]]
+name = "v0.5"
+path = "out/pictoria-v0.5/pictoria-v0.5"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[prompts]]
+category = "baseline"
+prompt = "best quality, 1girl, solo, looking_at_viewer, long_hair, smile"
+
+[[prompts]]
+category = "baseline"
+prompt = "best quality, newest, 1girl, solo, upper_body, silver_hair, red_eyes, expressionless, black_coat"
+width = 640
+height = 896
+
+[[prompts]]
+category = "small-face"
+prompt = "best quality, newest, 1girl, solo, full_body, standing, twintails, blonde_hair, dress, simple_background"
+width = 576
+height = 1024
+
+[[prompts]]
+category = "small-face"
+prompt = "best quality, newest, 1girl, solo, fighting_stance, holding_sword, katana, full_body, dynamic_pose, cherry_blossoms, falling_petals"
+width = 576
+height = 1024
+
+[[prompts]]
+category = "exposure"
+prompt = "best quality, newest, 1girl, solo, black_dress, dark, night, moonlight, black_background, looking_at_viewer"
+width = 640
+height = 896
+
+[[prompts]]
+category = "exposure"
+prompt = "best quality, newest, 1girl, solo, white_dress, sunlight, day, blue_sky, cloud, field, flower, wind, smile, backlighting"
+width = 896
+height = 640
+
+[[prompts]]
+category = "character"
+prompt = 'best quality, newest, ganyu_\(genshin_impact\), genshin_impact, 1girl, solo, blue_hair, horns, purple_eyes, detached_sleeves, bell, gloves, flower'
+width = 640
+height = 896
+
+[[prompts]]
+category = "complex"
+prompt = 'best quality, newest, ask_\(askzy\), 1girl, arm_guards, black_bow, bow, breasts, cleavage, cleavage_cutout, closed_mouth, clothing_cutout, dark-skinned_female, dark_skin, floating_hair, hair_between_eyes, hair_bow, hair_ornament, high_collar, katana, large_breasts, long_hair, long_sleeves, looking_at_viewer, okita_souji_\(fate\), okita_souji_alter_\(fate\), parted_bangs, petals, red_eyes, solo, sword, tassel, upper_body, very_long_hair, weapon, white_hair, wide_sleeves'
+width = 576
+height = 1024
+
+[[prompts]]
+category = "complex"
+prompt = "best quality, newest, 1girl, apron, bread, cafe, coffee, coffee_cup, counter, cup, employee_uniform, food, head_scarf, holding, holding_tray, indoors, looking_at_viewer, menu, pastry, plant, sandwich, shelf, short_hair, smile, solo, standing, steam, tray, waitress, window, wooden_floor"
+width = 640
+height = 896
+
+[[prompts]]
+category = "era"
+prompt = "best quality, mid, 1girl, solo, looking_at_viewer, long_hair, school_uniform, upper_body"
+width = 640
+height = 896

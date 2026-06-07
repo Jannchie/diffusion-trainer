@@ -1,0 +1,79 @@
+# Two inference-side ablations on v0.4-detail, no retraining:
+#   1. EMA vs non-EMA — the -noema variant carries the raw step-2000 UNet from
+#      the accelerate state (EMA only wraps the UNet; the saved TE is already
+#      raw), so the pair isolates what EMA's weight averaging smooths away.
+#   2. guidance_rescale sweep (0.7 / 0.5 / 0.3) — rescale fixes ZTSNR+CFG
+#      exposure but flattens micro-contrast; find the detail/exposure tradeoff.
+
+output_dir = "out/comparisons/ema-rescale-ablation"
+seeds = [47, 1024]
+steps = 28
+guidance_scale = 7.5
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+hires_scale = 1.6
+hires_strength = 0.45
+hires_steps = 20
+
+[[models]]
+name = "EMA r0.7"
+path = "out/pictoria-v0.4-detail/pictoria-v0.4-detail"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[models]]
+name = "noEMA r0.7"
+path = "out/pictoria-v0.4-detail/pictoria-v0.4-detail-noema"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[models]]
+name = "EMA r0.5"
+path = "out/pictoria-v0.4-detail/pictoria-v0.4-detail"
+guidance_rescale = 0.5
+clip_skip = 2
+
+[[models]]
+name = "noEMA r0.5"
+path = "out/pictoria-v0.4-detail/pictoria-v0.4-detail-noema"
+guidance_rescale = 0.5
+clip_skip = 2
+
+[[models]]
+name = "EMA r0.3"
+path = "out/pictoria-v0.4-detail/pictoria-v0.4-detail"
+guidance_rescale = 0.3
+clip_skip = 2
+
+[[prompts]]
+category = "ablation"
+prompt = "best quality, 1girl, solo, looking_at_viewer, long_hair, smile"
+
+[[prompts]]
+category = "ablation"
+prompt = 'best quality, newest, ask_\(askzy\), 1girl, arm_guards, black_bow, bow, breasts, cleavage, cleavage_cutout, closed_mouth, clothing_cutout, dark-skinned_female, dark_skin, floating_hair, hair_between_eyes, hair_bow, hair_ornament, high_collar, katana, large_breasts, long_hair, long_sleeves, looking_at_viewer, okita_souji_\(fate\), okita_souji_alter_\(fate\), parted_bangs, petals, red_eyes, solo, sword, tassel, upper_body, very_long_hair, weapon, white_hair, wide_sleeves'
+width = 576
+height = 1024
+
+[[prompts]]
+category = "ablation"
+prompt = "best quality, newest, 1girl, solo, full_body, standing, twintails, blonde_hair, dress, simple_background"
+width = 576
+height = 1024
+
+[[prompts]]
+category = "ablation"
+prompt = "best quality, newest, 1girl, solo, black_dress, dark, night, moonlight, black_background, looking_at_viewer"
+width = 640
+height = 896
+
+[[prompts]]
+category = "ablation"
+prompt = "best quality, newest, 1girl, solo, white_dress, sunlight, day, blue_sky, cloud, field, flower, wind, smile, backlighting"
+width = 896
+height = 640
+
+[[prompts]]
+category = "ablation"
+prompt = "best quality, newest, 1girl, apron, bread, cafe, coffee, coffee_cup, counter, cup, employee_uniform, food, head_scarf, holding, holding_tray, indoors, looking_at_viewer, menu, pastry, plant, sandwich, shelf, short_hair, smile, solo, standing, steam, tray, waitress, window, wooden_floor"
+width = 640
+height = 896

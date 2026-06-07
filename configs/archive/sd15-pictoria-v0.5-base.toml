@@ -1,0 +1,153 @@
+# v0.5 stage 1: full-library run REBUILT FROM AOM3B2 — every prior checkpoint
+# carries damage from now-known-bad settings (v0.2/5star: 3e-5 + perturbation
+# 0.05 + EMA-from-step-0 over the conversion phase; v0.3: 2e-5 sustained over
+# 17.6k steps frayed high-frequency detail). This run folds the epsilon->v-pred
+# conversion into the first ~3k steps (detail-insensitive distribution-learning
+# phase) and applies all 2026-06 polish-matrix lessons:
+#   - peak LR 1.5e-5, cosine to 0: hot enough to convert, below the 2e-5+
+#     sustained regime that ground away detail (1e-5 was measured to RESTORE
+#     detail in the polish runs)
+#   - input_perturbation 0 (A-vs-C ablation: direct sharpness win)
+#   - AI-marker images excluded (meta tags are dropped from prompts, so they
+#     trained unmarked and leaked the AI look into the unconditional prior)
+#   - EMA off (EMA-vs-raw ablation: no visible benefit)
+#   - 3 epochs, not 4: the distribution shift lands in epoch 1; long tails
+#     only add fraying
+# Stage 2 afterwards: artist5 anneal (sd15-pictoria-v0.5-artist5.toml).
+#
+#   uv run python run_train.py --config configs/sd15-pictoria-v0.5-base.toml --model_family sd15
+
+seed = 47
+
+dataset_path = "hf://Jannchie/pictoria-full-768"
+
+model_path = "Jannchie/AOM3B2-orangemixs-fp16"
+model_name = "pictoria-v0.5-base"
+save_dir = "./out"
+
+clip_skip = 2
+
+# Converts the epsilon base during this finetune: expect washed/odd previews
+# for the first ~2-3k steps while the parameterization migrates.
+prediction_type = "v_prediction"
+rescale_betas_zero_snr = true
+
+vae_path = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"
+vae_dtype = "bf16"
+
+shuffle_tags = true
+single_tag_dropout = 0.05
+all_tags_dropout = 0.05
+caption_dropout = 0.0
+tag_category_order = ["quality", "year", "artist", "copyright", "character", "general"]
+shuffled_tag_categories = ["general"]
+droppable_tag_categories = ["general"]
+
+dataset_exclude_tags = [
+    "comic", "4koma", "2koma", "silent_comic", "photo_(medium)", "3d",
+    # AI markers are meta tags (dropped from prompts) — exclude or they train
+    # unmarked and bleed the AI look into the default distribution.
+    "ai-assisted", "ai-generated", "ai_generated", "nai_diffusion",
+]
+
+use_enhanced_embeddings = true
+
+mode = "full-finetune"
+
+optimizer = "adamW8bit"
+# Conversion needs heat early; sustained 2e-5+ is the measured fraying regime.
+# Cosine (num_cycles=1) decays through 1e-5 — the measured detail-restoring
+# band — across the back half of the run.
+unet_lr = 1.5e-5
+text_encoder_lr = 7e-6
+optimizer_warmup_steps = 500
+optimizer_num_cycles = 1
+
+# ~135k usable samples; batch 32 -> ~4.2k steps/epoch, 3 epochs ≈ 12.7k steps.
+n_epochs = 3
+batch_size = 32
+gradient_accumulation_steps = 1
+dataloader_num_workers = 4
+
+mixed_precision = "bf16"
+weight_dtype = "fp32"
+save_dtype = "fp16"
+gradient_checkpointing = true
+enable_flash_attention = true
+
+use_ema = false  # ablation 2026-06-07: no visible benefit; raw weights ship
+
+snr_gamma = 0
+timestep_bias_strategy = "uniform"
+noise_offset = 0.0
+use_multires_noise = false
+input_perturbation = 0.0  # ablation: perturbation softens the low-noise (detail) regime
+
+save_every_n_epochs = 1
+save_every_n_steps = 0
+preview_every_n_epochs = 0
+preview_every_n_steps = 1000
+checkpoint_every_n_steps = 4000
+
+# Preview prompts kept verbatim (same hashes as the v0.3/v0.4 runs).
+
+# Baseline: simple prompt, dataset-average era.
+[[preview_sample_options]]
+prompt = "best quality, 1girl, solo, looking_at_viewer, long_hair, smile"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 47
+steps = 25
+width = 768
+height = 768
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6
+
+# ZTSNR exposure test, dark end: true blacks instead of washed-out grey.
+[[preview_sample_options]]
+prompt = "best quality, newest, 1girl, solo, black_dress, dark, night, moonlight, black_background, looking_at_viewer"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 48
+steps = 25
+width = 640
+height = 896
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6
+
+# ZTSNR exposure test, bright end: high-key lighting without blowout.
+[[preview_sample_options]]
+prompt = "best quality, newest, 1girl, solo, white_dress, sunlight, day, blue_sky, cloud, field, flower, wind, smile, backlighting"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 49
+steps = 25
+width = 896
+height = 640
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6
+
+# Complex character prompt sampled from a real dataset row (parens escaped:
+# previews go through the A1111-style parser).
+[[preview_sample_options]]
+prompt = 'best quality, newest, ask_\(askzy\), 1girl, arm_guards, black_bow, bow, breasts, cleavage, cleavage_cutout, closed_mouth, clothing_cutout, dark-skinned_female, dark_skin, floating_hair, hair_between_eyes, hair_bow, hair_ornament, high_collar, katana, large_breasts, long_hair, long_sleeves, looking_at_viewer, okita_souji_\(fate\), okita_souji_alter_\(fate\), parted_bangs, petals, red_eyes, solo, sword, tassel, upper_body, very_long_hair, weapon, white_hair, wide_sleeves'
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 50
+steps = 25
+width = 576
+height = 1024
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6
+
+# Complex scene prompt sampled from a real dataset row (artist + many objects).
+[[preview_sample_options]]
+prompt = 'best quality, newest, wlop, 1girl, architecture, black_hair, bowl, cat, chinese_clothes, chopsticks, cloak, closed_eyes, day, east_asian_architecture, eating, flower, food, hair_ornament, hanfu, holding, jade_\(ghostblade\), outdoors, plate, short_hair, sitting, solo, table, teapot'
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 51
+steps = 25
+width = 1024
+height = 576
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6

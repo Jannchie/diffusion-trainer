@@ -1,0 +1,146 @@
+# v0.7 stage 2: artist5 anneal on the v-pred base — identical taste recipe to
+# v0.6-eps (the current sign-off winner), only the parameterization differs.
+# Detail-protection weighting is ON FROM STEP 0 here: the base already learned
+# the remap and the terminal regime; the anneal should spend its gradient on
+# style/detail, not on re-litigating structure.
+#
+# Final comparison after this run answers: does fixed v-pred beat v0.6-eps
+# (it must win on BOTH decisiveness-parity AND dark range to displace it).
+#
+#   uv run python run_train.py --config configs/sd15-pictoria-v0.7-vpred.toml --model_family sd15
+
+seed = 47
+
+dataset_path = "hf://Jannchie/pictoria-full-768"
+
+model_path = "./out/pictoria-v0.7-vpred-base/pictoria-v0.7-vpred-base"
+model_name = "pictoria-v0.7-vpred"
+save_dir = "./out"
+
+clip_skip = 2
+
+prediction_type = "v_prediction"
+rescale_betas_zero_snr = true
+
+vpred_epsilon_equivalent_weighting = true
+vpred_epsilon_equivalent_weighting_start_step = 0
+
+vae_path = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"
+vae_dtype = "bf16"
+
+shuffle_tags = true
+single_tag_dropout = 0.05
+all_tags_dropout = 0.05
+caption_dropout = 0.0
+tag_category_order = ["quality", "year", "artist", "copyright", "character", "general"]
+shuffled_tag_categories = ["general"]
+droppable_tag_categories = ["general"]
+
+# Top-8 artists by usable 5-star count — identical subset to v0.5/v0.6 anneals.
+dataset_include_any_tags = [
+    "maccha_(mochancc)", "scottie_(phantom2)", "classic_(zildjian33)",
+    "colorful_palette", "cutesexyrobutts", "guweiz", "mika_pikazo", "ciloranko",
+]
+dataset_exclude_tags = [
+    # best-quality only: exclude every lower tier to turn include_any into AND.
+    "worst quality", "bad quality", "normal quality", "good quality",
+    "comic", "4koma", "2koma", "silent_comic", "photo_(medium)", "3d",
+    "ai-assisted", "ai-generated", "ai_generated", "nai_diffusion",
+]
+
+use_enhanced_embeddings = true
+
+mode = "full-finetune"
+
+optimizer = "adamW8bit"
+unet_lr = 1e-5
+text_encoder_lr = 5e-6
+optimizer_warmup_steps = 100
+optimizer_num_cycles = 1
+
+n_epochs = 22
+batch_size = 32
+gradient_accumulation_steps = 1
+dataloader_num_workers = 4
+
+mixed_precision = "bf16"
+weight_dtype = "fp32"
+save_dtype = "fp16"
+gradient_checkpointing = true
+enable_flash_attention = true
+
+use_ema = false
+
+snr_gamma = 0
+timestep_bias_strategy = "uniform"
+noise_offset = 0.0
+use_multires_noise = false
+input_perturbation = 0.0
+
+save_every_n_epochs = 4
+save_every_n_steps = 0
+preview_every_n_epochs = 0
+preview_every_n_steps = 200
+checkpoint_every_n_steps = 2000
+
+# Preview prompts verbatim (same hashes as every other run); rescale 0.7.
+
+# Baseline: simple prompt, dataset-average era.
+[[preview_sample_options]]
+prompt = "best quality, 1girl, solo, looking_at_viewer, long_hair, smile"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 47
+steps = 25
+width = 768
+height = 768
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6
+
+# ZTSNR exposure test, dark end: true blacks instead of washed-out grey.
+[[preview_sample_options]]
+prompt = "best quality, newest, 1girl, solo, black_dress, dark, night, moonlight, black_background, looking_at_viewer"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 48
+steps = 25
+width = 640
+height = 896
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6
+
+# ZTSNR exposure test, bright end: high-key lighting without blowout.
+[[preview_sample_options]]
+prompt = "best quality, newest, 1girl, solo, white_dress, sunlight, day, blue_sky, cloud, field, flower, wind, smile, backlighting"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 49
+steps = 25
+width = 896
+height = 640
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6
+
+# Complex character prompt sampled from a real dataset row (parens escaped).
+[[preview_sample_options]]
+prompt = 'best quality, newest, ask_\(askzy\), 1girl, arm_guards, black_bow, bow, breasts, cleavage, cleavage_cutout, closed_mouth, clothing_cutout, dark-skinned_female, dark_skin, floating_hair, hair_between_eyes, hair_bow, hair_ornament, high_collar, katana, large_breasts, long_hair, long_sleeves, looking_at_viewer, okita_souji_\(fate\), okita_souji_alter_\(fate\), parted_bangs, petals, red_eyes, solo, sword, tassel, upper_body, very_long_hair, weapon, white_hair, wide_sleeves'
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 50
+steps = 25
+width = 576
+height = 1024
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6
+
+# Complex scene prompt sampled from a real dataset row (artist + many objects).
+[[preview_sample_options]]
+prompt = 'best quality, newest, wlop, 1girl, architecture, black_hair, bowl, cat, chinese_clothes, chopsticks, cloak, closed_eyes, day, east_asian_architecture, eating, flower, food, hair_ornament, hanfu, holding, jade_\(ghostblade\), outdoors, plate, short_hair, sitting, solo, table, teapot'
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 51
+steps = 25
+width = 1024
+height = 576
+clip_skip = 2
+guidance_rescale = 0.7
+hires_scale = 1.6

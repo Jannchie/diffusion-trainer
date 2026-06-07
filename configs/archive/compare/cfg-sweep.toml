@@ -1,0 +1,69 @@
+# CFG sweep on v0.4-artist5 (the taste-anchor model): same model at four
+# guidance scales, rescale fixed at 0.7. Higher CFG = stronger prompt
+# adherence and saturation/"pop", at the risk of artifacting and oversaturation
+# (partly absorbed by rescale on v-pred models).
+
+output_dir = "out/comparisons/cfg-sweep"
+seeds = [47, 1024]
+steps = 28
+guidance_scale = 7.5
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+hires_scale = 1.6
+hires_strength = 0.45
+hires_steps = 20
+
+[[models]]
+name = "cfg 5.5"
+path = "out/pictoria-v0.4-artist5/pictoria-v0.4-artist5"
+guidance_rescale = 0.7
+guidance_scale = 5.5
+clip_skip = 2
+
+[[models]]
+name = "cfg 7.5"
+path = "out/pictoria-v0.4-artist5/pictoria-v0.4-artist5"
+guidance_rescale = 0.7
+guidance_scale = 7.5
+clip_skip = 2
+
+[[models]]
+name = "cfg 9.5"
+path = "out/pictoria-v0.4-artist5/pictoria-v0.4-artist5"
+guidance_rescale = 0.7
+guidance_scale = 9.5
+clip_skip = 2
+
+[[models]]
+name = "cfg 11.5"
+path = "out/pictoria-v0.4-artist5/pictoria-v0.4-artist5"
+guidance_rescale = 0.7
+guidance_scale = 11.5
+clip_skip = 2
+
+[[prompts]]
+category = "cfg"
+prompt = "best quality, 1girl, solo, looking_at_viewer, long_hair, smile"
+
+[[prompts]]
+category = "cfg"
+prompt = 'best quality, newest, ask_\(askzy\), 1girl, arm_guards, black_bow, bow, breasts, cleavage, cleavage_cutout, closed_mouth, clothing_cutout, dark-skinned_female, dark_skin, floating_hair, hair_between_eyes, hair_bow, hair_ornament, high_collar, katana, large_breasts, long_hair, long_sleeves, looking_at_viewer, okita_souji_\(fate\), okita_souji_alter_\(fate\), parted_bangs, petals, red_eyes, solo, sword, tassel, upper_body, very_long_hair, weapon, white_hair, wide_sleeves'
+width = 576
+height = 1024
+
+[[prompts]]
+category = "cfg"
+prompt = "best quality, newest, 1girl, solo, black_dress, dark, night, moonlight, black_background, looking_at_viewer"
+width = 640
+height = 896
+
+[[prompts]]
+category = "cfg"
+prompt = "best quality, newest, 1girl, solo, white_dress, sunlight, day, blue_sky, cloud, field, flower, wind, smile, backlighting"
+width = 896
+height = 640
+
+[[prompts]]
+category = "cfg"
+prompt = "best quality, newest, 1girl, apron, bread, cafe, coffee, coffee_cup, counter, cup, employee_uniform, food, head_scarf, holding, holding_tray, indoors, looking_at_viewer, menu, pastry, plant, sandwich, shelf, short_hair, smile, solo, standing, steam, tray, waitress, window, wooden_floor"
+width = 640
+height = 896

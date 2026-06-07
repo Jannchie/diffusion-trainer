@@ -17,3 +17,5 @@ exports
 CLAUDE.md
 docs/.vitepress/cache
 docs/.vitepress/dist
+.claude/
+.pandm/

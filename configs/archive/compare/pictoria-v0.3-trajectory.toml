@@ -1,0 +1,104 @@
+# Training-trajectory diagnosis: where does the "abstract/loose" look enter?
+# AOM3B2 (epsilon ancestor) | v0.2 (init weights) | ep1..ep3 | v0.3 final.
+# All pictoria checkpoints are EMA saves with identical v-pred/ZTSNR schedulers,
+# so panel-to-panel differences are purely training progress.
+#
+#   uv run python scripts/compare_models.py --config configs/compare/pictoria-v0.3-trajectory.toml
+
+output_dir = "out/comparisons/pictoria-v0.3-trajectory"
+seeds = [47]
+steps = 28
+guidance_scale = 7.5
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+
+[[models]]
+name = "AOM3B2"
+path = "models/AOM3B2_orangemixs_fp16"
+guidance_rescale = 0.0
+clip_skip = 2
+
+[[models]]
+name = "v0.2 (init)"
+path = "out/pictoria-v0.2/pictoria-v0.2"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[models]]
+name = "v0.3 ep1"
+path = "out/pictoria-v0.3/pictoria-v0.3-ep1"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[models]]
+name = "v0.3 ep2"
+path = "out/pictoria-v0.3/pictoria-v0.3-ep2"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[models]]
+name = "v0.3 ep3"
+path = "out/pictoria-v0.3/pictoria-v0.3-ep3"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[models]]
+name = "v0.3 final"
+path = "out/pictoria-v0.3/pictoria-v0.3"
+guidance_rescale = 0.7
+clip_skip = 2
+
+[[prompts]]
+category = "trajectory"
+prompt = "best quality, 1girl, solo, looking_at_viewer, long_hair, smile"
+
+[[prompts]]
+category = "trajectory"
+prompt = "best quality, newest, 1girl, solo, looking_at_viewer, long_hair, school_uniform"
+width = 640
+height = 896
+
+[[prompts]]
+category = "trajectory"
+prompt = 'best quality, newest, ganyu_\(genshin_impact\), genshin_impact, 1girl, solo, blue_hair, horns, purple_eyes, detached_sleeves, bell, gloves, flower'
+width = 640
+height = 896
+
+[[prompts]]
+category = "trajectory"
+prompt = "best quality, newest, 1girl, solo, full_body, standing, twintails, blonde_hair, dress, simple_background"
+width = 576
+height = 1024
+
+[[prompts]]
+category = "trajectory"
+prompt = "best quality, newest, 1girl, solo, black_dress, dark, night, moonlight, black_background, looking_at_viewer"
+width = 640
+height = 896
+
+[[prompts]]
+category = "trajectory"
+prompt = 'best quality, newest, ask_\(askzy\), 1girl, arm_guards, black_bow, bow, breasts, cleavage, cleavage_cutout, closed_mouth, clothing_cutout, dark-skinned_female, dark_skin, floating_hair, hair_between_eyes, hair_bow, hair_ornament, high_collar, katana, large_breasts, long_hair, long_sleeves, looking_at_viewer, okita_souji_\(fate\), okita_souji_alter_\(fate\), parted_bangs, petals, red_eyes, solo, sword, tassel, upper_body, very_long_hair, weapon, white_hair, wide_sleeves'
+width = 576
+height = 1024
+
+[[prompts]]
+category = "trajectory"
+prompt = "best quality, newest, 1girl, apron, bread, cafe, coffee, coffee_cup, counter, cup, employee_uniform, food, head_scarf, holding, holding_tray, indoors, looking_at_viewer, menu, pastry, plant, sandwich, shelf, short_hair, smile, solo, standing, steam, tray, waitress, window, wooden_floor"
+width = 640
+height = 896
+
+[[prompts]]
+category = "trajectory"
+prompt = "best quality, newest, 2girls, holding_hands, smile, looking_at_another, school_uniform, cherry_blossoms, outdoors"
+
+[[prompts]]
+category = "trajectory"
+prompt = "best quality, newest, no_humans, scenery, mountain, lake, forest, sunrise, mist, reflection"
+width = 896
+height = 640
+
+[[prompts]]
+category = "trajectory"
+prompt = "best quality, newest, 1girl, solo, sitting, seiza, japanese_clothes, kimono, tatami, tea, indoors"
+width = 640
+height = 896
