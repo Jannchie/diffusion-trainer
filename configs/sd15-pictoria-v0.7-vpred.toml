@@ -22,8 +22,6 @@ clip_skip = 2
 prediction_type = "v_prediction"
 rescale_betas_zero_snr = true
 
-vpred_epsilon_equivalent_weighting = true
-vpred_epsilon_equivalent_weighting_start_step = 0
 
 vae_path = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"
 vae_dtype = "bf16"

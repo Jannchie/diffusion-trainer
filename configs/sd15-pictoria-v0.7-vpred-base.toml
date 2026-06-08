@@ -30,8 +30,6 @@ prediction_type = "v_prediction"
 rescale_betas_zero_snr = true
 
 # Detail-regime protection (see header). Terminal/conversion phase first:
-vpred_epsilon_equivalent_weighting = true
-vpred_epsilon_equivalent_weighting_start_step = 2000
 
 vae_path = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"
 vae_dtype = "bf16"
