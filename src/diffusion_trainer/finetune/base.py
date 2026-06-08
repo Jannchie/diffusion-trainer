@@ -251,6 +251,26 @@ class BaseTuner(ABC):
                 num_warmup_steps=self.config.optimizer_warmup_steps,
                 num_training_steps=n_total_steps,
             )
+        elif self.config.optimizer_restart_decay != 1.0 and self.config.optimizer_num_cycles > 1:
+            # SGDR-style restarts with decaying peaks: cycle k restarts at
+            # peak * decay^k. diffusers' cosine_with_restarts always returns to
+            # the full peak, which periodically re-enters the LR regime that
+            # grinds away pretrained high-frequency detail; decaying peaks
+            # shrink that damage every cycle while each valley consolidates.
+            warmup = self.config.optimizer_warmup_steps
+            cycles = self.config.optimizer_num_cycles
+            decay = self.config.optimizer_restart_decay
+
+            def sgdr_lambda(step: int) -> float:
+                if step < warmup:
+                    return step / max(1, warmup)
+                progress = (step - warmup) / max(1, n_total_steps - warmup)
+                progress = min(progress, 1.0 - 1e-8)
+                cycle = int(progress * cycles)
+                cycle_progress = progress * cycles - cycle
+                return (decay**cycle) * 0.5 * (1.0 + math.cos(math.pi * cycle_progress))
+
+            self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, sgdr_lambda)
         else:
             # For other optimizers, use cosine with restarts
             scheduler_type = SchedulerType.COSINE_WITH_RESTARTS
@@ -545,20 +565,6 @@ class BaseTuner(ABC):
         # Initialize weights to 1
         weights = torch.ones_like(loss_per_sample)
 
-        # Epsilon-equivalent allocation for v-pred: plain MSE on v carries an
-        # implicit (SNR+1) weight on the x0 error, vs SNR for epsilon — which
-        # shifts gradient share from the high-SNR detail regime to low-SNR
-        # structure steps. Multiplying by SNR/(SNR+1) restores the epsilon
-        # allocation exactly; the floor keeps the ZTSNR terminal step (SNR=0)
-        # trainable at low weight instead of dropping it entirely.
-        if (
-            self.config.vpred_epsilon_equivalent_weighting
-            and self.noise_scheduler.config.get("prediction_type") == "v_prediction"
-            and self.global_step >= self.config.vpred_epsilon_equivalent_weighting_start_step
-        ):
-            snr = self.all_snr[timesteps]
-            weights = weights * (snr.clamp(min=1e-2) / (snr + 1.0))
-
         # 2. If Debiased Estimation is enabled, compute and apply debiasing weights
         if self.config.use_debiased_estimation:
             debias_weights = compute_sqrt_inv_snr_weights(timesteps, self.all_snr)
@@ -735,7 +741,14 @@ class BaseTuner(ABC):
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
         num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
 
-        if self.config.timestep_bias_strategy == "uniform":
+        # Curriculum: any bias strategy samples uniformly until its start step,
+        # so the epsilon->v remap and the ZTSNR terminal regime train at full
+        # density before compute is reallocated to the detail regime.
+        strategy = self.config.timestep_bias_strategy
+        if strategy != "uniform" and self.global_step < self.config.timestep_bias_start_step:
+            strategy = "uniform"
+
+        if strategy == "uniform":
             # Sample a random timestep for each image without bias.
             timesteps = torch.randint(
                 0,
@@ -744,7 +757,7 @@ class BaseTuner(ABC):
                 device=self.accelerator.device,
                 dtype=torch.long,
             )
-        elif self.config.timestep_bias_strategy == "logit":
+        elif strategy == "logit":
             # Sample a random timestep for each image, potentially biased by the timestep weights.
             # Biasing the timestep weights allows us to spend less time training irrelevant timesteps
 
@@ -760,10 +773,18 @@ class BaseTuner(ABC):
                 device=self.accelerator.device,
             )
             timesteps = torch.multinomial(weights, batch_size, replacement=True)
-        elif self.config.timestep_bias_strategy == "lognormal":
+        elif strategy == "lognormal":
             timesteps = self._sample_timesteps_lognormal(batch_size)
+        elif strategy == "snr-detail":
+            # Sampler-side epsilon-equivalent allocation: density ∝ the same
+            # max(SNR, floor)/(SNR+1) used by the loss weighting, with unit
+            # loss weights — identical expected gradient, but no compute spent
+            # on near-zero-weight samples and homogeneous per-sample gradient
+            # scale. The floor keeps the ZTSNR terminal band at ~floor density.
+            weights = self.all_snr.clamp(min=self.config.vpred_snr_floor) / (self.all_snr + 1.0)
+            timesteps = torch.multinomial(weights, batch_size, replacement=True).to(self.accelerator.device)
         else:
-            msg = f"Unknown timestep bias strategy {self.config.timestep_bias_strategy}"
+            msg = f"Unknown timestep bias strategy {strategy}"
             raise ValueError(msg)
 
         # Use Counter to count sampled timesteps
@@ -923,6 +944,17 @@ class BaseTuner(ABC):
             model.eval()
         self.accelerator.wait_for_everyone()
 
+    def _scheduler_config_dict(self) -> dict:
+        """Pipeline scheduler config as a plain dict, without private keys.
+
+        ``from_config`` silently re-applies class defaults for every key listed
+        in ``_use_default_values`` — which ``register_to_config`` does NOT clear.
+        A base model whose scheduler JSON omits e.g. ``rescale_betas_zero_snr``
+        would therefore drop our registered updates. Stripping private keys
+        makes every explicit config value authoritative.
+        """
+        return {k: v for k, v in self.pipeline.scheduler.config.items() if not k.startswith("_")}
+
     def get_noise_scheduler(self) -> DDPMScheduler:
         """Set up the noise scheduler"""
         scheduler_config_updates = {}
@@ -942,10 +974,18 @@ class BaseTuner(ABC):
             scheduler_config_updates.setdefault("timestep_spacing", "trailing")
         if scheduler_config_updates:
             self.pipeline.scheduler.register_to_config(**scheduler_config_updates)
+            # register_to_config only mutates the config dict; betas/alphas_cumprod
+            # are computed in __init__. Rebuild the live instance so previews sample
+            # with the same schedule the training targets use (e.g. the
+            # ZTSNR-rescaled alphas — a stale instance keeps ~6.8% terminal signal
+            # and renders every v-pred preview washed out).
+            self.pipeline.scheduler = type(self.pipeline.scheduler).from_config(
+                self._scheduler_config_dict(),
+            )
 
         # Create the noise scheduler from the pipeline's scheduler configuration
         noise_scheduler = DDPMScheduler.from_config(
-            self.pipeline.scheduler.config,
+            self._scheduler_config_dict(),
         )
         if type(noise_scheduler) is not DDPMScheduler:
             msg = "Scheduler is not DDPMScheduler"

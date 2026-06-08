@@ -144,21 +144,12 @@ class BaseConfig:
     brownian_noise_scale: float = field(default=1.0, metadata={"help": "Scale factor for Brownian noise amplitude."})
 
     # Advanced SNR options
-    vpred_epsilon_equivalent_weighting: bool = field(
-        default=False,
+    vpred_snr_floor: float = field(
+        default=0.01,
         metadata={
-            "help": "v_prediction only: multiply the loss by SNR/(SNR+1) so the implicit x0-loss weight "
-            "matches epsilon training (SNR instead of SNR+1). Restores the detail-regime gradient share "
-            "that plain-MSE v-pred reallocates to low-SNR structure steps. A small SNR floor keeps the "
-            "ZTSNR terminal step trainable at low weight. Use with snr_gamma=0 (Min-SNR pulls the other way).",
-        },
-    )
-    vpred_epsilon_equivalent_weighting_start_step: int = field(
-        default=0,
-        metadata={
-            "help": "Curriculum for the epsilon-equivalent weighting: keep full (plain v-pred) weight until this "
-            "step so the epsilon->v affine remap and the ZTSNR terminal regime train at full strength, then switch "
-            "to SNR/(SNR+1) for the rest of the run to protect the detail regime. 0 applies it from the start.",
+            "help": "SNR floor for the snr-detail sampling density: the ZTSNR terminal regime (SNR=0) keeps this "
+            "fraction of probability instead of dropping to epsilon's literal zero, keeping the terminal band "
+            "trainable. Raise toward 0.05-0.1 if dark-scene capability stalls.",
         },
     )
     use_smooth_min_snr: bool = field(default=True, metadata={"help": "Use smooth Min-SNR weighting instead of hard clipping when SNR gamma is set."})
@@ -181,9 +172,22 @@ class BaseConfig:
         default=False,
         metadata={"help": "Compile models with torch.compile (inductor). Multi-resolution buckets can hit inductor dynamic-shape bugs on some torch versions."},
     )
-    timestep_bias_strategy: Literal["uniform", "logit", "lognormal"] = field(
+    timestep_bias_strategy: Literal["uniform", "logit", "lognormal", "snr-detail"] = field(
         default="uniform",
-        metadata={"help": "Timestep bias strategy. uniform keeps the high-noise tail trained (needed for ZTSNR); logit/lognormal focus on mid timesteps."},
+        metadata={
+            "help": "Timestep bias strategy. uniform keeps the high-noise tail trained (needed for ZTSNR); "
+            "logit/lognormal focus on mid timesteps; snr-detail samples t with p ∝ max(SNR, vpred_snr_floor)/(SNR+1), "
+            "concentrating compute in the detail regime with unit loss weights (no compute wasted on "
+            "near-zero-weight samples).",
+        },
+    )
+    timestep_bias_start_step: int = field(
+        default=0,
+        metadata={
+            "help": "Curriculum for biased timestep sampling: sample uniformly until this step (lets the "
+            "epsilon->v remap and the ZTSNR terminal regime train at full density), then switch to the "
+            "configured bias strategy. 0 applies the bias from the start.",
+        },
     )
     timestep_lognormal_mean: float = field(
         default=-1.2,
@@ -245,6 +249,14 @@ class BaseConfig:
     )
     optimizer_warmup_steps: int = field(default=0, metadata={"help": "Optimizer warmup steps."})
     optimizer_num_cycles: int = field(default=1, metadata={"help": "Optimizer num cycles."})
+    optimizer_restart_decay: float = field(
+        default=1.0,
+        metadata={
+            "help": "SGDR peak decay: with num_cycles > 1, each cosine restart peaks at peak_lr * decay^cycle. "
+            "1.0 keeps diffusers' full-amplitude restarts; ~0.7 shrinks each reheat so repeated cycles stop "
+            "re-entering the detail-grinding LR regime while every valley consolidates at a lower floor.",
+        },
+    )
 
     zero_grad_set_to_none: bool = field(default=True, metadata={"help": "Zero grad set to none."})
     preview_sample_options: list[SampleOptions] = field(default_factory=list, metadata={"help": "Preview sample options."})
