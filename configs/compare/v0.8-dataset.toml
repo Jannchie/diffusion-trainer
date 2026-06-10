@@ -1,0 +1,52 @@
+# Dataset-grounded character/artist comparison for the v0.8-eps lineage.
+#
+# Unlike configs/compare/*.toml (hand-written prompts), this config drives
+# scripts/compare_with_dataset.py: it samples REAL training rows from the
+# exported dataset, decodes each row's VAE latent back into the training-target
+# "original", rebuilds the prompt from that row's category-ordered tags exactly
+# the way training composes them, and renders [original | base | eps] panels.
+# It isolates two learning axes: artist style (top artist tags) and character
+# identity (top character tags).
+#
+# Run:
+#   uv run python scripts/compare_with_dataset.py --config configs/compare/v0.8-dataset.toml
+
+output_dir = "out/comparisons/v0.8-dataset"
+dataset = "hf://Jannchie/pictoria-full-768"
+
+# Inference (matches the v0.8-eps sign-off: CFG 7.5, rescale 0, clip_skip 2,
+# hires 1.6/0.45). One seed keeps the original/base/eps triptych comparable.
+seed = 47
+steps = 25
+guidance_scale = 7.5
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+hires_scale = 1.6
+hires_strength = 0.45
+hires_steps = 20
+
+# Selection: top-N artist tags and top-N character tags by usable-sample count,
+# `samples_per_tag` rows each. `min_tag_count` skips thin tags that would give
+# an unrepresentative style/identity read.
+n_artists = 16
+n_characters = 16
+samples_per_tag = 2
+min_tag_count = 8
+
+# Prompt assembly mirrors the v0.8-eps training config (front-loaded
+# quality/artist/character; meta dropped). Shuffle/dropout are OFF here so the
+# original and both models see byte-identical conditioning.
+tag_category_order = ["quality", "year", "artist", "copyright", "character", "general"]
+
+# The decoded training latent is always rendered as the leftmost "original"
+# panel; only list the checkpoints to compare against it here.
+[[models]]
+name = "v0.8-eps-base"
+path = "out/pictoria-v0.8-eps-base/pictoria-v0.8-eps-base"
+guidance_rescale = 0.0
+clip_skip = 2
+
+[[models]]
+name = "v0.8-eps"
+path = "out/pictoria-v0.8-eps/pictoria-v0.8-eps"
+guidance_rescale = 0.0
+clip_skip = 2
