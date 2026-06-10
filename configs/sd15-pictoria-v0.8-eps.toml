@@ -19,7 +19,7 @@
 #   - artist5 5★ subset (top-8 artists, best-quality AND), the stated taste target.
 #
 # Deliberately EXCLUDED, with reason (do not "improve" by adding these):
-#   - input_perturbation: > 0 measurably softens detail (v0.4 C vs A).
+#   - input_perturbation: > 0 measurably softens detail.
 #   - EMA: no visible effect on a ~1.4k-step anneal (ramp never engages); off = simpler.
 #   - Min-SNR (snr_gamma): untested here and v0.6 won at 0; it rebalances the
 #     loss the base was already happy with. If ever A/B'd, do it as v0.9 vs this.

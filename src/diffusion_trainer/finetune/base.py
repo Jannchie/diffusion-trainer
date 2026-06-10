@@ -44,7 +44,6 @@ from diffusion_trainer.finetune.utils import (
 from diffusion_trainer.finetune.utils.lora import apply_lora_config
 from diffusion_trainer.shared import get_progress
 from diffusion_trainer.utils.advanced_noise import (
-    adaptive_noise_schedule,
     brownian_noise,
     multi_resolution_noise,
     pyramid_noise,
@@ -146,9 +145,11 @@ class BaseTuner(ABC):
         self._log_initialization_info()
 
     def _initialize_environment(self) -> None:
-        """Initialize environment settings like seeds and CUDA cache."""
-        self.apply_seed_settings(self.config.seed)
+        """Initialize environment settings like CUDA cache.
 
+        Seeding is deferred to ``_initialize_accelerator`` so it can be offset
+        per rank once the distributed context exists.
+        """
         # Clear CUDA cache before loading models to ensure maximum available memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -162,6 +163,11 @@ class BaseTuner(ABC):
             torch_compile=self.config.torch_compile,
         )
         self.device = self.accelerator.device
+
+        # Offset the seed per rank so each process draws independent timesteps,
+        # noise and tag shuffle/dropout sequences (kohya convention: seed + rank).
+        # No-op for single-process runs where process_index == 0.
+        self.apply_seed_settings(self.config.seed + self.accelerator.process_index)
 
     def _initialize_pipeline_and_models(self) -> None:
         """Initialize pipeline, models, and training-related attributes."""
@@ -222,8 +228,13 @@ class BaseTuner(ABC):
         for model in self.training_models:
             model.train()
 
-        # Initialize EMA models if enabled
-        if self.config.use_ema:
+        # Initialize EMA models if enabled. EMA tracks self.pipeline.unet's
+        # parameters, which only train in full-finetune; in LoRA/LyCORIS modes the
+        # base UNet is frozen, so an EMA over it would shadow constant weights —
+        # wasted memory and a no-op. Skip it (and warn) outside full-finetune.
+        if self.config.use_ema and self.config.mode != "full-finetune":
+            logger.warning("use_ema is ignored in %s mode: the base UNet is frozen, so EMA over it is a no-op.", self.config.mode)
+        elif self.config.use_ema:
             self.ema_unet = self.get_ema(self.pipeline.unet, self.pipeline.unet.config, decay=self.config.ema_decay_long)
             if self.config.use_dual_ema:
                 self.ema_unet_short = self.get_ema(self.pipeline.unet, self.pipeline.unet.config, decay=self.config.ema_decay_short)
@@ -240,6 +251,15 @@ class BaseTuner(ABC):
         num_update_steps_per_epoch = math.ceil(len(data_loader) / self.config.gradient_accumulation_steps)
         n_total_steps = self.config.n_epochs * num_update_steps_per_epoch
 
+        # accelerate's AcceleratedScheduler advances the underlying scheduler once
+        # per process per optimizer step, so the schedule must be expressed in
+        # post-prepare units (× num_processes) or an N-GPU run finishes its LR
+        # curve N× early. No-op at num_processes == 1. (diffusers examples do the
+        # same: num_training_steps = max_train_steps * num_processes.)
+        sched_scale = self.accelerator.num_processes
+        sched_warmup_steps = self.config.optimizer_warmup_steps * sched_scale
+        sched_total_steps = n_total_steps * sched_scale
+
         # Initialize learning rate scheduler
         # Use different scheduler based on optimizer type
         if self.config.optimizer == "adafactor":
@@ -248,8 +268,8 @@ class BaseTuner(ABC):
             self.lr_scheduler = get_scheduler(
                 scheduler_type,
                 optimizer=self.optimizer,
-                num_warmup_steps=self.config.optimizer_warmup_steps,
-                num_training_steps=n_total_steps,
+                num_warmup_steps=sched_warmup_steps,
+                num_training_steps=sched_total_steps,
             )
         elif self.config.optimizer_restart_decay != 1.0 and self.config.optimizer_num_cycles > 1:
             # SGDR-style restarts with decaying peaks: cycle k restarts at
@@ -257,14 +277,14 @@ class BaseTuner(ABC):
             # the full peak, which periodically re-enters the LR regime that
             # grinds away pretrained high-frequency detail; decaying peaks
             # shrink that damage every cycle while each valley consolidates.
-            warmup = self.config.optimizer_warmup_steps
+            warmup = sched_warmup_steps
             cycles = self.config.optimizer_num_cycles
             decay = self.config.optimizer_restart_decay
 
             def sgdr_lambda(step: int) -> float:
                 if step < warmup:
                     return step / max(1, warmup)
-                progress = (step - warmup) / max(1, n_total_steps - warmup)
+                progress = (step - warmup) / max(1, sched_total_steps - warmup)
                 progress = min(progress, 1.0 - 1e-8)
                 cycle = int(progress * cycles)
                 cycle_progress = progress * cycles - cycle
@@ -277,38 +297,62 @@ class BaseTuner(ABC):
             self.lr_scheduler = get_scheduler(
                 scheduler_type,
                 optimizer=self.optimizer,
-                num_warmup_steps=self.config.optimizer_warmup_steps,
-                num_training_steps=n_total_steps,
+                num_warmup_steps=sched_warmup_steps,
+                num_training_steps=sched_total_steps,
                 num_cycles=self.config.optimizer_num_cycles,
             )
         self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
 
         # Initialize trackers
-        timestamp = datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
-        if self.config.log_with == "pandm":
-            if self.accelerator.is_main_process:
-                import pandm
+        self._initialize_trackers(n_total_steps)
 
-                # Round-trip through JSON so non-scalar config entries (paths,
-                # nested sample options, ...) serialize instead of erroring.
-                config_snapshot = json.loads(json.dumps(self.config.__dict__, default=str))
-                self.pandm_run = pandm.init(
-                    project="diffusion-trainer",
-                    name=f"{self.config.model_name}-{timestamp}",
-                    config=config_snapshot,
-                )
-        else:
+        return num_update_steps_per_epoch, n_total_steps
+
+    def _initialize_trackers(self, n_total_steps: int) -> None:
+        """Initialize the experiment tracker (pandm run or accelerate trackers)."""
+        timestamp = datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
+        if self.config.log_with != "pandm":
             self.accelerator.init_trackers(
                 "diffusion-trainer",
                 config=self.config.__dict__,
-                init_kwargs={
-                    "wandb": {
-                        "name": timestamp,  # Set run name to timestamp
-                    },
-                },
+                init_kwargs={"wandb": {"name": timestamp}},
             )
+            return
 
-        return num_update_steps_per_epoch, n_total_steps
+        if not self.accelerator.is_main_process:
+            return
+
+        import pandm
+
+        # Round-trip through JSON so non-scalar config entries (paths, nested
+        # sample options, ...) serialize instead of erroring.
+        config_snapshot = json.loads(json.dumps(self.config.__dict__, default=str))
+
+        # Resume continuity: when a usable accelerate checkpoint exists we reopen
+        # the SAME pandm run (id persisted alongside the state) so a restart
+        # appends to one timeline instead of spawning a fresh run each time.
+        # total_steps declares the training length so the dashboard shows an ETA
+        # — it then tracks the per-step log(step=global_step) automatically.
+        # (Literal state filenames mirror the resume path in execute_training;
+        # they are stable accelerate conventions.)
+        state_dir = self.save_path / "state"
+        run_id_file = state_dir / "pandm_run_id"
+        resuming = (state_dir / "optimizer.bin").exists() and (state_dir / "global_steps").exists()
+        saved_run_id = run_id_file.read_text().strip() if resuming and run_id_file.exists() else None
+
+        self.pandm_run = pandm.init(
+            project="diffusion-trainer",
+            name=f"{self.config.model_name}-{timestamp}",
+            config=config_snapshot,
+            total_steps=n_total_steps,
+            id=saved_run_id,
+            resume="allow" if saved_run_id else False,
+        )
+
+        # Persist the run id so a future resume reattaches to this run.
+        if saved_run_id is None:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            run_id_file.write_text(self.pandm_run.id)
 
     def _prepare_trainable_models(self) -> None:
         """Wrap trainable models with accelerator and keep runtime references aligned."""
@@ -439,11 +483,12 @@ class BaseTuner(ABC):
         Performs backward pass, gradient clipping, optimizer step,
         learning rate scheduling and optimizer zero_grad.
         """
-        if torch.isnan(loss):
-            logger.info("Loss is NaN.")
-            msg = "Loss is NaN."
-            raise ValueError(msg)
-
+        # NaN is detected at the optimizer-step boundary below via the loss value
+        # that is already synced for logging — a per-micro-step torch.isnan(loss)
+        # check would force its own GPU->CPU sync every micro-step. A NaN micro-loss
+        # propagates into _loss_accum (NaN-poisoning the mean), so the boundary
+        # check still catches it; training aborts before the corrupted step matters.
+        #
         # Accumulate the local loss on-device. The cross-process gather and the
         # GPU->CPU sync are deferred to the optimizer-step boundary below, so they
         # run once per optimizer step rather than once per micro-step.
@@ -491,6 +536,10 @@ class BaseTuner(ABC):
             self.train_loss = avg_loss.item()
             self._loss_accum.zero_()
             self._micro_step_count = 0
+            if math.isnan(self.train_loss):
+                logger.info("Loss is NaN.")
+                msg = "Loss is NaN."
+                raise ValueError(msg)
 
     def _should_step_ema(self, step: int) -> bool:
         return self.config.use_ema and step >= self.config.ema_start_step
@@ -694,15 +743,6 @@ class BaseTuner(ABC):
             if input_perturbation > 0:
                 noise = noise + input_perturbation * torch.randn_like(noise)
 
-        # Apply adaptive noise scheduling if configured
-        if self.config.use_adaptive_noise:
-            noise = adaptive_noise_schedule(
-                noise,
-                timesteps,
-                noise_schedule_type=self.config.adaptive_noise_type,
-                strength_factor=self.config.adaptive_noise_strength,
-            )
-
         return self.noise_scheduler.add_noise(latents, noise, timesteps)  # type: ignore
 
     def _sample_timesteps_lognormal(self, batch_size: int) -> torch.Tensor:
@@ -822,7 +862,10 @@ class BaseTuner(ABC):
     @contextmanager
     def use_ema_weights(self) -> Generator[None, None, None]:
         """Temporarily swap UNet weights to EMA for eval/save, then restore."""
-        if not self.config.use_ema or self.ema_unet is None:
+        # Before ema_start_step the shadow still holds the construction-time
+        # (initial) weights — swapping it in would export a barely-trained model.
+        # _should_step_ema gates on the same boundary the EMA updates begin at.
+        if self.ema_unet is None or not self._should_step_ema(self.global_step):
             yield
             return
         self.ema_unet.store(self.pipeline.unet.parameters())
@@ -969,6 +1012,12 @@ class BaseTuner(ABC):
                     "rescale_betas_zero_snr with %s prediction is unsound: x0 cannot be recovered at SNR=0, "
                     "and previews may intermittently render black (NaN at the terminal step). Use v_prediction or disable it.",
                     effective_prediction,
+                )
+            if self.config.use_debiased_estimation:
+                logger.warning(
+                    "use_debiased_estimation with rescale_betas_zero_snr is unstable: the 1/sqrt(SNR) weight "
+                    "hits ~1e4 at the ZTSNR terminal band (SNR clamped to 1e-8), so terminal samples dominate "
+                    "the gradient and loss can explode. Disable one of them.",
                 )
             scheduler_config_updates["rescale_betas_zero_snr"] = True
             scheduler_config_updates.setdefault("timestep_spacing", "trailing")
@@ -1387,9 +1436,9 @@ class BaseTuner(ABC):
             "ss_network_args": f'{{"algo": "{self.config.mode}"}}',
             # Basic info
             "format": "pt",
-            "ss_base_model_version": "sd_v1" if "sd15" in str(self.config.model_path).lower() else "sdxl_v1",
+            "ss_base_model_version": self.lora_base_model_version,
             "ss_training_comment": f"LyCORIS {self.config.mode.upper()} training",
-            "ss_resolution": "512,512" if "sd15" in str(self.config.model_path).lower() else "1024,1024",
+            "ss_resolution": self.lora_metadata_resolution,
         }
 
         # Add algorithm-specific metadata
@@ -1415,88 +1464,9 @@ class BaseTuner(ABC):
         )
 
     def save_lora_model(self, filename: str) -> None:
-        """Save LoRA model in both LyCORIS and diffusers formats."""
-        # Create metadata first
+        """Save LoRA model in LyCORIS native format (loadable by kohya/WebUI/LyCORIS)."""
         metadata = self._create_lora_metadata()
-
-        # Save LyCORIS format
         self._save_lycoris_format_lora(filename, metadata)
-
-        # Also create a diffusers-compatible version if possible
-        self._save_diffusers_compatible_lora(filename, metadata)
-
-    def _save_diffusers_compatible_lora(self, filename: str, metadata: dict[str, str]) -> None:
-        """Save a diffusers-compatible LoRA that can be loaded with pipeline.load_lora_weights()"""
-        try:
-            # Only attempt for LoRA mode
-            if self.config.mode == "lora":
-                from diffusers.utils.state_dict_utils import convert_state_dict_to_diffusers
-                from peft.utils import get_peft_model_state_dict
-
-                diffusers_path = self.save_path / f"{filename}_diffusers.safetensors"
-
-                # Get the current state dict directly from the model
-                if hasattr(self, "lycoris_model") and self.lycoris_model is not None:
-                    # Method 1: Try to get PEFT state dict if available
-                    try:
-                        peft_state_dict = get_peft_model_state_dict(self.lycoris_model)
-                        diffusers_state_dict = convert_state_dict_to_diffusers(peft_state_dict)
-
-                        # Save using pipeline's method
-                        unet_lora_layers = {}
-                        text_encoder_lora_layers = {}
-
-                        for key, value in diffusers_state_dict.items():
-                            if key.startswith("text_encoder"):
-                                text_encoder_lora_layers[key] = value
-                            else:
-                                unet_lora_layers[key] = value
-
-                        self.pipeline.save_lora_weights(
-                            save_directory=str(self.save_path),
-                            unet_lora_layers=unet_lora_layers or None,
-                            text_encoder_lora_layers=text_encoder_lora_layers or None,
-                            weight_name=f"{filename}_diffusers.safetensors",
-                        )
-
-                        logger.info("Created diffusers-compatible LoRA using PEFT conversion at %s", diffusers_path)
-                    except Exception as e1:
-                        logger.debug("PEFT conversion failed: %s", e1)
-                    else:
-                        return
-
-                # Method 2: Manual key conversion fallback
-                logger.info("Attempting manual LyCORIS to diffusers conversion...")
-                from safetensors.torch import load_file, save_file
-
-                # Load the just-saved LyCORIS file
-                lycoris_file = self.save_path / f"{filename}.safetensors"
-                lycoris_state_dict = load_file(lycoris_file)
-
-                # Convert LyCORIS keys to diffusers format
-                diffusers_state_dict = {}
-                for key, value in lycoris_state_dict.items():
-                    if key.startswith("lycoris_"):
-                        # Remove lycoris_ prefix and convert format
-                        new_key = key.replace("lycoris_", "")
-                        # Convert underscore format to dot format for diffusers
-                        new_key = new_key.replace("_", ".", 6)  # Convert first 6 underscores to dots
-                        diffusers_state_dict[new_key] = value
-                    else:
-                        diffusers_state_dict[key] = value
-
-                # Add diffusers-specific metadata
-                diffusers_metadata = metadata.copy()
-                diffusers_metadata["library_name"] = "diffusers"
-
-                # Save the converted file
-                save_file(diffusers_state_dict, diffusers_path, metadata=diffusers_metadata)
-
-                logger.info("Created diffusers-compatible LoRA using manual conversion at %s", diffusers_path)
-
-        except Exception as e:
-            logger.warning("Could not create diffusers-compatible version: %s", e)
-            # This is not a fatal error, continue with the original LyCORIS save
 
     def save_full_finetune_model(self, filename: str) -> None:
         self.save_path.mkdir(parents=True, exist_ok=True)
@@ -1516,6 +1486,16 @@ class BaseTuner(ABC):
             self.pipeline.to(self.save_dtype)
             self.pipeline.save_pretrained(self.save_path / f"{filename}")
             self.pipeline.to(self.weight_dtype)
+
+    @property
+    def lora_base_model_version(self) -> str:
+        """kohya/WebUI ``ss_base_model_version`` tag. Overridden per architecture."""
+        return "sdxl_v1"
+
+    @property
+    def lora_metadata_resolution(self) -> str:
+        """kohya/WebUI ``ss_resolution`` tag. Overridden per architecture."""
+        return "1024,1024"
 
     @property
     def training_prompts_use_attention_parser(self) -> bool:

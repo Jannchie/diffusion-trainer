@@ -223,39 +223,3 @@ def smooth_min_snr_weights(
     return weights
 
 
-def adaptive_noise_schedule(
-    base_noise: torch.Tensor,
-    timesteps: torch.Tensor,
-    noise_schedule_type: Literal["linear", "cosine", "exponential"] = "cosine",
-    strength_factor: float = 1.0,
-) -> torch.Tensor:
-    """
-    Apply adaptive noise scheduling based on timesteps.
-
-    Args:
-        base_noise: Base noise tensor
-        timesteps: Current timesteps
-        noise_schedule_type: Type of noise schedule to apply
-        strength_factor: Overall strength multiplier
-
-    Returns:
-        Scheduled noise tensor
-    """
-    # Normalize timesteps to [0, 1]
-    t_norm = timesteps.float() / 1000.0  # Assuming max 1000 timesteps
-
-    if noise_schedule_type == "linear":
-        schedule = 1.0 - t_norm
-    elif noise_schedule_type == "cosine":
-        schedule = 0.5 * (1 + torch.cos(torch.pi * t_norm))
-    elif noise_schedule_type == "exponential":
-        schedule = torch.exp(-2.0 * t_norm)
-    else:
-        msg = f"Unknown noise schedule type: {noise_schedule_type}"
-        raise ValueError(msg)
-
-    # Reshape schedule to match noise dimensions
-    while schedule.dim() < base_noise.dim():
-        schedule = schedule.unsqueeze(-1)
-
-    return base_noise * schedule * strength_factor

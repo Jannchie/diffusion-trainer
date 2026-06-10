@@ -85,6 +85,14 @@ class SD15Tuner(BaseTuner):
         self.models.append(lycoris_model)
 
     @property
+    def lora_base_model_version(self) -> str:
+        return "sd_v1"
+
+    @property
+    def lora_metadata_resolution(self) -> str:
+        return "512,512"
+
+    @property
     def training_prompts_use_attention_parser(self) -> bool:
         return self.config.use_enhanced_embeddings
 

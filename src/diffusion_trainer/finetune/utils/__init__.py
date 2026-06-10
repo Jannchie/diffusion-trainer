@@ -122,8 +122,6 @@ def prepare_accelerator(
 
     if dtype == torch.float16:
         mixed_precision = PrecisionType.FP16
-    elif dtype == torch.half:
-        mixed_precision = PrecisionType.FP8
     elif dtype == torch.float32:
         mixed_precision = PrecisionType.NO
     elif dtype == torch.bfloat16:

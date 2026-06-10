@@ -123,8 +123,8 @@ class BaseConfig:
         metadata={"help": "Probability of applying noise offset. 0.25 means 25% of the time. 1.0 means always."},
     )
     input_perturbation: float = field(
-        default=0.01,
-        metadata={"help": "Input perturbation strength for improved training stability. 0.01-0.1 recommended."},
+        default=0.0,
+        metadata={"help": "Input perturbation strength. Off by default — measurably softens fine detail. 0.01-0.1 if enabled."},
     )
     input_perturbation_steps: int = field(
         default=0,
@@ -155,11 +155,6 @@ class BaseConfig:
     use_smooth_min_snr: bool = field(default=True, metadata={"help": "Use smooth Min-SNR weighting instead of hard clipping when SNR gamma is set."})
     smooth_min_snr_mode: Literal["clip", "sigmoid", "tanh"] = field(default="sigmoid", metadata={"help": "Smoothing mode for Min-SNR."})
     smooth_min_snr_factor: float = field(default=0.15, metadata={"help": "Smoothing factor for Min-SNR (higher = less smooth, more stable)."})
-
-    # Adaptive noise scheduling
-    use_adaptive_noise: bool = field(default=False, metadata={"help": "Use adaptive noise scheduling based on timesteps."})
-    adaptive_noise_type: Literal["linear", "cosine", "exponential"] = field(default="cosine", metadata={"help": "Type of adaptive noise schedule."})
-    adaptive_noise_strength: float = field(default=1.0, metadata={"help": "Strength factor for adaptive noise."})
 
     # Flash Attention (xformers) support
     enable_flash_attention: bool = field(
@@ -262,7 +257,6 @@ class BaseConfig:
     preview_sample_options: list[SampleOptions] = field(default_factory=list, metadata={"help": "Preview sample options."})
 
     checkpoint_every_n_steps: int = field(default=1000, metadata={"help": "Checkpoint steps."})
-    checkpoint_epochs: int = field(default=0, metadata={"help": "Checkpoint epochs."})
 
     def __post_init__(self) -> None:
         # convert preview_sample_options to SampleOptions
