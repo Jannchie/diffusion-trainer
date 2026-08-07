@@ -25,7 +25,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
 
     parser.add_argument("--config", type=str, default="configs/sd15.toml", help="Path to the config file.")
-    parser.add_argument("--model_family", type=str, default="sd15", choices=["sd15", "sdxl"])
+    parser.add_argument("--model_family", type=str, default="sd15", choices=["sd15", "sdxl", "lumina2"])
     args = parser.parse_args()
 
     logger.info('Loading config from "%s"', args.config)
@@ -43,4 +43,11 @@ if __name__ == "__main__":
 
         config = SD15Config(**config_dict)
         tuner = SD15Tuner(config)
+        tuner.train()
+    elif model_family == "lumina2":
+        from diffusion_trainer.config import Lumina2Config
+        from diffusion_trainer.finetune.lumina2 import Lumina2Tuner
+
+        config = Lumina2Config(**config_dict)
+        tuner = Lumina2Tuner(config)
         tuner.train()

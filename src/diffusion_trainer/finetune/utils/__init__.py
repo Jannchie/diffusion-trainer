@@ -8,7 +8,7 @@ from dataclasses import asdict
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
-from typing import Literal, NamedTuple, NotRequired, Protocol, Self, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Literal, NamedTuple, NotRequired, Protocol, Self, TypedDict, TypeVar
 
 import torch
 import wandb
@@ -20,6 +20,9 @@ from diffusers.utils.torch_utils import is_compiled_module
 
 from diffusion_trainer.config import SampleOptions
 from diffusion_trainer.utils.dtype import str_to_dtype as str_to_dtype  # re-export
+
+if TYPE_CHECKING:
+    from diffusers.pipelines.lumina2.pipeline_lumina2 import Lumina2Pipeline
 
 logger = getLogger("diffusion_trainer")
 
@@ -374,10 +377,26 @@ def initialize_optimizer(optimizer_str: str, trainable_parameters_dicts: list[Pa
     return optimizer
 
 
-def compute_sqrt_inv_snr_weights(timesteps: torch.Tensor, all_snr: torch.Tensor) -> torch.Tensor:
+def load_lumina2_pipeline(
+    path: PathLike | str,
+    dtype: torch.dtype,
+) -> "Lumina2Pipeline":
+    """Load a Lumina 2 pipeline (NextDiT + Gemma-2 + 16-channel VAE).
+
+    Flash attention stays off: ``enable_flash_attention_pipeline`` swaps in
+    diffusers' ``XFormersAttnProcessor``, which targets the UNet attention API.
+    Lumina 2's DiT runs on diffusers' native attention dispatch (SDPA / flash
+    when torch has it), so there is nothing to patch and patching would break it.
     """
-    Compute 1 / sqrt(SNR) weights.
-    """
-    snr_t = all_snr[timesteps].to(timesteps.device)  # Ensure device consistency
-    snr_t = torch.clamp(snr_t, min=1e-8, max=1000)  # Prevent both division by zero and excessively large values by adding a minimum clamp
-    return 1.0 / torch.sqrt(snr_t)
+    from diffusers.pipelines.lumina2.pipeline_lumina2 import Lumina2Pipeline
+
+    if Path(path).suffix == ".safetensors":
+        msg = (
+            f"Lumina 2 needs a diffusers-format folder, got a single file: {path}. "
+            "The all-in-one ComfyUI checkpoint bundles the DiT, Gemma-2 and the VAE in one file with no "
+            "diffusers config; convert it first or point model_path at a diffusers repo."
+        )
+        raise ValueError(msg)
+    # Lumina2Pipeline has no from_single_file, but the check above guarantees
+    # load_pipeline takes its from_pretrained branch.
+    return load_pipeline(path, dtype, Lumina2Pipeline, enable_flash_attention=False)  # type: ignore[type-var]

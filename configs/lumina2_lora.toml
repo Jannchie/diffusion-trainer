@@ -1,0 +1,136 @@
+# Neta Lumina (Lumina 2 / NextDiT) LoRA — the recommended entry point for this
+# family. 2.6B params: a rank-16 LoRA over attention + FFN trains comfortably on
+# a single 24GB card, where full-finetune needs optimizer state for all of it.
+#
+#   TORCH_DISABLE_NATIVE_JIT=1 uv run python run_train.py --config configs/lumina2_lora.toml --model_family lumina2
+#
+# That env var is a workaround for THIS machine, not a Lumina requirement: the
+# system is missing python3.12-dev, so torch 2.13's `_native` path cannot JIT
+# its triton kernels and Gemma-2's rope crashes with a gcc error about
+# Python.h. Installing `python3.12-dev` removes the need for it. SD 1.5 / SDXL
+# never hit that op, which is why this only shows up now.
+#
+# BEFORE THE FIRST RUN — the dataset must be re-encoded. Lumina 2 uses the
+# 16-channel FLUX VAE, not SD's 4-channel one, so latents prepared for the
+# SD15/SDXL lineage are unusable here (wrong channel count, wrong scaling, and
+# a shift_factor the SD VAEs don't have):
+#
+#   uv run python run_prepare.py \
+#     --image_path <your images> \
+#     --target_path datasets/lumina2-<name> \
+#     --vae_path VirtualAddressExtension/Neta-Lumina-v1.0-diffusers \
+#     --base_resolution 1024
+#
+# Which BaseConfig options go DEAD here (the tuner warns if you set them):
+# prediction_type, rescale_betas_zero_snr, snr_gamma, use_debiased_estimation,
+# timestep_bias_strategy, clip_skip. They are all DDPM concepts. The
+# rectified-flow equivalents are the flow_match_* block below.
+
+seed = 47
+
+# Diffusers-format Neta Lumina. The official neta-art/Neta-Lumina repo ships a
+# single all-in-one ComfyUI safetensors instead, which has no diffusers config
+# to load from — the tuner rejects it with a pointer to this.
+model_path = "VirtualAddressExtension/Neta-Lumina-v1.0-diffusers"
+model_name = "lumina2-lora"
+save_dir = "./out/lumina2"
+
+dataset_path = "datasets/lumina2-sample"
+
+# The VAE ships inside the model repo, so no separate vae_path is needed for
+# training; run_prepare.py still needs one to encode the latents.
+vae_dtype = "bf16"
+
+# --- Conditioning -----------------------------------------------------------
+# Gemma-2 2B, not CLIP. 256 tokens INCLUDING the ~35-token system prompt, so
+# roughly 220 are left for tags — generous next to SD's 77 but not unlimited.
+max_sequence_length = 256
+# Penultimate hidden state, matching how Lumina 2 was trained and what the
+# diffusers pipeline uses. This is the Gemma analogue of clip_skip = 2.
+gemma_skip_layers = 2
+# 0 keeps Gemma-2 frozen. Training a 2B LLM alongside a 2.6B DiT is a good way
+# to lose prompt adherence; LoRA wraps the DiT only regardless.
+text_encoder_lr = 0.0
+
+# Booru-style tags, same category ordering as the SD lineage. Neta Lumina was
+# trained on Danbooru-style tags AND natural language, so both work; tags are
+# what this pipeline produces.
+shuffle_tags = true
+single_tag_dropout = 0.0
+all_tags_dropout = 0.0
+caption_dropout = 0.0
+tag_category_order = ["quality", "year", "artist", "copyright", "character", "general"]
+shuffled_tag_categories = ["general"]
+droppable_tag_categories = ["general"]
+# Teach the unconditional branch that CFG guidance relies on.
+condition_dropout_prob = 0.05
+
+# --- Rectified flow ---------------------------------------------------------
+# logit_normal concentrates sigma near the middle of the trajectory, where the
+# velocity field is hardest to fit (SD3 paper, §3.1). Pair with uniform loss
+# weighting: the sampling density already does the reweighting.
+flow_match_timestep_sampling = "logit_normal"
+flow_match_logit_mean = 0.0
+flow_match_logit_std = 1.0
+flow_match_loss_weighting = "uniform"
+# Left unset, the sigma shift follows the model's own sampler (Lumina 2 ships
+# 6.0), so training and inference stay on the same sigma band. Set it
+# explicitly to sweep — it is the most consequential knob in this block, and
+# 1.0 (the unshifted trajectory) is the natural thing to compare against.
+# flow_match_shift = 1.0
+
+# --- LoRA -------------------------------------------------------------------
+# Targets Attention + LuminaFeedForward (the DiT's SwiGLU). A DiT has no
+# conv path, so `locon` would be identical to `lora` here.
+mode = "lora"
+lora_dim = 16
+lora_alpha = 8
+
+optimizer = "adamW8bit"
+unet_lr = 1e-4  # DiT LoRAs tolerate less than SD's 2e-4; raise only if underfitting
+optimizer_warmup_steps = 100
+optimizer_num_cycles = 1
+
+n_epochs = 20
+batch_size = 2
+gradient_accumulation_steps = 2
+dataloader_num_workers = 4
+
+mixed_precision = "bf16"
+weight_dtype = "bf16"
+save_dtype = "fp16"
+gradient_checkpointing = true
+# xformers' attention processor targets the UNet API; the DiT runs on diffusers'
+# native SDPA dispatch, so this is ignored either way.
+enable_flash_attention = false
+
+use_ema = false
+# Offset noise is an epsilon-parameterization patch for the fact that SD never
+# sees a truly black image. Rectified flow interpolates all the way to sigma=1,
+# so the dynamic range is already covered — leave it off.
+noise_offset = 0.0
+input_perturbation = 0.0
+
+save_every_n_epochs = 5
+preview_every_n_epochs = 5
+checkpoint_every_n_steps = 500
+
+# guidance_scale 4.0 is the pipeline default for Lumina 2 (much lower than SD's
+# 7.5). guidance_rescale is a SD-only field and is ignored here.
+[[preview_sample_options]]
+prompt = "best quality, 1girl, solo, looking at viewer, long hair, smile, outdoors, cherry blossoms"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 47
+steps = 30
+width = 1024
+height = 1024
+guidance_scale = 4.0
+
+[[preview_sample_options]]
+prompt = "best quality, scenery, no humans, mountain, lake, sunset, reflection, cloud, forest"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 48
+steps = 30
+width = 1152
+height = 896
+guidance_scale = 4.0

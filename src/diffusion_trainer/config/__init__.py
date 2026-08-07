@@ -95,7 +95,7 @@ class BaseConfig:
         metadata={"help": "Number of DataLoader worker processes. 0 loads latents on the main process (GPU stalls on disk IO). >0 prefetches in parallel."},
     )
 
-    mode: Literal["full-finetune", "lora", "lokr", "loha"] = field(default="lokr", metadata={"help": "Mode."})
+    mode: Literal["full-finetune", "lora", "lokr", "loha", "locon"] = field(default="lokr", metadata={"help": "Mode."})
 
     # Common LoRA parameters (used by all LoRA variants)
     lora_dim: int = field(default=16, metadata={"help": "Dimension for all LoRA variants (lora, loha, locon)."})
@@ -280,3 +280,91 @@ class SDXLConfig(BaseConfig):
 class SD15Config(BaseConfig):
     text_encoder_lr: float = field(default=1e-6, metadata={"help": "Text encoder learning rate."})
     clip_skip: int = field(default=2, metadata={"help": "CLIP skip, A1111/WebUI semantics: 1 = last layer, 2 = penultimate layer (NAI convention)."})
+
+
+@dataclass
+class FlowMatchSettings:
+    """Rectified-flow training knobs, mixed into the config of every flow-matching family.
+
+    Deliberately NOT on ``BaseConfig``: the DDPM lineage cannot act on any of
+    these, and a knob that silently does nothing is worse than one that errors.
+    Because dataclass inheritance keeps the TOML key space flat, a config file
+    is unaffected by which class a field lives on — but writing
+    ``flow_match_shift`` in an SD 1.5 config is now a construction-time
+    TypeError instead of a value nothing reads.
+    """
+
+    flow_match_timestep_sampling: Literal["logit_normal", "uniform", "mode"] = field(
+        default="logit_normal",
+        metadata={
+            "help": "Sigma sampling density for flow matching. logit_normal (SD3 paper default) concentrates on mid "
+            "sigmas where the velocity field is hardest; uniform trains the whole range flat.",
+        },
+    )
+    flow_match_logit_mean: float = field(default=0.0, metadata={"help": "Mean of the logit-normal sigma distribution. Negative biases toward clean latents."})
+    flow_match_logit_std: float = field(default=1.0, metadata={"help": "Std of the logit-normal sigma distribution."})
+    flow_match_mode_scale: float = field(default=1.29, metadata={"help": "Scale for the 'mode' sampling scheme (SD3 paper). Unused otherwise."})
+    flow_match_shift: float | None = field(
+        default=None,
+        metadata={
+            "help": "Resolution shift applied to sampled sigmas: sigma' = shift*sigma / (1 + (shift-1)*sigma). "
+            "None follows the model's own sampler (Lumina 2 ships 6.0), which keeps training and inference on the "
+            "same sigma band; 1.0 disables the shift.",
+        },
+    )
+    flow_match_loss_weighting: Literal["uniform", "sigma_sqrt", "cosmap"] = field(
+        default="uniform",
+        metadata={"help": "Per-sample loss weighting for flow matching. uniform pairs with logit_normal sampling (SD3 recipe)."},
+    )
+
+
+@dataclass
+class FlowMatchConfig(FlowMatchSettings, BaseConfig):
+    """A config a rectified-flow objective can drive.
+
+    ``FlowMatchObjective`` types against this so it reaches both the shared
+    knobs (input perturbation, noise construction) and the flow-matching block,
+    without knowing which model family it is serving.
+    """
+
+
+# Lumina 2 conditions on Gemma-2 hidden states behind a fixed instruction
+# preamble; the pipeline joins them as f"{system_prompt} <Prompt Start> {prompt}".
+# This is diffusers' default, pinned here rather than read off the pipeline so a
+# diffusers upgrade cannot silently change what a trained model was conditioned on.
+LUMINA2_DEFAULT_SYSTEM_PROMPT = (
+    "You are an assistant designed to generate superior images with the superior "
+    "degree of image-text alignment based on textual prompts or user prompts."
+)
+
+
+@dataclass
+class Lumina2Config(FlowMatchConfig):
+    """Lumina 2: NextDiT + Gemma-2 + 16-channel VAE, trained with rectified flow.
+
+    The DDPM-only knobs on ``BaseConfig`` (``prediction_type``, ``snr_gamma``,
+    ``rescale_betas_zero_snr``, ``use_debiased_estimation``,
+    ``timestep_bias_*``, ``smooth_min_snr_*``) are inherited but inert here;
+    the tuner warns if any are set. Their replacements are the
+    ``flow_match_*`` block above.
+    """
+
+    text_encoder_lr: float = field(
+        default=0.0,
+        metadata={"help": "Gemma-2 learning rate. 0 keeps it frozen — the recommended default; a 2B LLM is easy to wreck at image-model LRs."},
+    )
+    system_prompt: str = field(
+        default=LUMINA2_DEFAULT_SYSTEM_PROMPT,
+        metadata={"help": "Instruction preamble prepended to every prompt, joined with ' <Prompt Start> '. Must match inference to avoid a train/test gap."},
+    )
+    max_sequence_length: int = field(
+        default=256,
+        metadata={"help": "Gemma-2 token budget INCLUDING the system prompt (~35 tokens). diffusers' default is 256."},
+    )
+    gemma_skip_layers: int = field(
+        default=2,
+        metadata={
+            "help": "Which Gemma-2 hidden state conditions the DiT, counted from the end (CLIP-skip semantics): "
+            "2 = penultimate, which is what Lumina 2 was trained with and what the pipeline uses. Change only deliberately.",
+        },
+    )

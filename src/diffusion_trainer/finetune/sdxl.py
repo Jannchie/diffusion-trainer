@@ -1,9 +1,8 @@
 """Fintunner for Stable Diffusion XL model."""
 
-from contextlib import nullcontext
 from dataclasses import dataclass
 from logging import getLogger
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import torch
 from accelerate.logging import get_logger
@@ -21,9 +20,6 @@ from diffusion_trainer.finetune.utils import (
     get_n_params,
     load_sdxl_pipeline,
 )
-
-if TYPE_CHECKING:
-    from lycoris import LycorisNetwork
 
 logger = getLogger("diffusion_trainer.finetune.sdxl")
 
@@ -89,14 +85,6 @@ class SDXLTuner(BaseTuner):
             self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.text_encoder_1, lr=self.config.text_encoder_1_lr))
         if self.config.text_encoder_2_lr:
             self.trainable_models_with_lr.append(TrainableModel(model=self.sdxl_models.text_encoder_2, lr=self.config.text_encoder_2_lr))
-
-    def _post_lora_setup(self, lycoris_model: "LycorisNetwork") -> None:
-        """Add lycoris model to the models list for SDXL."""
-        self.models.append(lycoris_model)
-
-    def _get_unet_model(self) -> torch.nn.Module:
-        """Get the UNet model for LoRA configuration."""
-        return self.sdxl_models.unet
 
     def log_training_parameters(self) -> None:
         if self.accelerator.is_main_process:
@@ -197,7 +185,7 @@ class SDXLTuner(BaseTuner):
         text_input_ids = text_inputs["input_ids"].to(self.accelerator.device)
 
         runtime_text_encoder_1 = self.get_runtime_model(self.sdxl_models.text_encoder_1)
-        text_encoder_context = nullcontext() if any(param.requires_grad for param in self.sdxl_models.text_encoder_1.parameters()) else torch.no_grad()
+        text_encoder_context = self.text_encoder_grad_context(self.sdxl_models.text_encoder_1)
         with text_encoder_context:
             prompt_embeds_output = runtime_text_encoder_1(
                 text_input_ids,
@@ -221,7 +209,7 @@ class SDXLTuner(BaseTuner):
         text_input_ids_2 = text_inputs_2["input_ids"].to(self.accelerator.device)
 
         runtime_text_encoder_2 = self.get_runtime_model(self.sdxl_models.text_encoder_2)
-        text_encoder_context = nullcontext() if any(param.requires_grad for param in self.sdxl_models.text_encoder_2.parameters()) else torch.no_grad()
+        text_encoder_context = self.text_encoder_grad_context(self.sdxl_models.text_encoder_2)
         with text_encoder_context:
             prompt_embeds_output_2 = runtime_text_encoder_2(
                 text_input_ids_2,

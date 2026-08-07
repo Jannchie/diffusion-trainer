@@ -1,5 +1,4 @@
 import logging
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -18,7 +17,6 @@ from diffusion_trainer.finetune.utils import (
 
 if TYPE_CHECKING:
     from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipeline
-    from lycoris import LycorisNetwork
 
 
 class SD15Models(NamedTuple):
@@ -75,14 +73,6 @@ class SD15Tuner(BaseTuner):
             self.trainable_models_with_lr.append(TrainableModel(model=self.sd15_models.unet, lr=self.config.unet_lr))
         if self.config.text_encoder_lr:
             self.trainable_models_with_lr.append(TrainableModel(model=self.sd15_models.text_encoder, lr=self.config.text_encoder_lr))
-
-    def _get_unet_model(self) -> torch.nn.Module:
-        """Get the UNet model for LoRA configuration."""
-        return self.sd15_models.unet
-
-    def _post_lora_setup(self, lycoris_model: "LycorisNetwork") -> None:
-        """Add lycoris model to the models list for SD15."""
-        self.models.append(lycoris_model)
 
     @property
     def lora_base_model_version(self) -> str:
@@ -153,7 +143,7 @@ class SD15Tuner(BaseTuner):
 
     def get_prompt_embeds(self, prompts_str: list[str]) -> torch.Tensor:
         runtime_text_encoder = self.get_runtime_model(self.sd15_models.text_encoder)
-        text_encoder_context = nullcontext() if any(param.requires_grad for param in self.sd15_models.text_encoder.parameters()) else torch.no_grad()
+        text_encoder_context = self.text_encoder_grad_context(self.sd15_models.text_encoder)
         if self.config.use_enhanced_embeddings:
             with text_encoder_context:
                 return get_embeddings_sd15_batch(

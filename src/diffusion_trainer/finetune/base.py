@@ -4,7 +4,6 @@ import math
 import random
 import re
 from abc import ABC, abstractmethod
-from collections import Counter
 from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
@@ -15,12 +14,12 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn.functional as F
 from accelerate import PartialState
-from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from diffusers.training_utils import EMAModel, compute_snr, free_memory
+from diffusers.schedulers.scheduling_utils import SchedulerMixin
+from diffusers.training_utils import EMAModel, free_memory
 from PIL import Image
 from torch.utils.data import DataLoader
 
@@ -30,10 +29,10 @@ from diffusion_trainer.dataset.processors.create_parquet_processor import Create
 from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
 from diffusion_trainer.dataset.processors.tagging_processor import TaggingProcessor
 from diffusion_trainer.dataset.streaming import StreamingDiffusionDataset
+from diffusion_trainer.finetune.objective import DDPMObjective, DiffusionObjective
 from diffusion_trainer.finetune.utils import (
     DummyProgressBar,
     TrainableModel,
-    compute_sqrt_inv_snr_weights,
     get_sample_options_hash,
     get_trainable_parameter_dicts,
     initialize_optimizer,
@@ -41,15 +40,13 @@ from diffusion_trainer.finetune.utils import (
     str_to_dtype,
     unwrap_model,
 )
-from diffusion_trainer.finetune.utils.lora import apply_lora_config
+from diffusion_trainer.finetune.utils.lora import UNET_LORA_TARGETS, LoraTargets, apply_lora_config
 from diffusion_trainer.shared import get_progress
 from diffusion_trainer.utils.advanced_noise import (
     brownian_noise,
     multi_resolution_noise,
     pyramid_noise,
-    smooth_min_snr_weights,
 )
-from diffusion_trainer.utils.timestep_weights import logit_timestep_weights
 
 if TYPE_CHECKING:
     from lycoris import LycorisNetwork
@@ -133,9 +130,8 @@ class BaseTuner(ABC):
         self.weight_dtype = str_to_dtype(config.weight_dtype)
         self.save_dtype = str_to_dtype(config.save_dtype)
         self.vae_dtype = str_to_dtype(config.vae_dtype)
-        self._sigma_for_timesteps: torch.Tensor | None = None
-        self.ema_unet: EMAModel | None = None
-        self.ema_unet_short: EMAModel | None = None
+        self.ema_denoiser: EMAModel | None = None
+        self.ema_denoiser_short: EMAModel | None = None
         self.prepared_model_map: dict[int, torch.nn.Module] = {}
 
         # Common initialization steps
@@ -175,8 +171,9 @@ class BaseTuner(ABC):
         self.lycoris_model: LycorisNetwork | None = None
         # pandm run handle; set on the main process when log_with == "pandm".
         self.pandm_run: Any | None = None
-        self.noise_scheduler: DDPMScheduler = self.get_noise_scheduler()
-        self.all_snr = compute_snr(self.noise_scheduler, torch.arange(0, self.noise_scheduler.config.num_train_timesteps, dtype=torch.long)).to(self.device)  # type: ignore
+        self.noise_scheduler: SchedulerMixin = self.get_noise_scheduler()
+        self.objective: DiffusionObjective = self.create_objective()
+        self.objective.log_summary()
         self.train_loss = 0.0
         # On-device accumulator for the per-window loss; gathered+synced once per
         # optimizer step instead of once per micro-step (see optimizer_step).
@@ -197,6 +194,27 @@ class BaseTuner(ABC):
         """Setup model-specific components. Must be implemented by subclasses."""
         msg = "This method must be implemented by subclasses."
         raise NotImplementedError(msg)
+
+    def create_objective(self) -> DiffusionObjective:
+        """Build the training objective (noising, target, loss weighting).
+
+        Defaults to the discrete DDPM formulation the SD 1.5 / SDXL lineage
+        uses; flow-matching families override this.
+        """
+        if not isinstance(self.noise_scheduler, DDPMScheduler):
+            msg = f"The default DDPM objective needs a DDPMScheduler, got {type(self.noise_scheduler).__name__}. Override create_objective()."
+            raise TypeError(msg)
+        return DDPMObjective(self.config, self.noise_scheduler, self.device)
+
+    @property
+    def denoiser(self) -> torch.nn.Module:
+        """The network that gets trained to denoise: a UNet here, a DiT for Lumina.
+
+        EMA, gradient checkpointing, preview eval-mode handling and LoRA
+        targeting all route through this so architectures that don't ship a
+        ``pipeline.unet`` stay first-class.
+        """
+        return self.pipeline.unet
 
     def _enable_gradient_checkpointing(self) -> None:
         """Enable gradient checkpointing for models. Can be overridden by subclasses."""
@@ -228,16 +246,17 @@ class BaseTuner(ABC):
         for model in self.training_models:
             model.train()
 
-        # Initialize EMA models if enabled. EMA tracks self.pipeline.unet's
-        # parameters, which only train in full-finetune; in LoRA/LyCORIS modes the
-        # base UNet is frozen, so an EMA over it would shadow constant weights —
+        # Initialize EMA models if enabled. EMA tracks the denoiser's parameters,
+        # which only train in full-finetune; in LoRA/LyCORIS modes the base
+        # denoiser is frozen, so an EMA over it would shadow constant weights —
         # wasted memory and a no-op. Skip it (and warn) outside full-finetune.
         if self.config.use_ema and self.config.mode != "full-finetune":
-            logger.warning("use_ema is ignored in %s mode: the base UNet is frozen, so EMA over it is a no-op.", self.config.mode)
+            logger.warning("use_ema is ignored in %s mode: the base denoiser is frozen, so EMA over it is a no-op.", self.config.mode)
         elif self.config.use_ema:
-            self.ema_unet = self.get_ema(self.pipeline.unet, self.pipeline.unet.config, decay=self.config.ema_decay_long)
+            denoiser = self.denoiser
+            self.ema_denoiser = self.get_ema(denoiser, denoiser.config, decay=self.config.ema_decay_long)  # type: ignore[attr-defined]
             if self.config.use_dual_ema:
-                self.ema_unet_short = self.get_ema(self.pipeline.unet, self.pipeline.unet.config, decay=self.config.ema_decay_short)
+                self.ema_denoiser_short = self.get_ema(denoiser, denoiser.config, decay=self.config.ema_decay_short)  # type: ignore[attr-defined]
 
         # Prepare optimizer
         self.trainable_parameters_dicts = get_trainable_parameter_dicts(self.trainable_models_with_lr)
@@ -377,6 +396,17 @@ class BaseTuner(ABC):
         """Return the accelerator-wrapped model when available."""
         return self.prepared_model_map.get(id(model), model)
 
+    @staticmethod
+    def text_encoder_grad_context(text_encoder: torch.nn.Module) -> AbstractContextManager[Any]:
+        """Build the encoding context: track gradients only if the encoder is being trained.
+
+        Frozen text encoders are the common case, and running them under
+        ``no_grad`` keeps their activations out of the autograd graph.
+        """
+        if any(param.requires_grad for param in text_encoder.parameters()):
+            return nullcontext()
+        return torch.no_grad()
+
     def prepare_data_loader(self) -> torch.utils.data.DataLoader:
         dataset = self.prepare_dataset(self.config)
         if self.accelerator.is_main_process:
@@ -436,7 +466,7 @@ class BaseTuner(ABC):
         """Configure which models should be trainable with their learning rates."""
         if self.config.mode == "full-finetune":
             self._configure_full_finetune()
-        elif self.config.mode in ("lora", "lokr", "loha"):
+        elif self.config.mode in ("lora", "lokr", "loha", "locon"):
             self._configure_lora_finetune()
         else:
             msg = f"Unknown training mode: {self.config.mode}"
@@ -450,13 +480,15 @@ class BaseTuner(ABC):
 
     def _configure_lora_finetune(self) -> None:
         """Configure models for LoRA fine-tuning. Uses template method pattern."""
-        unet_model = self._get_unet_model()
         # Type check - this should never happen if called correctly, but satisfies type checker
         if self.config.mode == "full-finetune":
             msg = "Cannot configure LoRA for full-finetune mode"
             raise ValueError(msg)
 
-        lycoris_model = apply_lora_config(self.config.mode, unet_model, self.config)
+        # Deliberately the same `denoiser` that EMA, gradient checkpointing and
+        # previews use: a second "which model is the denoiser" hook would let
+        # LoRA wrap one module while EMA shadows another, silently.
+        lycoris_model = apply_lora_config(self.config.mode, self.denoiser, self.config, targets=self.lora_targets)
 
         # Ensure LoRA model dtype matches the weight dtype to prevent dtype mismatch errors
         lycoris_model.to(dtype=self.weight_dtype)
@@ -468,15 +500,19 @@ class BaseTuner(ABC):
         # Allow subclasses to perform additional setup
         self._post_lora_setup(lycoris_model)
 
-    @abstractmethod
-    def _get_unet_model(self) -> torch.nn.Module:
-        """Get the UNet model for LoRA configuration. Must be implemented by subclasses."""
-        msg = "This method must be implemented by subclasses."
-        raise NotImplementedError(msg)
+    @property
+    def lora_targets(self) -> LoraTargets:
+        """Which module classes LyCORIS should wrap. Defaults to the UNet layout."""
+        return UNET_LORA_TARGETS
 
     def _post_lora_setup(self, lycoris_model: "LycorisNetwork") -> None:
-        """Perform additional setup after LoRA model creation. Can be overridden by subclasses."""
-        del lycoris_model
+        """Register the LyCORIS network alongside the base models.
+
+        Every family needs this — ``self.models`` drives gradient checkpointing
+        and the preview eval-mode dance — so it is the default rather than an
+        override each tuner has to remember.
+        """
+        self.models.append(lycoris_model)
 
     def optimizer_step(self, loss: torch.Tensor) -> None:
         """
@@ -549,10 +585,10 @@ class BaseTuner(ABC):
             return
         if not self._should_step_ema(step):
             return
-        if self.ema_unet is not None:
-            self.ema_unet.step(self.pipeline.unet.parameters())
-        if self.config.use_dual_ema and self.ema_unet_short is not None:
-            self.ema_unet_short.step(self.pipeline.unet.parameters())
+        if self.ema_denoiser is not None:
+            self.ema_denoiser.step(self.denoiser.parameters())
+        if self.config.use_dual_ema and self.ema_denoiser_short is not None:
+            self.ema_denoiser_short.step(self.denoiser.parameters())
 
     def generate_initial_preview(self) -> None:
         """Generate preview images before training starts if configured to do so."""
@@ -585,12 +621,17 @@ class BaseTuner(ABC):
         # Apply VAE scaling
         img_latents = self._apply_vae_scaling(img_latents)
 
-        # Prepare training tensors
-        img_latents, noise, timesteps, img_noisy_latents = self._prepare_training_tensors(img_latents)
+        # Prepare training tensors. What a "timestep" means here is the
+        # objective's business (schedule index vs continuous sigma), so it is
+        # only ever passed back to the objective — never indexed into locally.
+        noise = self.sample_noise(img_latents)
+        timesteps = self.objective.sample_timesteps(img_latents.shape[0], global_step=self.global_step)
+        img_noisy_latents = self.objective.noisy_latents(img_latents, noise, timesteps, global_step=self.global_step)
 
-        # Predict and calculate loss
-        model_pred = model_pred_fn(img_noisy_latents, timesteps)
-        target, model_pred = self.get_pred_target(img_latents, noise, timesteps, model_pred)
+        # Predict and calculate loss. model_timesteps translates into whatever
+        # time parameterization the network itself expects.
+        model_pred = model_pred_fn(img_noisy_latents, self.objective.model_timesteps(timesteps))
+        target, model_pred = self.objective.target_and_pred(img_latents, noise, timesteps, model_pred)
         loss = self.get_loss(timesteps, model_pred, target)
 
         # Free memory efficiently
@@ -607,71 +648,11 @@ class BaseTuner(ABC):
         self.optimizer_step(loss)
 
     def get_loss(self, timesteps: torch.Tensor, model_pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        # 1. Compute the basic MSE loss (per sample)
+        """Per-sample MSE, reweighted by the objective (SNR terms, flow-matching schemes, ...)."""
         loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
         loss_per_sample = loss.mean(dim=list(range(1, len(loss.shape))))
-
-        # Initialize weights to 1
-        weights = torch.ones_like(loss_per_sample)
-
-        # 2. If Debiased Estimation is enabled, compute and apply debiasing weights
-        if self.config.use_debiased_estimation:
-            debias_weights = compute_sqrt_inv_snr_weights(timesteps, self.all_snr)
-            weights = weights * debias_weights  # Multiply by debiasing weights
-
-        # 3. If SNR weighting is enabled, compute and apply SNR weights
-        if self.config.snr_gamma is not None and self.config.snr_gamma > 0:
-            snr_gamma = self.config.snr_gamma
-            # Extract SNR values for timesteps once.
-            # Clamp away from zero: with rescale_betas_zero_snr the terminal SNR
-            # is 0, which would make the divisions below produce inf/nan.
-            snr = self.all_snr[timesteps].clamp(min=1e-8)
-
-            # Use smooth Min-SNR if configured
-            if self.config.use_smooth_min_snr:
-                mse_loss_weights = smooth_min_snr_weights(
-                    timesteps,
-                    self.all_snr,
-                    min_snr_gamma=snr_gamma,
-                    smoothing_factor=self.config.smooth_min_snr_factor,
-                    mode=self.config.smooth_min_snr_mode,
-                )
-            else:
-                # Standard Min-SNR clipping (full_like keeps the float dtype of snr)
-                mse_loss_weights = torch.stack([snr, torch.full_like(snr, snr_gamma)], dim=1).min(dim=1)[0]
-
-            # Adjust weights according to prediction_type
-            if self.noise_scheduler.config.get("prediction_type") == "epsilon":
-                mse_loss_weights = mse_loss_weights / snr
-            elif self.noise_scheduler.config.get("prediction_type") == "v_prediction":
-                mse_loss_weights = mse_loss_weights / (snr + 1)
-            weights = weights * mse_loss_weights  # Further multiply by SNR weights
-
-        # 4. Apply the final weights and compute the mean loss
+        weights = self.objective.loss_weights(timesteps).to(loss_per_sample.device)
         return (loss_per_sample * weights).mean()
-
-    def get_pred_target(
-        self,
-        img_latents: torch.Tensor,
-        noise: torch.Tensor,
-        timesteps: torch.Tensor,
-        model_pred: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        noise_scheduler = self.noise_scheduler
-        pred = model_pred
-        if noise_scheduler.config.get("prediction_type") == "epsilon":
-            target = noise
-        elif noise_scheduler.config.get("prediction_type") == "v_prediction":
-            target = noise_scheduler.get_velocity(img_latents, noise, timesteps)  # type: ignore
-        elif noise_scheduler.config.get("prediction_type") == "sample":
-            # We set the target to latents here, but the model_pred will return the noise sample prediction.
-            target = img_latents
-            # We will have to subtract the noise residual from the prediction to get the target sample.
-            pred = model_pred - noise
-        else:
-            msg = f"Unknown prediction type {noise_scheduler.config.get('prediction_type')}"
-            raise ValueError(msg)
-        return target, pred
 
     def sample_noise(self, latents: torch.Tensor) -> torch.Tensor:
         """Sample noise that will be added to the latents."""
@@ -725,115 +706,6 @@ class BaseTuner(ABC):
                 )
         return noise
 
-    def get_noisy_latents(self, latents: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
-        """Get noisy latents"""
-        if self.config.input_perturbation > 0:
-            # Apply input perturbation with optional step-based decay
-            input_perturbation = self.config.input_perturbation
-
-            # Apply linear decay if input_perturbation_steps is configured
-            if self.config.input_perturbation_steps > 0 and self.global_step < self.config.input_perturbation_steps:
-                # Linear decay: starts at full strength, decays to 0 over input_perturbation_steps
-                decay_factor = 1.0 - (self.global_step / self.config.input_perturbation_steps)
-                input_perturbation *= decay_factor
-            elif self.config.input_perturbation_steps > 0 and self.global_step >= self.config.input_perturbation_steps:
-                # After decay period, set perturbation to 0
-                input_perturbation = 0.0
-
-            if input_perturbation > 0:
-                noise = noise + input_perturbation * torch.randn_like(noise)
-
-        return self.noise_scheduler.add_noise(latents, noise, timesteps)  # type: ignore
-
-    def _sample_timesteps_lognormal(self, batch_size: int) -> torch.Tensor:
-        """
-        Sample timesteps by drawing sigma from a lognormal distribution (EDM-style)
-        and mapping to the closest scheduler timestep.
-        """
-        if self._sigma_for_timesteps is None:
-            alphas_cumprod = self.noise_scheduler.alphas_cumprod  # type: ignore[attr-defined]
-            if alphas_cumprod is None:
-                msg = "Noise scheduler missing alphas_cumprod for lognormal sampling"
-                raise ValueError(msg)
-            eps = 1e-12
-            alphas_cumprod = alphas_cumprod.to(device=self.accelerator.device, dtype=torch.float32).clamp(min=eps)
-            sigma_table = torch.sqrt((1 - alphas_cumprod) / alphas_cumprod)
-            self._sigma_for_timesteps = sigma_table
-
-        sigma_table = self._sigma_for_timesteps
-        if sigma_table is None:
-            msg = "Sigma table was not initialized"
-            raise ValueError(msg)
-
-        sigma_tensor: torch.Tensor = sigma_table
-
-        mean = torch.tensor(self.config.timestep_lognormal_mean, device=self.accelerator.device, dtype=torch.float32)
-        std = torch.tensor(self.config.timestep_lognormal_std, device=self.accelerator.device, dtype=torch.float32)
-        lognormal = torch.distributions.LogNormal(mean, std)
-        sampled_sigma = lognormal.sample((batch_size,))
-        if sampled_sigma is None:
-            msg = "Failed to sample sigma from lognormal distribution"
-            raise ValueError(msg)
-        # Find nearest timestep by sigma distance
-        distance = torch.abs(sigma_tensor.view(1, -1) - sampled_sigma.view(-1, 1))
-        return distance.argmin(dim=1).to(dtype=torch.long)
-
-    def sample_timesteps(self, batch_size: int) -> torch.Tensor:
-        num_timesteps: int = self.noise_scheduler.config.get("num_train_timesteps", 1000)
-
-        # Curriculum: any bias strategy samples uniformly until its start step,
-        # so the epsilon->v remap and the ZTSNR terminal regime train at full
-        # density before compute is reallocated to the detail regime.
-        strategy = self.config.timestep_bias_strategy
-        if strategy != "uniform" and self.global_step < self.config.timestep_bias_start_step:
-            strategy = "uniform"
-
-        if strategy == "uniform":
-            # Sample a random timestep for each image without bias.
-            timesteps = torch.randint(
-                0,
-                num_timesteps,
-                (batch_size,),
-                device=self.accelerator.device,
-                dtype=torch.long,
-            )
-        elif strategy == "logit":
-            # Sample a random timestep for each image, potentially biased by the timestep weights.
-            # Biasing the timestep weights allows us to spend less time training irrelevant timesteps
-
-            # Get m and s parameters from config or use defaults
-            m = self.config.timestep_bias_m
-            s = self.config.timestep_bias_s
-
-            # Use these parameters for the logit distribution
-            weights = logit_timestep_weights(
-                num_timesteps,
-                m=m,
-                s=s,
-                device=self.accelerator.device,
-            )
-            timesteps = torch.multinomial(weights, batch_size, replacement=True)
-        elif strategy == "lognormal":
-            timesteps = self._sample_timesteps_lognormal(batch_size)
-        elif strategy == "snr-detail":
-            # Sampler-side epsilon-equivalent allocation: density ∝ the same
-            # max(SNR, floor)/(SNR+1) used by the loss weighting, with unit
-            # loss weights — identical expected gradient, but no compute spent
-            # on near-zero-weight samples and homogeneous per-sample gradient
-            # scale. The floor keeps the ZTSNR terminal band at ~floor density.
-            weights = self.all_snr.clamp(min=self.config.vpred_snr_floor) / (self.all_snr + 1.0)
-            timesteps = torch.multinomial(weights, batch_size, replacement=True).to(self.accelerator.device)
-        else:
-            msg = f"Unknown timestep bias strategy {strategy}"
-            raise ValueError(msg)
-
-        # Use Counter to count sampled timesteps
-        if hasattr(self, "timesteps_counter"):
-            for t in timesteps.cpu().numpy().tolist():
-                self.timesteps_counter[t] += 1
-
-        return timesteps
-
     def apply_seed_settings(self, seed: int) -> None:
         logger.info("Setting seed to %s", seed)
         random.seed(seed)
@@ -865,15 +737,15 @@ class BaseTuner(ABC):
         # Before ema_start_step the shadow still holds the construction-time
         # (initial) weights — swapping it in would export a barely-trained model.
         # _should_step_ema gates on the same boundary the EMA updates begin at.
-        if self.ema_unet is None or not self._should_step_ema(self.global_step):
+        if self.ema_denoiser is None or not self._should_step_ema(self.global_step):
             yield
             return
-        self.ema_unet.store(self.pipeline.unet.parameters())
-        self.ema_unet.copy_to(self.pipeline.unet.parameters())
+        self.ema_denoiser.store(self.denoiser.parameters())
+        self.ema_denoiser.copy_to(self.denoiser.parameters())
         try:
             yield
         finally:
-            self.ema_unet.restore(self.pipeline.unet.parameters())
+            self.ema_denoiser.restore(self.denoiser.parameters())
 
     def _sample_condition_dropout_mask(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """
@@ -898,20 +770,18 @@ class BaseTuner(ABC):
         return updated_prompts
 
     def _apply_vae_scaling(self, latents: torch.Tensor) -> torch.Tensor:
-        """Apply VAE scaling factor to latents."""
-        scaling_factor = self.pipeline.vae.config.get("scaling_factor", 1.0)
-        return scaling_factor * latents
+        """Normalize raw VAE encoder output into the denoiser's latent space.
 
-    def _prepare_training_tensors(self, img_latents: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Prepare tensors for training: apply scaling, sample noise and timesteps."""
-        # Sample noise and timesteps
-        noise = self.sample_noise(img_latents)
-        timesteps = self.sample_timesteps(img_latents.shape[0])
-
-        # Get noisy latents
-        img_noisy_latents = self.get_noisy_latents(img_latents, noise, timesteps)
-
-        return img_latents, noise, timesteps, img_noisy_latents
+        The SD VAEs only scale. The 16-channel VAEs used by the flow-matching
+        families (Lumina 2, FLUX) also carry a ``shift_factor`` that must be
+        subtracted first — skipping it leaves the latents off-center by ~0.12
+        and the model trains against a distribution no sampler will reproduce.
+        Inverse of the decode path in ``_decode_preview_latents``.
+        """
+        vae_config = self.pipeline.vae.config
+        scaling_factor = vae_config.get("scaling_factor", 1.0)
+        shift_factor = vae_config.get("shift_factor") or 0.0
+        return (latents - shift_factor) * scaling_factor
 
     def init_gradient_checkpointing(self, models: list[torch.nn.Module]) -> None:
         for model in models:
@@ -998,8 +868,14 @@ class BaseTuner(ABC):
         """
         return {k: v for k, v in self.pipeline.scheduler.config.items() if not k.startswith("_")}
 
-    def get_noise_scheduler(self) -> DDPMScheduler:
-        """Set up the noise scheduler"""
+    def get_noise_scheduler(self) -> SchedulerMixin:
+        """Set up the training-side noise scheduler.
+
+        Defaults to the DDPM lineage: rebuild a ``DDPMScheduler`` from the
+        pipeline's config, applying the prediction-type and ZTSNR overrides.
+        Flow-matching families override this — none of those knobs apply to a
+        rectified-flow sampler.
+        """
         scheduler_config_updates = {}
         prediction_type = self.config.prediction_type
         if prediction_type is not None:
@@ -1056,9 +932,6 @@ class BaseTuner(ABC):
 
         self.checkpointing_path = self.save_path / "state"
         self.global_steps_file = self.checkpointing_path / "global_steps"
-
-        # Use Counter instead of a list to count timesteps
-        self.timesteps_counter = Counter()
 
         # Attempt to load previous state for resuming training
         global_step = 0
@@ -1239,6 +1112,27 @@ class BaseTuner(ABC):
         returns the pooled pair. The dict is splatted directly into the pipeline.
         """
 
+    def preview_pipeline_kwargs(self, sample_option: SampleOptions) -> dict[str, Any]:
+        """Sampling arguments for the preview pipeline call, minus conditioning.
+
+        Split out because pipelines disagree on what they accept: the SD
+        pipelines take ``guidance_rescale``, ``Lumina2Pipeline`` does not (it
+        has ``cfg_normalization``/``cfg_trunc_ratio`` instead), and passing an
+        unknown keyword is a TypeError mid-run.
+        """
+        return {
+            "num_inference_steps": sample_option.steps,
+            "width": sample_option.width,
+            "height": sample_option.height,
+            "guidance_scale": sample_option.guidance_scale,
+            "guidance_rescale": sample_option.guidance_rescale,
+        }
+
+    @property
+    def supports_hires_preview(self) -> bool:
+        """Whether the hires-fix img2img pass is available for this architecture."""
+        return True
+
     @torch.no_grad()
     def _decode_preview_latents(self, latents: torch.Tensor) -> "Image.Image":
         """Decode pipeline latents to PIL in fp32, outside any autocast.
@@ -1251,7 +1145,11 @@ class BaseTuner(ABC):
         original_dtype = next(vae.parameters()).dtype
         vae.to(dtype=torch.float32)
         try:
-            image = vae.decode(latents.to(torch.float32) / vae.config.scaling_factor).sample
+            # Exact inverse of _apply_vae_scaling: unscale, then undo the shift
+            # (0 for the SD VAEs, ~0.1159 for the 16-channel FLUX/Lumina one).
+            shift_factor = vae.config.get("shift_factor") or 0.0
+            latents = latents.to(torch.float32) / vae.config.scaling_factor + shift_factor
+            image = vae.decode(latents).sample
             return self.pipeline.image_processor.postprocess(image, output_type="pil")[0]  # type: ignore[attr-defined]
         finally:
             vae.to(dtype=original_dtype)
@@ -1273,15 +1171,20 @@ class BaseTuner(ABC):
         upscaled = image.resize((width, height), Image.LANCZOS)
         img2img = AutoPipelineForImage2Image.from_pipe(self.pipeline)
         img2img.progress_bar = DummyProgressBar  # type: ignore[method-assign]
+        # Same seam as the base pass, so a family only has to declare its
+        # accepted kwargs once. img2img derives its size from the input image
+        # and its step count from hires_steps, so those two are dropped.
+        pipeline_kwargs = self.preview_pipeline_kwargs(sample_option)
+        for key in ("width", "height", "num_inference_steps"):
+            pipeline_kwargs.pop(key, None)
         with make_autocast():
             result = img2img(
                 **prompt_kwargs,
+                **pipeline_kwargs,
                 image=upscaled,
                 strength=sample_option.hires_strength,
                 num_inference_steps=sample_option.hires_steps,
                 generator=generator,
-                guidance_scale=sample_option.guidance_scale,
-                guidance_rescale=sample_option.guidance_rescale,
                 output_type="latent",
             )
         return self._decode_preview_latents(result.images)
@@ -1319,7 +1222,7 @@ class BaseTuner(ABC):
                 original_training_mode = {}
                 original_device = {}
                 models_for_preview = [
-                    ("unet", self.pipeline.unet),
+                    ("denoiser", self.denoiser),
                     ("text_encoder", self.pipeline.text_encoder),
                     ("vae", self.pipeline.vae),
                 ]
@@ -1357,13 +1260,9 @@ class BaseTuner(ABC):
                     with make_autocast():
                         result = self.pipeline(
                             **prompt_kwargs,
-                            num_inference_steps=sample_option.steps,
+                            **self.preview_pipeline_kwargs(sample_option),
                             generator=generator,
                             callback_on_step_end=callback_on_step_end,  # type: ignore
-                            width=sample_option.width,
-                            height=sample_option.height,
-                            guidance_scale=sample_option.guidance_scale,
-                            guidance_rescale=sample_option.guidance_rescale,
                             output_type="latent",
                         )
                     # Decode in fp32 OUTSIDE autocast: half-precision VAE decode
@@ -1371,10 +1270,13 @@ class BaseTuner(ABC):
                     # 640+ resolutions; the UNet latents themselves are clean.
                     image = self._decode_preview_latents(result.images)
                     if sample_option.hires_scale > 1.0:
-                        try:
-                            image = self._hires_preview(image, prompt_kwargs, sample_option, generator, make_autocast)
-                        except Exception:
-                            logger.exception("Hires preview pass failed; keeping the base image")
+                        if not self.supports_hires_preview:
+                            logger.warning("hires_scale is set but %s has no img2img pipeline; keeping the base image.", type(self).__name__)
+                        else:
+                            try:
+                                image = self._hires_preview(image, prompt_kwargs, sample_option, generator, make_autocast)
+                            except Exception:
+                                logger.exception("Hires preview pass failed; keeping the base image")
 
                 logger.info("Preview generated for %s", filename_with_hash)
 
@@ -1416,7 +1318,7 @@ class BaseTuner(ABC):
         if self.accelerator.is_main_process:
             save_context = self.use_ema_weights() if self.config.use_ema else nullcontext()
             with save_context:
-                if self.config.mode in ("lora", "lokr", "loha"):
+                if self.config.mode in ("lora", "lokr", "loha", "locon"):
                     self.save_lora_model(filename)
                 else:
                     self.save_full_finetune_model(filename)
@@ -1556,7 +1458,10 @@ class BaseTuner(ABC):
         """Initialize Exponential Moving Average for the model if enabled in config."""
         ema_model = EMAModel(
             parameters=model.parameters(),
-            model_cls=UNet2DConditionModel,
+            # model_cls only matters for EMAModel.save_pretrained/from_pretrained,
+            # which this trainer never calls (weights are swapped in place via
+            # store/copy_to). Reporting the real class keeps it honest anyway.
+            model_cls=type(model),
             model_config=config,
             decay=decay,
         )
