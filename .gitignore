@@ -9,6 +9,8 @@ diffusers_training_scripts/
 out/
 demo_meta/
 models/
+logs/
+gpt-image-2/
 
 datasets
 .dt_cache
