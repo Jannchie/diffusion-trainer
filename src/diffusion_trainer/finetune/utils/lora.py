@@ -1,5 +1,5 @@
 from logging import getLogger
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import torch
 from lycoris import LycorisNetwork, create_lycoris
@@ -12,7 +12,54 @@ if TYPE_CHECKING:
 logger = getLogger("diffusion_trainer")
 
 
-def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: torch.nn.Module, config: "BaseConfig | None" = None) -> LycorisNetwork:
+class LoraTargets(NamedTuple):
+    """Module CLASS NAMES LyCORIS should wrap, by role.
+
+    LyCORIS matches targets by class name, so every architecture spells these
+    differently: UNets (SD 1.5 / SDXL) use diffusers' ``FeedForward``, Lumina
+    2's DiT uses ``LuminaFeedForward`` (a SwiGLU with linear_1/2/3). A preset
+    naming the wrong one silently wraps only the attention blocks — the run
+    trains, converges worse, and nothing warns you.
+
+    Roles are declared rather than inferred: lokr gives attention and
+    feed-forward different factors, so guessing "whatever isn't called
+    Attention is the FFN" would misfactor any architecture whose attention
+    class has a family-specific name.
+    """
+
+    attention: tuple[str, ...]
+    feedforward: tuple[str, ...]
+    # The convolutional path, wrapped by locon only -- the 3x3 convs in
+    # ResnetBlock2D (conv1/conv2/conv_shortcut) and the Down/Upsample2D convs,
+    # where most of an image's texture and style lives. Those classes contain
+    # no attention or feed-forward, so there is no double-wrapping. Empty for
+    # DiTs, which have no conv path at all (locon then degenerates to lora).
+    conv: tuple[str, ...] = ()
+
+    @property
+    def linear(self) -> list[str]:
+        return [*self.attention, *self.feedforward]
+
+    @property
+    def all_targets(self) -> list[str]:
+        return [*self.linear, *self.conv]
+
+
+UNET_LORA_TARGETS = LoraTargets(
+    attention=("Attention",),
+    feedforward=("FeedForward",),
+    conv=("ResnetBlock2D", "Downsample2D", "Upsample2D"),
+)
+LUMINA2_LORA_TARGETS = LoraTargets(attention=("Attention",), feedforward=("LuminaFeedForward",))
+
+
+def apply_lora_config(
+    mode: Literal["lora", "loha", "lokr", "locon"],
+    model: torch.nn.Module,
+    config: "BaseConfig | None" = None,
+    targets: LoraTargets = UNET_LORA_TARGETS,
+) -> LycorisNetwork:
+    """Wrap ``model`` with a LyCORIS network targeting ``targets``."""
     # Use config values if provided, otherwise use defaults
     lora_dim = config.lora_dim if config else 16
     lora_alpha = config.lora_alpha if config else 1.0
@@ -37,11 +84,7 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: tor
             "conv_dim": conv_dim,
             "conv_alpha": conv_alpha,
         }
-        LycorisNetwork.apply_preset(
-            {
-                "target_module": ["Attention", "FeedForward"],
-            },
-        )
+        LycorisNetwork.apply_preset({"target_module": targets.linear})
     elif mode == "loha":
         lycoris_config = {
             "algo": "loha",
@@ -51,11 +94,7 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: tor
             "conv_dim": conv_dim,
             "conv_alpha": conv_alpha,
         }
-        LycorisNetwork.apply_preset(
-            {
-                "target_module": ["Attention", "FeedForward"],
-            },
-        )
+        LycorisNetwork.apply_preset({"target_module": targets.linear})
     elif mode == "lokr":
         lycoris_config = {
             "algo": "lokr",
@@ -64,12 +103,13 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: tor
             "linear_alpha": 1,  # Ignored when using full dimension
             "factor": lokr_factor,
         }
+        ff_factor = max(1, int(lokr_factor * lokr_ff_factor_ratio))
         LycorisNetwork.apply_preset(
             {
-                "target_module": ["Attention", "FeedForward"],
+                "target_module": targets.linear,
                 "module_algo_map": {
-                    "Attention": {"factor": lokr_factor},
-                    "FeedForward": {"factor": max(1, int(lokr_factor * lokr_ff_factor_ratio))},
+                    **{name: {"factor": lokr_factor} for name in targets.attention},
+                    **{name: {"factor": ff_factor} for name in targets.feedforward},
                 },
             },
         )
@@ -84,11 +124,10 @@ def apply_lora_config(mode: Literal["lora", "loha", "lokr", "locon"], model: tor
             "conv_alpha": conv_alpha,
             "conv_dropout": lora_dropout,
         }
-        LycorisNetwork.apply_preset(
-            {
-                "target_module": ["Attention", "FeedForward"],
-            },
-        )
+        # LoCon = LoRA-for-Convolution: the linear path plus the architecture's
+        # conv classes, to which conv_dim/conv_alpha apply. Architectures with
+        # no conv path (DiTs) declare an empty tuple, making locon == lora.
+        LycorisNetwork.apply_preset({"target_module": targets.all_targets})
     else:  # type: ignore[misc]  # Defensive programming for runtime safety
         msg = f"Unsupported mode: {mode}"
         raise ValueError(msg)
