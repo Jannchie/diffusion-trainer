@@ -120,7 +120,13 @@ class SimpleLatentsProcessor:
         self.predefined_ars = np.array([w / h for w, h in self.predefined_resos])
 
     def load_vae_model(self) -> AutoencoderKL:
-        """Load the VAE model."""
+        """Load the VAE model.
+
+        Accepts a standalone VAE (file or folder) as well as a full pipeline
+        repo, in which case the weights live under ``vae/``. Pointing at the
+        pipeline repo is the normal way to prepare latents for a model whose VAE
+        isn't published separately — e.g. the 16-channel one Lumina 2 uses.
+        """
         path = Path(self.model_name_or_path)
 
         if path.suffix == ".safetensors":
@@ -128,10 +134,20 @@ class SimpleLatentsProcessor:
             vae = AutoencoderKL.from_single_file(self.model_name_or_path, torch_dtype=self.dtype)
         else:
             logger.info("Loading VAE from folder %s", path)
-            vae = AutoencoderKL.from_pretrained(self.model_name_or_path, torch_dtype=self.dtype)
+            try:
+                vae = AutoencoderKL.from_pretrained(self.model_name_or_path, torch_dtype=self.dtype)
+            except (OSError, ValueError):
+                logger.info("No VAE config at the root of %s; retrying its vae/ subfolder", path)
+                vae = AutoencoderKL.from_pretrained(self.model_name_or_path, subfolder="vae", torch_dtype=self.dtype)
 
         vae = vae.to(self.device).eval()  # type: ignore
-        logger.info("Loaded VAE (%s) - dtype = %s, device = %s", self.model_name_or_path, vae.dtype, vae.device)
+        logger.info(
+            "Loaded VAE (%s) - dtype = %s, device = %s, latent channels = %s",
+            self.model_name_or_path,
+            vae.dtype,
+            vae.device,
+            vae.config.get("latent_channels"),
+        )
         return vae
 
     def select_reso(self, image_width: int, image_height: int) -> tuple[tuple[int, int], tuple[int, int]]:
