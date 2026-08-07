@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A diffusion model trainer framework for Stable Diffusion models (SD 1.5 and SDXL), supporting full fine-tuning and parameter-efficient methods (LoRA, LoKr). Built with PyTorch, Diffusers, and Accelerate for distributed training. Uses a custom PyTorch index for CUDA support (defaults to CUDA 12.6, adaptable to the system CUDA version).
+A diffusion model trainer framework covering UNet families (SD 1.5, SDXL) and flow-matching DiTs (Lumina 2 / Neta Lumina), supporting full fine-tuning and parameter-efficient methods (LoRA, LoKr). Built with PyTorch, Diffusers, and Accelerate for distributed training. Uses a custom PyTorch index for CUDA support (defaults to CUDA 12.6, adaptable to the system CUDA version).
 
 ## Project Structure & Module Organization
 
@@ -20,6 +20,9 @@ A diffusion model trainer framework for Stable Diffusion models (SD 1.5 and SDXL
 - Data prep: `uv run python run_prepare.py --image_path <input> --target_path <output> --vae_path <vae_model>` (`--base_resolution 512/768/1024` selects the bucket table; default 1024 for SDXL).
 - Train SDXL: `uv run python run_train.py --config configs/sdxl.toml --model_family sdxl`
 - Train SD1.5: `uv run python run_train.py --config configs/sd15.toml --model_family sd15`
+- Train Lumina 2: `uv run python run_train.py --config configs/lumina2_lora.toml --model_family lumina2`
+- Slow tests (a few hundred training steps) are marked `slow`: `uv run pytest -m 'not slow'` skips them.
+- This environment lacks `python3.12-dev`, so torch 2.13's `_native` triton path cannot JIT-compile and Gemma-2's rope crashes. Until the headers are installed, prefix Lumina runs with `TORCH_DISABLE_NATIVE_JIT=1` (SD 1.5 / SDXL are unaffected — CLIP does not hit that op).
 - Load dataset from external source: `uv run python scripts/load_dataset_from_pictoria.py` (live API) or `uv run python scripts/load_dataset_from_pictoria_db.py` (SQLite snapshot; filters by star score / content rating / short edge, canonical posts only by default; emits category-ordered tags — one quality tag per post from manual score with SILVA aesthetic fallback and auto-calibrated thresholds, one era tag bucketed from `published_at`, then artist/copyright/character/general/meta from the DB tag groups — plus a `tag_categories` parquet column); convert legacy sd-scripts metadata: `uv run python scripts/convert_ss_meta_to_trainer_meta.py`.
 - Share datasets: `uv run python scripts/export_dataset.py --dataset-dir <prepared> --output-dir <export> --vae-name <vae>` packs latents into bucket-grouped tar shards (uploadable to a HF dataset repo as-is); `uv run python scripts/import_dataset.py --source <dir-or-hf-repo-id> --target-dir <dataset_path>` restores the local layout.
 
@@ -27,10 +30,23 @@ A diffusion model trainer framework for Stable Diffusion models (SD 1.5 and SDXL
 
 ### Training System
 
-- `BaseTuner` (`finetune/base.py`): abstract base class for all trainers.
-- `SDXLTuner` (`finetune/sdxl.py`) and `SD15Tuner` (`finetune/sd15.py`): model-family-specific implementations.
-- Supported techniques: full fine-tuning of UNet and text encoders, LoRA, LoKr, noise offset, input perturbation, SNR gamma weighting, EMA, gradient checkpointing, mixed precision (fp16/bf16), multiple optimizers (AdamW, Adafactor, Prodigy, Lion, ...), timestep bias strategies (uniform, logit, range), LR schedulers with warmup.
-- Training utilities (`finetune/utils/`): optimizer/scheduler setup, LoRA/LoKr network creation, sample generation during training, SNR weighting and timestep sampling strategies.
+- `BaseTuner` (`finetune/base.py`): abstract base class for all trainers. It orchestrates the loop (data, accumulation, EMA, checkpointing, previews) but owns no diffusion math.
+- `SDXLTuner` (`finetune/sdxl.py`), `SD15Tuner` (`finetune/sd15.py`) and `Lumina2Tuner` (`finetune/lumina2.py`): model-family-specific implementations.
+- `DiffusionObjective` (`finetune/objective.py`): the noising process, prediction target and loss weighting, factored out so one loop drives two incompatible formulations.
+  - `DDPMObjective` — discrete timesteps, epsilon/v-prediction targets, SNR weighting (Min-SNR, debiased estimation, ZTSNR). The SD 1.5 / SDXL lineage.
+  - `FlowMatchObjective` — continuous sigmas, rectified-flow target, SD3-style sigma sampling. Lumina 2. Note its two easily-inverted conventions: the network's time input is `1 - sigma`, and its output space is `x0 - noise` (the pipeline negates before stepping). `tests/diffusion_trainer/finetune/test_flow_match_objective.py` pins both.
+- Architecture seams a new family overrides: `denoiser` (UNet vs DiT — the single "which model is trained" hook, used by LoRA, EMA, gradient checkpointing and previews alike), `create_objective()`, `get_noise_scheduler()`, `lora_targets` (a `LoraTargets` declaring attention/feedforward/conv class names by role — LyCORIS matches by class name, and Lumina's FFN is `LuminaFeedForward`, not `FeedForward`), `preview_pipeline_kwargs()` and `supports_hires_preview`.
+- Family-specific config knobs live on family configs, never `BaseConfig`: `FlowMatchSettings` (the `flow_match_*` block) is mixed into `Lumina2Config` so writing one in an SD 1.5 config is a construction-time `TypeError` rather than a silently ignored value. Dataclass inheritance keeps the TOML key space flat, so config files are unaffected.
+- `BaseTuner._apply_vae_scaling` handles both the SD VAEs (scale only) and the 16-channel FLUX/Lumina one (scale **and** `shift_factor`); `_decode_preview_latents` is its exact inverse.
+- Supported techniques: full fine-tuning of UNet/DiT and text encoders, LoRA, LoKr, noise offset, input perturbation, SNR gamma weighting, EMA, gradient checkpointing, mixed precision (fp16/bf16), multiple optimizers (AdamW, Adafactor, Prodigy, Lion, ...), timestep bias strategies (uniform, logit, range), LR schedulers with warmup.
+- Training utilities (`finetune/utils/`): optimizer/scheduler setup, LoRA/LoKr network creation, pipeline loading, sample generation during training.
+
+### Lumina 2 specifics
+
+- Train with `--model_family lumina2` and a `Lumina2Config`; `configs/lumina2_lora.toml` documents which SD-lineage options go dead (`prediction_type`, `snr_gamma`, `rescale_betas_zero_snr`, `use_debiased_estimation`, `timestep_bias_strategy`, `clip_skip`) and their `flow_match_*` replacements. The tuner warns at startup if any are set.
+- `model_path` must be a **diffusers-format** repo (e.g. `VirtualAddressExtension/Neta-Lumina-v1.0-diffusers`). The official all-in-one ComfyUI safetensors has no diffusers config and is rejected with a pointer.
+- Conditioning is Gemma-2 hidden states behind the `<Prompt Start>` preamble, with an attention mask that must reach the DiT (`gemma_skip_layers = 2` is the CLIP-skip analogue). Previews go through the same encoder path so they cannot drift from training.
+- Datasets must be re-encoded: the 16-channel VAE makes SD-lineage latents unusable. `run_prepare.py --vae_path <pipeline repo>` now falls back to the repo's `vae/` subfolder automatically.
 
 ### Data Pipeline
 

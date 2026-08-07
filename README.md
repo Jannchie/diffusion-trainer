@@ -1,10 +1,11 @@
 # Diffusion Trainer
 
-PyTorch-based training framework for Stable Diffusion models. The repository covers SD 1.5 and SDXL workflows, including full fine-tuning, LoRA, LoKr, and dataset preparation.
+PyTorch-based training framework for diffusion models. The repository covers SD 1.5, SDXL and Lumina 2 (NextDiT) workflows, including full fine-tuning, LoRA, LoKr, and dataset preparation.
 
 ## Features
 
-- Support for SD 1.5 and SDXL
+- Support for SD 1.5, SDXL and Lumina 2 / Neta Lumina
+- Both the DDPM (epsilon / v-prediction) and rectified-flow objectives
 - Full fine-tuning and parameter-efficient training
 - Dataset preparation pipeline for latents, tags, and parquet metadata
 - Bucket-based batching for mixed aspect ratios
@@ -41,7 +42,15 @@ uv run python run_train.py --config configs/sdxl.toml --model_family sdxl
 
 # SD 1.5
 uv run python run_train.py --config configs/sd15.toml --model_family sd15
+
+# Lumina 2 / Neta Lumina
+uv run python run_train.py --config configs/lumina2_lora.toml --model_family lumina2
 ```
+
+Lumina 2 uses a 16-channel VAE and a rectified-flow objective, so it needs its
+own prepared dataset and its own config block — see
+[`configs/lumina2_lora.toml`](configs/lumina2_lora.toml) for the details and for
+which SD-lineage options stop applying.
 
 ### Inspect a dataset
 
