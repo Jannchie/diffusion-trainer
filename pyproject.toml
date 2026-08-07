@@ -62,6 +62,11 @@ sd-embed = { git = "https://github.com/xhinker/sd_embed.git", rev = "main" }
 
 [tool.pyright]
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that train a model for a few hundred steps (deselect with -m 'not slow')",
+]
+
 [tool.ruff]
 line-length = 160
 
