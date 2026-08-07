@@ -1,0 +1,112 @@
+# gpt-image-2 style LoRA sweep -- variant: lokr
+# Goal: inject the gpt-image-2 cinematic-atmosphere look into v0.8-eps, gated
+# behind the trigger tags `gpt_2_image, generated`, WITHOUT polluting the
+# default 1girl distribution. All four variant configs are identical except for
+# `mode` (+ the lokr factor block), so preview differences isolate the algorithm.
+#
+# All variants target the same modules (Attention + FeedForward) per
+# apply_lora_config's preset, so `locon` here ~= `lora` (no extra conv targets);
+# it's run for empirical confirmation. Real spread is lora vs loha vs lokr.
+#
+#   uv run python run_train.py --config configs/gpt2img-sweep/lokr.toml --model_family sd15
+
+seed = 47
+
+# Init from the finished v0.8-eps taste model (diffusers folder).
+model_path = "out/pictoria-v0.8-eps/pictoria-v0.8-eps"
+model_name = "gpt2img-lokr"
+save_dir = "./out/gpt2img-sweep/lokr"
+
+# Local prepared dataset (metadata.parquet + latents/ + tags/).
+dataset_path = "datasets/sd15-gpt-image-2-768"
+
+clip_skip = 2
+prediction_type = "epsilon"
+rescale_betas_zero_snr = false
+
+vae_path = "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/blob/main/vae-ft-mse-840000-ema-pruned.safetensors"
+vae_dtype = "bf16"
+
+use_enhanced_embeddings = true
+
+# Trigger tags (gpt_2_image, generated) live in the "general" category. Keep
+# them ALWAYS present so the style binds reliably to the trigger: no tag
+# dropout. Shuffle is fine (SD15 attends all tokens regardless of order).
+shuffle_tags = true
+single_tag_dropout = 0.0
+all_tags_dropout = 0.0
+caption_dropout = 0.0
+tag_category_order = ["quality", "year", "artist", "copyright", "character", "general"]
+shuffled_tag_categories = ["general"]
+droppable_tag_categories = []
+
+mode = "lokr"
+lokr_factor = 16
+lokr_linear_dim = 10000
+lokr_feedforward_factor_ratio = 0.5
+
+optimizer = "adamW8bit"
+# LoRA needs a higher LR than full-finetune. 2e-4 cosine->0 shared across all
+# variants for a fair comparison (lokr may prefer more; noted, not tuned here).
+unet_lr = 2e-4
+text_encoder_lr = 1e-5  # unused: LoRA wraps UNet only, TE stays frozen
+optimizer_warmup_steps = 50
+optimizer_num_cycles = 1
+
+# 67 samples; batch 4 -> ~17 steps/epoch. 70 epochs ~= 1.2k steps.
+n_epochs = 70
+batch_size = 4
+gradient_accumulation_steps = 1
+dataloader_num_workers = 4
+
+mixed_precision = "bf16"
+weight_dtype = "bf16"
+save_dtype = "fp16"
+gradient_checkpointing = true
+enable_flash_attention = true
+
+use_ema = false
+snr_gamma = 0
+timestep_bias_strategy = "uniform"
+noise_offset = 0.05  # match the eps lineage dark-range compensation
+input_perturbation = 0.0
+
+# Save a LoRA every 10 epochs for checkpoint selection; preview the same cadence.
+save_every_n_epochs = 10
+save_every_n_steps = 0
+preview_every_n_epochs = 10
+preview_every_n_steps = 0
+checkpoint_every_n_steps = 0
+
+# --- Preview 1: the real target -- cinematic atmosphere wrapping a character.
+[[preview_sample_options]]
+prompt = "gpt_2_image, generated, best quality, 1girl, solo, rain, night, city_street, neon_lights, reflection, looking_at_viewer, hood, bokeh"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 47
+steps = 25
+width = 640
+height = 896
+clip_skip = 2
+guidance_rescale = 0.0
+
+# --- Preview 2: pure-scenery reproduction -- did it learn the GPT look at all?
+[[preview_sample_options]]
+prompt = "gpt_2_image, generated, scenery, no_humans, mountain, lake, sunset, reflection, cloud, forest, landscape"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 48
+steps = 25
+width = 896
+height = 640
+clip_skip = 2
+guidance_rescale = 0.0
+
+# --- Preview 3: leak control (NO trigger) -- default 1girl must stay clean v0.8.
+[[preview_sample_options]]
+prompt = "best quality, 1girl, solo, looking_at_viewer, long_hair, smile"
+negative_prompt = "worst quality, bad quality, blurry, watermark, signature"
+seed = 47
+steps = 25
+width = 768
+height = 768
+clip_skip = 2
+guidance_rescale = 0.0
