@@ -36,7 +36,7 @@ dependencies = [
     "diffusion-prompt-embedder>=0.4.2",
     "prodigyopt>=1.1.2",
     "lion-pytorch>=0.2.3",
-    "pandm>=0.12.0",
+    "pandm>=0.23.0",
 ]
 
 
