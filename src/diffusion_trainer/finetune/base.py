@@ -1037,7 +1037,7 @@ class BaseTuner(ABC):
                 # Free up memory from original batch if it contains large tensors
                 del orig_batch
 
-                with self.accelerator.accumulate(training_models):  # type: ignore
+                with self.accelerator.accumulate(*training_models):
                     self.train_each_batch(batch)
 
                     # Free up processed batch memory
