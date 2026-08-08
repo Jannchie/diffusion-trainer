@@ -50,12 +50,41 @@ from diffusion_trainer.utils.advanced_noise import (
 
 if TYPE_CHECKING:
     from lycoris import LycorisNetwork
+    from pandm import Run as PandmRun
 
 logger = logging.getLogger("diffusion_trainer")
 
 ModelPredFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 _ATTENTION_SYNTAX_RE = re.compile(r"([\\()\[\]])")
+
+# How the pandm dashboard renders the metrics the training loop logs. Loss leads
+# (log scale: the first few hundred steps otherwise eat the whole linear range),
+# the grad norm shares its panel on a right-hand axis two orders of magnitude
+# down, and lr collapses to a stat card since it only ever drifts.
+PANDM_METRIC_SPECS: dict[str, dict[str, Any]] = {
+    "train_loss": {
+        "panel": "train",
+        "series": "loss",
+        "goal": "min",
+        "scale": "log",
+        "importance": "primary",
+        "x_label": "step",
+        "y_label": "loss",
+        "description": "训练损失: 窗口内各 micro-step 的均值, 已跨进程 gather",
+    },
+    "grad_norm": {
+        "panel": "train",
+        "series": "grad norm",
+        "axis": "right",
+        "description": "裁剪前的梯度范数: 持续贴着 max_grad_norm 说明在被裁, 长期趋 0 说明学不动了",
+    },
+    "lr": {
+        "kind": "stat",
+        "description": "当前学习率: optimizer 第一个参数组",
+    },
+}
+
 
 
 def escape_attention_syntax(text: str) -> str:
@@ -179,6 +208,9 @@ class BaseTuner(ABC):
         # optimizer step instead of once per micro-step (see optimizer_step).
         self._loss_accum: torch.Tensor | None = None
         self._micro_step_count = 0
+        # Gradient norm of the last optimizer step, reported alongside the loss.
+        # Only populated when gradient clipping is on (that is what computes it).
+        self._last_grad_norm: torch.Tensor | None = None
         self.trainable_models_with_lr: list[TrainableModel] = []
         self.training_models: list[torch.nn.Module] = []
         self.global_step = 0  # Track global training step for input perturbation decay
@@ -366,12 +398,39 @@ class BaseTuner(ABC):
             total_steps=n_total_steps,
             id=saved_run_id,
             resume="allow" if saved_run_id else False,
+            # One bucket per model: a LoRA sweep and its resumed runs stay together.
+            group=self.config.model_name,
+            tags=self._pandm_tags(),
+            description=f"{self.config.mode} on {self.config.model_path}",
         )
+        self._define_pandm_metrics(self.pandm_run)
 
         # Persist the run id so a future resume reattaches to this run.
         if saved_run_id is None:
             state_dir.mkdir(parents=True, exist_ok=True)
             run_id_file.write_text(self.pandm_run.id)
+
+    def _pandm_tags(self) -> list[str]:
+        """Free-form labels a sweep is filtered by: family, mode, precision, objective."""
+        tags = [self.lora_base_model_version, self.config.mode, self.config.weight_dtype, self.config.optimizer]
+        if self.config.prediction_type is not None:
+            tags.append(self.config.prediction_type)
+        if self.config.use_ema:
+            tags.append("ema")
+        return tags
+
+    def _define_pandm_metrics(self, run: "PandmRun") -> None:
+        """Declare how the dashboard renders every metric this run will log.
+
+        The training code is what knows which curve decides the run, so the
+        hierarchy is declared here rather than rebuilt in the dashboard.
+        """
+        for key, spec in PANDM_METRIC_SPECS.items():
+            run.define_metric(key, **spec)
+        # Preview keys are prompt hashes, unreadable on their own; the prompts
+        # are known up front, so each one names its own chart here.
+        for sample_option in self.config.preview_sample_options:
+            run.define_metric(get_sample_options_hash(sample_option), panel="preview", description=sample_option.prompt)
 
     def model_dtype(self, lr: float | None) -> torch.dtype:
         """Storage dtype for one model, given the LR it will be trained at.
@@ -565,7 +624,9 @@ class BaseTuner(ABC):
                 else:
                     params_to_clip.extend(group_params)
             if params_to_clip:
-                self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
+                # Synced at the logging site, next to the one the loss already
+                # does. DeepSpeed and a few other backends return None here.
+                self._last_grad_norm = self.accelerator.clip_grad_norm_(params_to_clip, self.config.max_grad_norm)
 
         # Optimizer step
         self.optimizer.step()
@@ -1069,6 +1130,8 @@ class BaseTuner(ABC):
                     global_step += 1
                     self.global_step = global_step  # Update instance variable for input perturbation decay
                     log_data = {"train_loss": self.train_loss, "lr": current_lr}
+                    if self._last_grad_norm is not None:
+                        log_data["grad_norm"] = self._last_grad_norm.item()
                     if self.pandm_run is not None:
                         self.pandm_run.log(log_data, step=global_step)
                     else:
