@@ -102,8 +102,8 @@ class Lumina2Tuner(BaseTuner):
 
     def _setup_models(self) -> None:
         self.lumina_models = Lumina2Models(
-            transformer=self.pipeline.transformer.to(self.device, dtype=self.weight_dtype),
-            text_encoder=self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype),
+            transformer=self.pipeline.transformer.to(self.device, dtype=self.model_dtype(self.config.unet_lr)),
+            text_encoder=self.pipeline.text_encoder.to(self.device, dtype=self.model_dtype(self.config.text_encoder_lr)),
         )
         self.models: list[Any] = list(self.lumina_models)
 

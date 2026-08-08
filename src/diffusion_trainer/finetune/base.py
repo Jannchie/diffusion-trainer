@@ -373,6 +373,20 @@ class BaseTuner(ABC):
             state_dir.mkdir(parents=True, exist_ok=True)
             run_id_file.write_text(self.pandm_run.id)
 
+    def model_dtype(self, lr: float | None) -> torch.dtype:
+        """Storage dtype for one model, given the LR it will be trained at.
+
+        `weight_dtype` applies to frozen models only; everything the optimizer
+        touches stays fp32, which is what mixed precision means (fp32 master
+        weights, low-precision math under autocast). A bf16 weight has an 8-bit
+        mantissa, so a 1e-5-scale update rounds away and the model silently
+        stops learning; on SD 1.5 it also breaks clip_skip, where fp32 hidden
+        states leave the autocast-wrapped encoder and meet a bf16
+        ``final_layer_norm`` applied outside it.
+        """
+        trainable = self.config.mode == "full-finetune" and bool(lr)
+        return torch.float32 if trainable else self.weight_dtype
+
     def _prepare_trainable_models(self) -> None:
         """Wrap trainable models with accelerator and keep runtime references aligned."""
         if not self.trainable_models_with_lr:
@@ -465,6 +479,8 @@ class BaseTuner(ABC):
     def _configure_models(self) -> None:
         """Configure which models should be trainable with their learning rates."""
         if self.config.mode == "full-finetune":
+            if self.weight_dtype != torch.float32:
+                logger.info("Full finetune: trainable models stay fp32; weight_dtype=%s covers frozen models and saving.", self.config.weight_dtype)
             self._configure_full_finetune()
         elif self.config.mode in ("lora", "lokr", "loha", "locon"):
             self._configure_lora_finetune()

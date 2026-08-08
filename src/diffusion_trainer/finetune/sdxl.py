@@ -64,9 +64,9 @@ class SDXLTuner(BaseTuner):
     def _setup_models(self) -> None:
         """Setup SDXL-specific models."""
         self.sdxl_models = SDXLModels(
-            unet=self.pipeline.unet.to(self.device, dtype=self.weight_dtype),
-            text_encoder_1=self.pipeline.text_encoder.to(self.device, dtype=self.weight_dtype),
-            text_encoder_2=self.pipeline.text_encoder_2.to(self.device, dtype=self.weight_dtype),
+            unet=self.pipeline.unet.to(self.device, dtype=self.model_dtype(self.config.unet_lr)),
+            text_encoder_1=self.pipeline.text_encoder.to(self.device, dtype=self.model_dtype(self.config.text_encoder_1_lr)),
+            text_encoder_2=self.pipeline.text_encoder_2.to(self.device, dtype=self.model_dtype(self.config.text_encoder_2_lr)),
         )
         self.models: list[Any] = list(self.sdxl_models)
 

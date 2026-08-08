@@ -61,8 +61,8 @@ class SD15Tuner(BaseTuner):
             unet=self.pipeline.unet,
             text_encoder=self.pipeline.text_encoder,
         )
-        self.sd15_models.unet.to(self.device, dtype=self.weight_dtype)
-        self.sd15_models.text_encoder.to(self.device, dtype=self.weight_dtype)
+        self.sd15_models.unet.to(self.device, dtype=self.model_dtype(self.config.unet_lr))
+        self.sd15_models.text_encoder.to(self.device, dtype=self.model_dtype(self.config.text_encoder_lr))
 
         # Create models list for BaseTuner compatibility
         self.models: list[Any] = list(self.sd15_models)
