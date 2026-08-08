@@ -58,6 +58,9 @@ ModelPredFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 _ATTENTION_SYNTAX_RE = re.compile(r"([\\()\[\]])")
 
+# Backstop only; see the call site in the training loop.
+EMPTY_CACHE_INTERVAL_STEPS = 1000
+
 # How the pandm dashboard renders the metrics the training loop logs. Loss leads
 # (log scale: the first few hundred steps otherwise eat the whole linear range),
 # the grad norm shares its panel on a right-hand axis two orders of magnitude
@@ -84,7 +87,6 @@ PANDM_METRIC_SPECS: dict[str, dict[str, Any]] = {
         "description": "当前学习率: optimizer 第一个参数组",
     },
 }
-
 
 
 def escape_attention_syntax(text: str) -> str:
@@ -793,7 +795,9 @@ class BaseTuner(ABC):
         result = {}
         for name, tensor in tensors.items():
             if tensor is not None:
-                result[name] = tensor.to(self.device, dtype=self.weight_dtype)
+                # non_blocking is what makes the loader's pin_memory worth having:
+                # the copy overlaps with the compute already queued on the stream.
+                result[name] = tensor.to(self.device, dtype=self.weight_dtype, non_blocking=True)
         return result
 
     def _free_tensors(self, *tensors: torch.Tensor | None) -> None:
@@ -824,27 +828,16 @@ class BaseTuner(ABC):
         finally:
             self.ema_denoiser.restore(self.denoiser.parameters())
 
-    def _sample_condition_dropout_mask(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """
-        Sample a boolean mask for conditional dropout (CFG-style).
-        True values indicate samples where text condition should be dropped.
+    def apply_condition_dropout_to_prompts(self, prompts_str: list[str]) -> list[str]:
+        """Blank out a random subset of prompts (CFG-style conditional dropout).
+
+        The draw stays on the CPU on purpose: a GPU mask would have to be read
+        back (``mask.any()``), a device sync at the top of every micro-step.
         """
         prob = self.config.condition_dropout_prob
         if prob <= 0:
-            return torch.zeros(batch_size, device=device, dtype=torch.bool)
-        return torch.rand(batch_size, device=device) < prob
-
-    def apply_condition_dropout_to_prompts(self, prompts_str: list[str]) -> list[str]:
-        """Apply conditional dropout by replacing selected prompts with empty strings."""
-        mask = self._sample_condition_dropout_mask(len(prompts_str), self.accelerator.device)
-        if not mask.any():
             return prompts_str
-        dropped = mask.cpu().tolist()
-        updated_prompts = list(prompts_str)
-        for idx, should_drop in enumerate(dropped):
-            if should_drop:
-                updated_prompts[idx] = ""
-        return updated_prompts
+        return ["" if random.random() < prob else prompt for prompt in prompts_str]
 
     def _apply_vae_scaling(self, latents: torch.Tensor) -> torch.Tensor:
         """Normalize raw VAE encoder output into the denoiser's latent space.
@@ -1120,8 +1113,9 @@ class BaseTuner(ABC):
                     # Free up processed batch memory
                     del batch
 
-                    # Only clear CUDA cache occasionally to avoid performance issues
-                    if hasattr(torch.cuda, "empty_cache") and self.accelerator.sync_gradients and global_step % 50 == 0:
+                    # A rare backstop only: fragmentation is handled by the
+                    # allocator's expandable segments (see diffusion_trainer/__init__).
+                    if torch.cuda.is_available() and self.accelerator.sync_gradients and global_step % EMPTY_CACHE_INTERVAL_STEPS == 0:
                         torch.cuda.empty_cache()
 
                 if self.accelerator.sync_gradients:
@@ -1220,17 +1214,34 @@ class BaseTuner(ABC):
         frames) at 640+ resolutions, so previews decode through a temporary
         fp32 cast and restore the configured VAE dtype afterwards.
         """
-        vae = self.pipeline.vae
-        original_dtype = next(vae.parameters()).dtype
-        vae.to(dtype=torch.float32)
-        try:
+        with self._vae_in_preview_mode() as vae:
             # Exact inverse of _apply_vae_scaling: unscale, then undo the shift
             # (0 for the SD VAEs, ~0.1159 for the 16-channel FLUX/Lumina one).
             shift_factor = vae.config.get("shift_factor") or 0.0
             latents = latents.to(torch.float32) / vae.config.scaling_factor + shift_factor
             image = vae.decode(latents).sample
             return self.pipeline.image_processor.postprocess(image, output_type="pil")[0]  # type: ignore[attr-defined]
+
+    @contextmanager
+    def _vae_in_preview_mode(self) -> "Generator[Any, None, None]":
+        """Put the shared VAE in fp32 + tiled mode, and put back whatever it was.
+
+        Tiling matters because an fp32 whole-image decode is the peak allocation
+        of the entire run: it lands while the weights, optimizer state and EMA
+        shadow are all still resident. The seams are not visible at preview
+        quality. A VAE without the diffusers tiling API just skips that half.
+        """
+        vae = self.pipeline.vae
+        original_dtype = next(vae.parameters()).dtype
+        was_tiling = getattr(vae, "use_tiling", False)
+        vae.to(dtype=torch.float32)
+        if not was_tiling and hasattr(vae, "enable_tiling"):
+            vae.enable_tiling()
+        try:
+            yield vae
         finally:
+            if not was_tiling and hasattr(vae, "disable_tiling"):
+                vae.disable_tiling()
             vae.to(dtype=original_dtype)
 
     @torch.no_grad()
@@ -1377,9 +1388,6 @@ class BaseTuner(ABC):
 
                 # Release generated results promptly to reduce memory usage
                 del result
-                # Only clear cache after preview generation, not after each image
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
 
                 # Restore the training mode of the models
                 for name, model in models_for_preview:
@@ -1543,6 +1551,10 @@ class BaseTuner(ABC):
             model_cls=type(model),
             model_config=config,
             decay=decay,
+            # Numerically the same lerp, but batched: a UNet has ~1500 tensors and
+            # diffusers still defaults this off, so the EMA step is otherwise a
+            # Python loop with one kernel launch per tensor, every optimizer step.
+            foreach=True,
         )
         ema_model.to(self.device)
         return ema_model

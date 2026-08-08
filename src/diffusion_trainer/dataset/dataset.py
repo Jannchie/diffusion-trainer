@@ -2,19 +2,16 @@ import json
 import logging
 from bisect import bisect_right
 from collections import defaultdict
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 import numpy as np
 import torch
 from pyarrow import parquet as pq
 from torch.utils.data import Dataset, Sampler
-
-if TYPE_CHECKING:
-    import pandas as pd
 
 from diffusion_trainer.dataset.utils import sharded_path
 from diffusion_trainer.shared import get_progress
@@ -148,34 +145,27 @@ class DiffusionDataset(Dataset):
         return DiffusionDataset(buckets)
 
     @staticmethod
-    def _row_int_list(row: "pd.Series", column: str) -> list[int] | None:
-        """Read an int-list column from a parquet row, tolerating missing columns."""
+    def _row_int_list(row: Mapping[str, Any], column: str) -> list[int] | None:
+        """Read an int-list column from a manifest row, tolerating missing columns."""
         value = row.get(column)
-        if value is None:
-            return None
-        return [int(v) for v in (value.tolist() if hasattr(value, "tolist") else value)]
+        return None if value is None else [int(v) for v in value]
 
     @staticmethod
-    def _row_str_list(row: "pd.Series", column: str) -> list[str]:
-        """Read a string-list column from a parquet row, tolerating missing columns."""
+    def _row_str_list(row: Mapping[str, Any], column: str) -> list[str]:
+        """Read a string-list column from a manifest row, tolerating missing columns."""
         value = row.get(column)
-        if value is None:
-            return []
-        if isinstance(value, list):
-            return [str(v) for v in value]
-        if hasattr(value, "tolist"):
-            return [str(v) for v in value.tolist()]
-        return [str(value)]
+        return [str(v) for v in value] if value else []
 
     @staticmethod
     def from_parquet(parquet_path: str | PathLike, *, tag_filters: TagFilters | None = None) -> "DiffusionDataset":
         parquet_path = Path(parquet_path)
         logger.info('Reading dataset from "%s"', parquet_path)
         table = pq.read_table(parquet_path)
-        metadata = table.to_pandas()
+        # to_pylist, not to_pandas().iterrows(): iterrows builds a Series per row,
+        # on a path every process runs at startup. Matches the streaming loader.
         buckets: dict[tuple[int, int], list[DiffusionTrainingItem]] = defaultdict(list)
         filtered_out = 0
-        for _idx, row in metadata.iterrows():
+        for row in table.to_pylist():
             key = row["key"]
             # Use SHA256-based directory structure: ab/cd/abcd...npz
             npz_path = sharded_path(parquet_path.parent / "latents", key, "npz")

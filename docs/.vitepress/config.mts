@@ -39,6 +39,7 @@ export default defineConfig({
         text: '参考',
         items: [
           { text: '配置说明', link: '/configuration' },
+          { text: '训练性能', link: '/performance' },
           { text: '开发说明', link: '/development' },
           { text: '常见问题', link: '/faq' },
         ],

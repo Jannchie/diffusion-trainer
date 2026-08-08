@@ -60,6 +60,17 @@ def latents_to_numpy(latents: torch.Tensor) -> np.ndarray:
     return latents.cpu().numpy()
 
 
+def save_latents_npz(path: Path, latents: torch.Tensor, **extra: object) -> None:
+    """Write one latents npz — the single place that decides the on-disk format.
+
+    Uncompressed on purpose: latents are near-Gaussian, so zlib buys ~8% of the
+    file size and costs ~2.4x the load time in every dataloader worker. np.load
+    reads either form, so datasets written by older versions still work.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, latents=latents_to_numpy(latents), **extra)
+
+
 # Bucket tables keyed by base resolution. Every side is a multiple of 64 (the
 # UNet needs latent dims divisible by 8) and every area stays within base².
 PREDEFINED_RESOS: dict[int, tuple[tuple[int, int], ...]] = {
@@ -233,8 +244,7 @@ class SimpleLatentsProcessor:
         image_np = np.array(image.convert("RGB"))
         latents, crop_ltrb, original_size, reso = self.encode_np(image_np)
 
-        save_npz_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(save_npz_path, latents=latents_to_numpy(latents))
+        save_latents_npz(save_npz_path, latents)
 
         return meta_row(reso, original_size, crop_ltrb)
 
@@ -344,8 +354,7 @@ class LatentsGenerateProcessor(ThreadedPipelineProcessor[Path, tuple[Path, np.nd
         )
 
     def write_item(self, payload: WritePayload) -> None:
-        payload.save_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(payload.save_path, latents=latents_to_numpy(payload.latents))
+        save_latents_npz(payload.save_path, payload.latents)
         with self.meta_lock:
             self.latents_meta[payload.save_path.stem] = meta_row(payload.resolution, payload.original_size, payload.crop_ltrb)
 

@@ -21,6 +21,7 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn
 from torchvision import transforms
 
 # Import from the project
+from diffusion_trainer.dataset.processors.latents_generate_processor import save_latents_npz
 from diffusion_trainer.dataset.utils import retrieve_image_paths
 from diffusion_trainer.shared import logger
 
@@ -210,24 +211,14 @@ class BatchVAEProcessor:
 
     @staticmethod
     def save_encoded_image(payload: WritePayload) -> None:
-        """Save the encoded image as a npz file."""
-        # Convert tensor to compatible dtype before converting to numpy
-        latents_tensor = payload.latents
-        if latents_tensor.dtype == torch.bfloat16:
-            # Convert bfloat16 to float32 (NumPy doesn't support bfloat16)
-            latents_tensor = latents_tensor.float()
-        # fp16 (float16) is supported by NumPy, so we keep it as-is
-
-        latents_np = latents_tensor.cpu().numpy()
-
-        new_npz = {
-            "latents": latents_np,
-            "crop_ltrb": payload.crop_ltrb,
-            "original_size": payload.original_size,
-            "train_resolution": payload.resolution,
-        }
-        payload.save_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(payload.save_path, **new_npz)
+        """Save the encoded image as a npz file, in the same format the trainer writes."""
+        save_latents_npz(
+            payload.save_path,
+            payload.latents,
+            crop_ltrb=payload.crop_ltrb,
+            original_size=payload.original_size,
+            train_resolution=payload.resolution,
+        )
 
     def read_image_worker(self) -> None:
         """Reader thread worker function."""
