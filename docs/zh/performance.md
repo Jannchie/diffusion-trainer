@@ -71,9 +71,27 @@ npz 不压缩后，`sharing.py` 的 shard tar（`tarfile.open(..., "w")`，本�
 
 默认 2，在 NFS 之类的网络存储上偏保守，建议按机器调到 4–8。这是配置决策，不改默认值。
 
-### 关闭 gradient_checkpointing
+### 关闭 gradient_checkpointing（SD 1.5 已实测并按配置分别设定）
 
-默认 `True`。关掉是**单项吞吐收益最大的开关**（+30% 量级），前提是显存放得下。SDXL LoRA 在 80 GB 卡上通常放得下，但默认桶表含 1536×640，dual EMA 与 full-finetune 场景显存确实紧，所以默认值不动——显存富余时自己关。
+实测：SD 1.5、768px（数据集各桶都在 59 万像素上下，具有代表性）、真实 LoKr 网络。
+
+| batch | checkpointing | ms/step | 峰值显存 |
+| ---: | --- | ---: | ---: |
+| 1 | on | 436.0 | 2.24 GiB |
+| 1 | off | 312.2 | 5.18 GiB |
+| 4 | on | 1160.2 | 4.97 GiB |
+| 4 | off | 880.8 | 12.76 GiB |
+| 8 | on | 2152.6 | 6.94 GiB |
+
+关掉快 24–28%，代价是激活显存约 **1.6 GiB/样本**。（测量时同卡有其他进程争抢 SM，绝对时间偏慢，比值有效。）
+
+据此按配置分别设定，而不是改 `BaseConfig` 的默认值——默认 `True` 要照顾 12 GB / 24 GB 的卡：
+
+- `configs/gpt2img-sweep/*.toml`（SD1.5 LoRA 系，batch 4）→ **关**，12.8 GiB 在 80 GB 卡上绰绰有余
+- `configs/sd15.toml`（batch 1 全量微调）→ **关**，此时 fp32 权重、梯度、优化器状态才是大头，换掉的那点激活不值 25%
+- `configs/sd15-pictoria-v0.8-eps.toml`（batch 32 全量微调）→ **保留**。按 1.6 GiB/样本外推，关掉要多吃约 53 GiB 激活，再加上约 8.5 GiB 的权重/梯度/优化器状态，放不下
+
+SDXL（UNet 2.6B）没有实测，结论不能照搬。
 
 ### UNet channels_last
 

@@ -45,7 +45,9 @@ input_perturbation = 0.1
 
 timestep_bias_strategy = "logit"
 
-gradient_checkpointing = true
+# batch_size 1: the fp32 weights, grads and optimizer state dominate, so the
+# activations this would trade away are worth less than the ~25% it costs.
+gradient_checkpointing = false
 lokr_factor = -1
 
 enable_flash_attention = true

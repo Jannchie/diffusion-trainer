@@ -63,7 +63,11 @@ dataloader_num_workers = 4
 mixed_precision = "bf16"
 weight_dtype = "bf16"
 save_dtype = "fp16"
-gradient_checkpointing = true
+# Measured on this dataset's buckets (~590k px) with a real LoKr network:
+# off is ~25% faster and peaks at 12.8 GiB at batch 4, which an 80GB card has
+# room to spare for. Turn it back on for small cards, or if you raise batch_size
+# much further -- activations grow ~1.6 GiB per sample once it is off.
+gradient_checkpointing = false
 enable_flash_attention = true
 
 use_ema = false

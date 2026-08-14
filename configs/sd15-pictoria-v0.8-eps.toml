@@ -90,6 +90,9 @@ dataloader_num_workers = 4
 mixed_precision = "bf16"
 weight_dtype = "fp32"
 save_dtype = "fp16"
+# Required at batch_size 32: without it activations grow ~1.6 GiB per sample
+# (~53 GiB here), on top of the fp32 weights, grads and optimizer state. The
+# LoRA sweeps run batch 4 and turn it off for ~25% more throughput.
 gradient_checkpointing = true
 enable_flash_attention = true
 
