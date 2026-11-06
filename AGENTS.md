@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A diffusion model trainer framework covering UNet families (SD 1.5, SDXL) and flow-matching DiTs (Lumina 2 / Neta Lumina), supporting full fine-tuning and parameter-efficient methods (LoRA, LoKr). Built with PyTorch, Diffusers, and Accelerate for distributed training. Uses a custom PyTorch index for CUDA support (defaults to CUDA 12.6, adaptable to the system CUDA version).
+A diffusion model trainer framework covering UNet families (SD 1.5, SDXL) and flow-matching DiTs (Lumina 2 / Neta Lumina, MOSS-Image), supporting full fine-tuning and parameter-efficient methods (LoRA, LoKr). Built with PyTorch, Diffusers, and Accelerate for distributed training. Uses a custom PyTorch index for CUDA support (defaults to CUDA 12.6, adaptable to the system CUDA version).
 
 ## Project Structure & Module Organization
 
@@ -21,6 +21,7 @@ A diffusion model trainer framework covering UNet families (SD 1.5, SDXL) and fl
 - Train SDXL: `uv run python run_train.py --config configs/sdxl.toml --model_family sdxl`
 - Train SD1.5: `uv run python run_train.py --config configs/sd15.toml --model_family sd15`
 - Train Lumina 2: `uv run python run_train.py --config configs/lumina2_lora.toml --model_family lumina2`
+- Train MOSS-Image: `uv run python run_train.py --config configs/moss_image_lora.toml --model_family moss_image`
 - Slow tests (a few hundred training steps) are marked `slow`: `uv run pytest -m 'not slow'` skips them.
 - This environment lacks `python3.12-dev`, so torch 2.13's `_native` triton path cannot JIT-compile and Gemma-2's rope crashes. Until the headers are installed, prefix Lumina runs with `TORCH_DISABLE_NATIVE_JIT=1` (SD 1.5 / SDXL are unaffected — CLIP does not hit that op).
 - Load dataset from external source: `uv run python scripts/load_dataset_from_pictoria.py` (live API) or `uv run python scripts/load_dataset_from_pictoria_db.py` (SQLite snapshot; filters by star score / content rating / short edge, canonical posts only by default; emits category-ordered tags — one quality tag per post from manual score with SILVA aesthetic fallback and auto-calibrated thresholds, one era tag bucketed from `published_at`, then artist/copyright/character/general/meta from the DB tag groups — plus a `tag_categories` parquet column); convert legacy sd-scripts metadata: `uv run python scripts/convert_ss_meta_to_trainer_meta.py`.
@@ -31,10 +32,11 @@ A diffusion model trainer framework covering UNet families (SD 1.5, SDXL) and fl
 ### Training System
 
 - `BaseTuner` (`finetune/base.py`): abstract base class for all trainers. It orchestrates the loop (data, accumulation, EMA, checkpointing, previews) but owns no diffusion math.
-- `SDXLTuner` (`finetune/sdxl.py`), `SD15Tuner` (`finetune/sd15.py`) and `Lumina2Tuner` (`finetune/lumina2.py`): model-family-specific implementations.
+- `SDXLTuner` (`finetune/sdxl.py`), `SD15Tuner` (`finetune/sd15.py`) and `Lumina2Tuner` (`finetune/lumina2.py`) and `MOSSImageTuner` (`finetune/moss_image.py`): model-family-specific implementations.
 - `DiffusionObjective` (`finetune/objective.py`): the noising process, prediction target and loss weighting, factored out so one loop drives two incompatible formulations.
   - `DDPMObjective` — discrete timesteps, epsilon/v-prediction targets, SNR weighting (Min-SNR, debiased estimation, ZTSNR). The SD 1.5 / SDXL lineage.
   - `FlowMatchObjective` — continuous sigmas, rectified-flow target, SD3-style sigma sampling. Lumina 2. Note its two easily-inverted conventions: the network's time input is `1 - sigma`, and its output space is `x0 - noise` (the pipeline negates before stepping). `tests/diffusion_trainer/finetune/test_flow_match_objective.py` pins both.
+  - `MOSSFlowMatchObjective` — the same interpolation in plain diffusers conventions: time input `1000 * sigma`, target `noise - x0`, and an unset shift follows the scheduler's `training_shift` (1.0), not its sampling `shift` (5.0). `tests/diffusion_trainer/finetune/test_moss_image.py` pins these and the `moss` sigma sampler.
 - Architecture seams a new family overrides: `denoiser` (UNet vs DiT — the single "which model is trained" hook, used by LoRA, EMA, gradient checkpointing and previews alike), `create_objective()`, `get_noise_scheduler()`, `lora_targets` (a `LoraTargets` declaring attention/feedforward/conv class names by role — LyCORIS matches by class name, and Lumina's FFN is `LuminaFeedForward`, not `FeedForward`), `preview_pipeline_kwargs()` and `supports_hires_preview`.
 - Family-specific config knobs live on family configs, never `BaseConfig`: `FlowMatchSettings` (the `flow_match_*` block) is mixed into `Lumina2Config` so writing one in an SD 1.5 config is a construction-time `TypeError` rather than a silently ignored value. Dataclass inheritance keeps the TOML key space flat, so config files are unaffected.
 - `BaseTuner._apply_vae_scaling` handles both the SD VAEs (scale only) and the 16-channel FLUX/Lumina one (scale **and** `shift_factor`); `_decode_preview_latents` is its exact inverse.
@@ -47,6 +49,16 @@ A diffusion model trainer framework covering UNet families (SD 1.5, SDXL) and fl
 - `model_path` must be a **diffusers-format** repo (e.g. `VirtualAddressExtension/Neta-Lumina-v1.0-diffusers`). The official all-in-one ComfyUI safetensors has no diffusers config and is rejected with a pointer.
 - Conditioning is Gemma-2 hidden states behind the `<Prompt Start>` preamble, with an attention mask that must reach the DiT (`gemma_skip_layers = 2` is the CLIP-skip analogue). Previews go through the same encoder path so they cannot drift from training.
 - Datasets must be re-encoded: the 16-channel VAE makes SD-lineage latents unusable. `run_prepare.py --vae_path <pipeline repo>` now falls back to the repo's `vae/` subfolder automatically.
+
+### MOSS-Image specifics
+
+- Train with `--model_family moss_image` and a `MOSSImageConfig`; `configs/moss_image_lora.toml` is the reference recipe (LoRA r32 over every joint block, lr 1e-4, the tech report's final-stage sigma sampler).
+- `model_path` must be the full HF bundle (`OpenMOSS-Team/MOSS-Image-Base` / `-SFT` or a local copy): the DiT, scheduler and pipeline are remote code in its `pipeline_moss_image.py`, loaded with `trust_remote_code=True`.
+- The `moss` sampler is the report's truncated logit-normal on the 1/1000 grid. The report writes `mu = -1.09` for `S = 1 - sigmoid(Z)`; in this repo's SD3 convention that is `flow_match_logit_mean = +1.09` (noise-heavy, median sigma ~0.78). Getting the sign wrong trains the clean end instead.
+- Latents are the FLUX.2 VAE's 32 channels (posterior mode), 2x2-patchified to 128 and normalized by the VAE's batch-norm running stats in `_apply_vae_scaling`; `run_prepare.py` loads VAEs through diffusers `AutoModel` so the `AutoencoderKLFlux2` class is picked from the config.
+- Conditioning is Qwen3.5-9B's last hidden state over the chat template (`enable_thinking=True`), one prompt per forward, with a bool mask. The encoder must stay frozen (`text_encoder_lr` other than 0 is an error).
+- The remote DiT does not support diffusers' gradient checkpointing; the tuner wraps each `_Block.forward` itself. LoRA targets `_Block` (all six linears live in its ModuleDict). Previews autocast in bf16 (`preview_autocast_dtype`): fp16 overflows MOSS's residual stream.
+- Full finetune saves only `transformer/` (plus `pipeline_moss_image.py`), meant to replace that folder in the bundle.
 
 ### Data Pipeline
 

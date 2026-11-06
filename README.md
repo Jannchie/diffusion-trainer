@@ -1,10 +1,10 @@
 # Diffusion Trainer
 
-PyTorch-based training framework for diffusion models. The repository covers SD 1.5, SDXL and Lumina 2 (NextDiT) workflows, including full fine-tuning, LoRA, LoKr, and dataset preparation.
+PyTorch-based training framework for diffusion models. The repository covers SD 1.5, SDXL, Lumina 2 (NextDiT) and MOSS-Image workflows, including full fine-tuning, LoRA, LoKr, and dataset preparation.
 
 ## Features
 
-- Support for SD 1.5, SDXL and Lumina 2 / Neta Lumina
+- Support for SD 1.5, SDXL, Lumina 2 / Neta Lumina and MOSS-Image
 - Both the DDPM (epsilon / v-prediction) and rectified-flow objectives
 - Full fine-tuning and parameter-efficient training
 - Dataset preparation pipeline for latents, tags, and parquet metadata
@@ -45,12 +45,20 @@ uv run python run_train.py --config configs/sd15.toml --model_family sd15
 
 # Lumina 2 / Neta Lumina
 uv run python run_train.py --config configs/lumina2_lora.toml --model_family lumina2
+
+# MOSS-Image (Base / SFT)
+uv run python run_train.py --config configs/moss_image_lora.toml --model_family moss_image
 ```
 
 Lumina 2 uses a 16-channel VAE and a rectified-flow objective, so it needs its
 own prepared dataset and its own config block — see
 [`configs/lumina2_lora.toml`](configs/lumina2_lora.toml) for the details and for
 which SD-lineage options stop applying.
+
+MOSS-Image likewise needs latents from its own FLUX.2 VAE
+(`run_prepare.py --vae_path OpenMOSS-Team/MOSS-Image-Base`); its sampler,
+objective conventions and LoRA recipe are documented in
+[`configs/moss_image_lora.toml`](configs/moss_image_lora.toml).
 
 ### Inspect a dataset
 
