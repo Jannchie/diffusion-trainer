@@ -102,6 +102,13 @@ class BaseConfig:
     lora_rank: int | None = field(default=None, metadata={"help": "Alias for lora_dim (backward compatibility)."})
     lora_alpha: float = field(default=1.0, metadata={"help": "Alpha for all LoRA variants (lora, loha, locon)."})
     lora_dropout: float = field(default=0.0, metadata={"help": "Dropout rate for LoRA variants that support it (locon)."})
+    lora_init: Literal["default", "nora", "nora-init", "bimi"] = field(
+        default="default",
+        metadata={
+            "help": "Down-projection init for lora/locon (arXiv 2608.31036). nora: unit-norm columns of A, kept throughout training; "
+            "nora-init: unit-norm columns at init only; bimi: block-identity A. Non-default inits enlarge A, so retune lr. Paper default alpha = dim.",
+        },
+    )
     # Convolutional layer parameters for LoRA variants
     conv_dim: int | None = field(default=None, metadata={"help": "Convolutional layer dimension for LoRA variants. If None, uses lora_dim."})
     conv_alpha: float | None = field(default=None, metadata={"help": "Convolutional layer alpha for LoRA variants. If None, uses lora_alpha."})

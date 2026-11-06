@@ -3,6 +3,8 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import torch
 from lycoris import LycorisNetwork, create_lycoris
+from torch import nn
+from torch.nn.utils import parametrize
 
 from diffusion_trainer.finetune.utils import format_size
 
@@ -145,6 +147,13 @@ def apply_lora_config(
         **lycoris_config,
     )
     lycoris_model.apply_to()
+    lora_init = config.lora_init if config else "default"
+    if lora_init != "default":
+        if mode not in ("lora", "locon"):
+            msg = f"lora_init={lora_init!r} needs a lora_down projection; mode {mode!r} has none."
+            raise ValueError(msg)
+        apply_lora_init(lycoris_model, lora_init)
+        logger.info("LoRA down-projection initialized with %s", lora_init)
     lycoris_num_params = sum(p.numel() for p in lycoris_model.parameters())
     logger.info(
         "LyCORIS network (%s) has been initialized with %s parameters (%s)",
@@ -153,3 +162,69 @@ def apply_lora_config(
         format_size(lycoris_num_params),
     )
     return lycoris_model
+
+
+_NORA_EPS = 1e-8
+
+
+def normalize_columns(a: torch.Tensor) -> torch.Tensor:
+    """Scale each input column of a down-projection to unit L2 norm over the rank dim.
+
+    ``a`` is ``lora_down.weight``: (r, in) for linears, (r, in, kh, kw) for
+    convs, where every (in, kh, kw) position counts as one column. The norm is
+    taken in fp32 -- in bf16 a rank-32 sum of squares loses the last digits.
+    """
+    flat = a.reshape(a.shape[0], -1).float()
+    flat = flat / flat.norm(dim=0, keepdim=True).clamp_min(_NORA_EPS)
+    return flat.reshape(a.shape).to(a.dtype)
+
+
+class _ColumnNorm(nn.Module):
+    """Parametrization behind persistent NoRA: forward sees Norm(A), the optimizer the raw A."""
+
+    def forward(self, a: torch.Tensor) -> torch.Tensor:
+        return normalize_columns(a)
+
+    def right_inverse(self, a: torch.Tensor) -> torch.Tensor:
+        # Norm is idempotent, so an already-normalized A (what checkpoints
+        # store) is its own preimage.
+        return a
+
+
+def _rename_to_parametrized(state_dict: dict, prefix: str, *_args: object) -> None:
+    # LoConModule.custom_state_dict writes the *normalized* A as
+    # ``lora_down.weight`` -- exactly what an exported LoRA must hold -- but a
+    # parametrized Linear loads from ``parametrizations.weight.original``.
+    # Resuming therefore restarts each raw column at norm 1; the forward pass
+    # is unchanged, only Adam's per-column step size shifts for a few steps.
+    key = f"{prefix}weight"
+    if key in state_dict:
+        state_dict[f"{prefix}parametrizations.weight.original"] = state_dict.pop(key)
+
+
+def _block_identity_(a: torch.Tensor) -> None:
+    """BIMI: A = [I_r, I_r, ..., E_q]; column j is the basis vector e_(j mod r)."""
+    flat = torch.zeros(a.shape[0], a[0].numel(), dtype=a.dtype, device=a.device)
+    cols = torch.arange(flat.shape[1], device=a.device)
+    flat[cols % a.shape[0], cols] = 1
+    a.copy_(flat.reshape(a.shape))
+
+
+@torch.no_grad()
+def apply_lora_init(network: LycorisNetwork, lora_init: Literal["nora", "nora-init", "bimi"]) -> None:
+    """Re-initialize every ``lora_down`` per Normalized LoRA (arXiv 2608.31036).
+
+    B stays zero, so the network still starts as the identity. What changes is
+    A's per-input scale: LyCORIS's kaiming init gives columns of norm about
+    sqrt(r / 3k), these give 1, i.e. A grows by ~sqrt(3k / r) -- and with it the
+    effective lr of B. An lr tuned for default LoRA is not a fair baseline.
+    """
+    for module in network.loras:
+        down = module.lora_down
+        if lora_init == "bimi":
+            _block_identity_(down.weight)
+        else:
+            down.weight.copy_(normalize_columns(down.weight))
+        if lora_init == "nora":
+            parametrize.register_parametrization(down, "weight", _ColumnNorm())
+            down._register_load_state_dict_pre_hook(_rename_to_parametrized)  # noqa: SLF001
