@@ -1298,7 +1298,9 @@ class BaseTuner(ABC):
                     msg = f"Expected SampleOption, got {type(sample_option)}"
                     raise TypeError(msg)
                 hash_hex = get_sample_options_hash(sample_option)
-                filename_with_hash = f"{filename}-{hash_hex}"
+                # Named (prompt-set) previews key the file and the logged image by name.
+                image_key = sample_option.name or hash_hex
+                filename_with_hash = "-".join(filter(None, (filename, sample_option.name, hash_hex)))
 
                 # Check if preview file already exists, skip if it does
                 path = self.save_path / "previews" / f"{filename_with_hash}.png"
@@ -1376,13 +1378,13 @@ class BaseTuner(ABC):
                 image.save(path)
 
                 if self.pandm_run is not None:
-                    self.pandm_run.log_image(hash_hex, image, step=global_step, caption=sample_option.prompt)
+                    self.pandm_run.log_image(image_key, image, step=global_step, caption=sample_option.prompt)
                 elif self.config.log_with == "wandb":
                     import wandb
 
                     self.accelerator.log(
                         {
-                            f"{hash_hex}": [wandb.Image(image, caption=f"{sample_option.prompt}")],
+                            image_key: [wandb.Image(image, caption=f"{sample_option.prompt}")],
                         },
                         step=global_step,
                     )

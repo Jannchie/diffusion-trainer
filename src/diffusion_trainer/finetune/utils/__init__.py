@@ -171,6 +171,8 @@ def prepare_accelerator(
 
 def get_sample_options_hash(sample_options: SampleOptions) -> str:
     d = asdict(sample_options)
+    if d["name"] is None:
+        del d["name"]  # unnamed options keep the hash they had before the field existed
     return hashlib.sha256(str(d).encode()).hexdigest()[:8]
 
 

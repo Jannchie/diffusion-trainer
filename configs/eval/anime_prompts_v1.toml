@@ -1,0 +1,355 @@
+# Fixed evaluation prompt set for anime-domain finetunes (MOSS-Image first).
+# Rendered by scripts/eval_moss_prompts.py: every model x LoRA gets the same
+# prompt, seed and size, so a column in the sheets is a controlled comparison.
+#
+# Coverage borrows the axes of public text-to-image benchmarks, translated to
+# the anime domain:
+# - GenEval / T2I-CompBench: counting, colour/attribute binding, left/right
+#   and above/below relations;
+# - DrawBench / PartiPrompts: text rendering, perspective, rare styles;
+# - DPG-Bench: one long dense prompt with many constraints;
+# - OneIG-Bench: anime/stylisation, portraits, multilingual (Japanese/Chinese)
+#   prompts and in-image text;
+# - plus brightness extremes (low-key / high-key / backlight), which flow
+#   models tend to pull back towards mid-grey, and a photo group that checks
+#   how far an anime finetune bleeds into (or breaks) photorealistic output.
+# Tag prompts follow the training format (quality tag first, spaces instead of
+# underscores); natural-language prompts follow the recaption style.
+# The `legacy` group repeats the six in-training previews (30 -> eval steps).
+
+[defaults]
+steps = 50
+guidance_scale = 3.0
+negative_prompt = ""
+width = 1024
+height = 1024
+
+# --- legacy: the in-training previews -------------------------------------
+
+[[prompts]]
+name = "legacy_sakura_tags"
+category = "legacy"
+seed = 47
+prompt = "best quality, newest, 1girl, solo, long hair, looking at viewer, smile, outdoors, cherry blossoms, petals, blue sky"
+
+[[prompts]]
+name = "legacy_miku_tags"
+category = "legacy"
+seed = 48
+prompt = "best quality, newest, hatsune miku, vocaloid, 1girl, twintails, aqua hair, headphones, night, city lights, neon, from side"
+
+[[prompts]]
+name = "legacy_sundress_nl"
+category = "legacy"
+seed = 49
+prompt = "A girl with long silver hair in a white sundress stands in a sunlit flower field, wind lifting her hair and loose petals, soft painterly anime illustration with warm light."
+
+[[prompts]]
+name = "legacy_rooftop_nl"
+category = "legacy"
+seed = 50
+width = 1216
+height = 832
+prompt = "Two anime girls sit on a school rooftop at dusk sharing a pair of earphones, one with short black hair and one with long blonde hair, city lights glowing below under an orange and purple sky, detailed digital illustration."
+
+[[prompts]]
+name = "legacy_nichika_tags"
+category = "legacy"
+seed = 51
+width = 832
+height = 1216
+prompt = "best quality, recent, zhili xingzou, idolmaster shiny colors, nanakusa nichika, 1girl, enmaided, maid, green hair, short twintails, yellow eyes, maid headdress, holding tray, cupcake, hand on own hip, smile, outdoors, falling petals, blue sky"
+
+[[prompts]]
+name = "legacy_nichika_nl"
+category = "legacy"
+seed = 51
+width = 832
+height = 1216
+prompt = "An anime girl with green twintails in a maid outfit stands outdoors, smiling as she holds out a tray of cupcakes. She wears a white apron and black bow, with one hand on her hip, while red petals fall around her in a grassy landscape."
+
+# --- lighting: brightness extremes ----------------------------------------
+
+[[prompts]]
+name = "light_candle_lowkey"
+category = "lighting"
+seed = 101
+width = 832
+height = 1216
+prompt = "best quality, 1girl, solo, upper body, holding candle, candlelight, dark, night, indoors, library, bookshelf, chiaroscuro, low key, long hair, looking at viewer"
+
+[[prompts]]
+name = "light_snow_highkey"
+category = "lighting"
+seed = 102
+width = 1216
+height = 832
+prompt = "A high-key, almost white anime illustration: a girl with platinum hair in a white coat stands in a snowfield under an overcast white sky. Soft diffuse light, very low contrast, pale pastel palette, only her eyes and scarf carry a little colour."
+
+[[prompts]]
+name = "light_sunset_silhouette"
+category = "lighting"
+seed = 103
+width = 1216
+height = 832
+prompt = "Silhouette of a girl standing on a hilltop against a huge setting sun, strong backlighting with a thin rim light on her hair and skirt, lens flare, the rest of the scene in deep orange and purple shadow."
+
+[[prompts]]
+name = "light_neon_rain"
+category = "lighting"
+seed = 104
+width = 832
+height = 1216
+prompt = "best quality, 1girl, solo, night, rain, city street, neon lights, reflection, puddle, transparent umbrella, wet hair, hooded jacket, cyberpunk, from side, bokeh"
+
+[[prompts]]
+name = "light_underwater"
+category = "lighting"
+seed = 105
+prompt = "An underwater scene: a mermaid girl with long pink hair swims among coral and small fish, god rays coming down from the surface, caustic light patterns on her skin, blue-green colour grading."
+
+# --- subject & style --------------------------------------------------------
+
+[[prompts]]
+name = "subject_scenery_panorama"
+category = "subject"
+seed = 201
+width = 1536
+height = 640
+prompt = "best quality, scenery, no humans, mountain, lake, reflection, autumn, maple leaves, torii, morning, fog, wide shot, sky, cloud"
+
+[[prompts]]
+name = "subject_room_interior"
+category = "subject"
+seed = 202
+width = 1216
+height = 832
+prompt = "A detailed, cozy bedroom interior in anime style with no people: a cluttered desk with a computer monitor, bookshelves full of manga, potted plants on the windowsill, and a cat sleeping on the bed. Afternoon sunlight comes through window blinds and casts striped shadows across the floor."
+
+[[prompts]]
+name = "subject_breakfast"
+category = "subject"
+seed = 203
+prompt = "Close-up anime illustration of a Japanese breakfast tray on a wooden table: grilled salmon, miso soup with steam rising, a bowl of white rice, rolled tamagoyaki, pickles, and a pair of chopsticks resting on a holder."
+
+[[prompts]]
+name = "subject_mecha"
+category = "subject"
+seed = 204
+width = 832
+height = 1216
+prompt = "best quality, mecha, robot, no humans, science fiction, mechanical parts, glowing eyes, ruins, city, smoke, from below, dramatic lighting, cloudy sky"
+
+[[prompts]]
+name = "style_watercolor"
+category = "style"
+seed = 205
+width = 832
+height = 1216
+prompt = "best quality, watercolor (medium), traditional media, 1girl, solo, sitting, field, flowers, straw hat, sundress, soft colors, wind"
+
+[[prompts]]
+name = "style_manga_ink"
+category = "style"
+seed = 206
+width = 832
+height = 1216
+prompt = "A black-and-white manga illustration with screentone shading: a swordsman in a long coat stands in heavy rain, katana lowered, speed lines and splashes around him, bold ink brushwork, no colour."
+
+[[prompts]]
+name = "style_pixel_art"
+category = "style"
+seed = 207
+prompt = "Pixel art of a small fantasy village at dusk in 16-bit RPG style: thatched houses with lit windows, a well in the square, a young hero with a sword standing at the village gate, limited colour palette, crisp pixels."
+
+[[prompts]]
+name = "style_chibi_group"
+category = "style"
+seed = 208
+width = 1216
+height = 832
+prompt = "best quality, chibi, 4girls, multiple girls, holding hands, smile, full body, simple background, white background, school uniform"
+
+# --- text rendering ---------------------------------------------------------
+
+[[prompts]]
+name = "text_cafe_sign"
+category = "text"
+seed = 301
+width = 832
+height = 1216
+prompt = "An anime girl in an apron stands in front of a small cafe at evening. Above the door hangs a wooden sign that reads \"MOON CAFE\" in large white letters."
+
+[[prompts]]
+name = "text_movie_poster"
+category = "text"
+seed = 302
+width = 832
+height = 1216
+prompt = "An anime movie poster: a girl in a school uniform looks up at a starry night sky. The title \"STARLIGHT\" is written in big bold letters at the top, and the line \"Coming Summer 2026\" is printed in small letters at the bottom."
+
+[[prompts]]
+name = "text_manga_bubble"
+category = "text"
+seed = 303
+prompt = "A single colour manga panel: a surprised girl with wide eyes and a sweat drop, with a speech bubble next to her face that says \"WAIT, WHAT?!\"."
+
+[[prompts]]
+name = "text_ja_ramen"
+category = "text"
+seed = 304
+width = 1216
+height = 832
+prompt = "夜の商店街のアニメイラスト。赤い提灯が並び、店の看板には大きく「ラーメン」と書かれている。制服姿の女の子が店の前でのれんをくぐろうとしている。"
+
+[[prompts]]
+name = "text_zh_umbrella"
+category = "text"
+seed = 305
+width = 832
+height = 1216
+prompt = "一位身穿淡青色汉服的少女撑着油纸伞站在江南石桥上，细雨蒙蒙。桥边的木牌上用毛笔字写着“春风十里”四个字。水墨淡彩风格。"
+
+# --- composition: binding, relations, counting ----------------------------
+
+[[prompts]]
+name = "comp_left_right_binding"
+category = "composition"
+seed = 401
+width = 1216
+height = 832
+prompt = "Two anime girls stand side by side, full body, on a plain white background. On the LEFT: a girl with short red hair wearing a blue hoodie and black shorts. On the RIGHT: a girl with long blue hair wearing a red dress and white boots."
+
+[[prompts]]
+name = "comp_above_below"
+category = "composition"
+seed = 402
+prompt = "A wooden bookshelf in a sunny room: a white cat sleeps on the top shelf, a small brown dog lies on the floor directly beneath the shelf, and a red ball sits on the floor to the right of the dog. Anime style."
+
+[[prompts]]
+name = "comp_three_apples"
+category = "composition"
+seed = 403
+width = 1216
+height = 832
+prompt = "Exactly three apples in a row on a white table, from left to right: a red apple, a green apple, and a yellow apple. Simple anime-style still life, soft shadows."
+
+[[prompts]]
+name = "comp_five_girls"
+category = "composition"
+seed = 404
+width = 1216
+height = 832
+prompt = "best quality, 5girls, multiple girls, group picture, school uniform, classroom, standing, smile, v, looking at viewer, different hair colors"
+
+[[prompts]]
+name = "comp_depth_platform"
+category = "composition"
+seed = 405
+width = 1216
+height = 832
+prompt = "Over-the-shoulder view on a train platform: in the blurred foreground, the shoulder and back of a boy's head; in sharp focus in the middle ground, a girl with a ponytail waving at him; in the background, a train pulling into the station under a cloudy sky."
+
+[[prompts]]
+name = "comp_dense_scene"
+category = "composition"
+seed = 406
+width = 832
+height = 1216
+prompt = "A detailed fantasy illustration of a witch's shop. Behind a wooden counter stands a young witch with braided orange hair, round glasses and a wide purple hat, pouring a glowing green potion from a flask into a small bottle. On the counter in front of her: a black cat, an open spellbook, and three candles of different heights. Shelves behind her hold jars of herbs and a stuffed owl. A window on the left shows a crescent moon. Warm candlelight, cool moonlight from the window."
+
+# --- anatomy: hands, poses, full body ---------------------------------------
+
+[[prompts]]
+name = "anatomy_guitar"
+category = "anatomy"
+seed = 501
+width = 832
+height = 1216
+prompt = "best quality, 1girl, solo, playing guitar, electric guitar, holding instrument, stage, concert, spotlight, open mouth, sweat, short hair, jacket, dynamic pose"
+
+[[prompts]]
+name = "anatomy_foreshortening"
+category = "anatomy"
+seed = 502
+width = 832
+height = 1216
+prompt = "A dynamic low-angle shot of a girl jumping toward the viewer with one hand reaching out to the camera, strong foreshortening, her skirt and hair flying, bright blue summer sky and cumulonimbus clouds behind her."
+
+[[prompts]]
+name = "anatomy_sitting_fullbody"
+category = "anatomy"
+seed = 503
+width = 832
+height = 1216
+prompt = "best quality, 1girl, solo, full body, sitting, crossed legs, chair, holding cup, coffee, looking at viewer, sweater, pleated skirt, loafers, indoors, window"
+
+[[prompts]]
+name = "anatomy_face_closeup"
+category = "anatomy"
+seed = 504
+prompt = "Extreme close-up portrait of an anime girl's face: detailed heterochromatic eyes (left eye gold, right eye blue), long eyelashes, a few strands of hair across her cheek, soft blush, gentle smile, shallow depth of field."
+
+# --- character knowledge ----------------------------------------------------
+
+[[prompts]]
+name = "char_frieren"
+category = "character"
+seed = 601
+width = 832
+height = 1216
+prompt = "best quality, sousou no frieren, frieren, 1girl, elf, pointy ears, white hair, twintails, green eyes, white capelet, holding staff, field, flowers, wind"
+
+[[prompts]]
+name = "char_rem_nl"
+category = "character"
+seed = 602
+width = 832
+height = 1216
+prompt = "Rem from Re:Zero in her maid uniform, short blue hair covering one eye, holding a broom in the mansion garden, smiling gently, afternoon light."
+
+# --- photoreal: does the anime finetune leak into (or erode) photo output? ---
+
+[[prompts]]
+name = "photo_portrait"
+category = "photo"
+seed = 701
+width = 832
+height = 1216
+prompt = "A professional photograph of a young Japanese woman in a beige trench coat on a Tokyo street at dusk, 85mm lens, shallow depth of field, natural skin texture with visible pores, soft bokeh city lights behind her."
+
+[[prompts]]
+name = "photo_street_rain"
+category = "photo"
+seed = 702
+width = 1216
+height = 832
+prompt = "A candid street photograph of the Shibuya scramble crossing on a rainy evening: crowds with umbrellas, reflections of signs on the wet asphalt, slight motion blur, shot on 35mm film with grain."
+
+[[prompts]]
+name = "photo_ramen"
+category = "photo"
+seed = 703
+prompt = "Food photography of a bowl of tonkotsu ramen with chashu pork, a halved soft-boiled egg, nori and green onions, steam rising, on a dark wooden table, overhead softbox lighting, sharp focus."
+
+[[prompts]]
+name = "photo_fuji"
+category = "photo"
+seed = 704
+width = 1536
+height = 640
+prompt = "A landscape photograph of Mount Fuji at sunrise reflected in Lake Kawaguchi, pink and orange sky, mist on the water, crisp detail, wide-angle lens."
+
+[[prompts]]
+name = "photo_fox"
+category = "photo"
+seed = 705
+prompt = "A close-up wildlife photograph of a red fox sitting in fresh snow, detailed fur with snowflakes on it, catchlight in its eyes, telephoto lens, softly blurred forest background."
+
+[[prompts]]
+name = "photo_cosplay"
+category = "photo"
+seed = 706
+width = 832
+height = 1216
+prompt = "A real photograph of a cosplayer dressed as Hatsune Miku at an outdoor convention: long teal twin-tail wig, grey sleeveless top with a teal tie, real fabric textures, natural daylight, DSLR photo, people in the background."

@@ -25,6 +25,10 @@ class SampleOptions:
     hires_scale: float = field(default=0.0)
     hires_strength: float = field(default=0.45)
     hires_steps: int = field(default=20)
+    # Readable id (set for prompt-set entries): names the preview file and the
+    # pandm image key. Left out of the hash when None, so unnamed options keep
+    # their existing preview filenames.
+    name: str | None = field(default=None)
 
 
 @dataclass
@@ -262,12 +266,29 @@ class BaseConfig:
 
     zero_grad_set_to_none: bool = field(default=True, metadata={"help": "Zero grad set to none."})
     preview_sample_options: list[SampleOptions] = field(default_factory=list, metadata={"help": "Preview sample options."})
+    preview_prompt_set: str | None = field(
+        default=None,
+        metadata={"help": "Prompt-set TOML (e.g. configs/eval/anime_prompts_v1.toml) appended to preview_sample_options."},
+    )
+    preview_prompt_set_only: list[str] = field(
+        default_factory=list,
+        metadata={"help": "Keep only these prompt names or categories from preview_prompt_set; empty = all."},
+    )
+    preview_prompt_set_steps: int | None = field(
+        default=None,
+        metadata={"help": "Override the prompt set's step count for previews (the full set at 50 steps is slow)."},
+    )
 
     checkpoint_every_n_steps: int = field(default=1000, metadata={"help": "Checkpoint steps."})
 
     def __post_init__(self) -> None:
         # convert preview_sample_options to SampleOptions
         self.preview_sample_options = [item if isinstance(item, SampleOptions) else SampleOptions(**item) for item in self.preview_sample_options]
+        if self.preview_prompt_set:
+            from diffusion_trainer.config.prompt_set import load_prompt_set, to_sample_options  # noqa: PLC0415  # imports SampleOptions from here
+
+            prompts = load_prompt_set(self.preview_prompt_set, only=self.preview_prompt_set_only, steps=self.preview_prompt_set_steps)
+            self.preview_sample_options += to_sample_options(prompts)
 
         # automatically combine save_dir with model_name
         self.save_dir = str(Path(self.save_dir) / self.model_name)

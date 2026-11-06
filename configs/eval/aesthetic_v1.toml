@@ -1,0 +1,324 @@
+# Aesthetic-alignment comparison: MOSS-Image Base vs the official SFT
+# (aesthetic finetune) vs our LoRA (e.g. moss-pictoria-5star on Base).
+# Rendered by scripts/eval_moss_prompts.py, e.g.
+#
+#   --prompts configs/eval/aesthetic_v1.toml \
+#   --model base=<Base> --model sft=<SFT> --lora 5star=<lora.safetensors>
+#
+# anime_prompts_v1.toml measures capability (counting, text, binding); this
+# set measures *taste*, so it is built around where the three differ:
+# - minimal: under-specified prompts, where the model's own prior decides
+#   colour, light and composition. Three seeds each, because a single seed
+#   says little about a distribution.
+# - format: one subject as bare tags, tags with quality/era tags, and a
+#   natural-language caption. The LoRA learned the quality-tag format; Base
+#   and SFT did not, so this separates "better taste" from "learned a trigger".
+# - style: does the finetune keep requested styles or pull everything to one
+#   polished look (style collapse)?
+# - plain: prompts that ask for something deliberately unpolished. Strong
+#   aesthetic alignment tends to beautify these anyway (over-alignment).
+# - people: ages, body types and ordinary faces, to catch same-face and
+#   beautification drift.
+# - palette / framing: colour restraint and composition choices.
+# - general: non-anime photos and scenes, to see how far each one generalises
+#   (SFT's glossy look, the LoRA's anime bleed).
+# Everything else (steps, CFG, negative prompt) is held fixed.
+
+[defaults]
+steps = 50
+guidance_scale = 3.0
+negative_prompt = ""
+width = 1024
+height = 1024
+
+# --- minimal: the prior decides -------------------------------------------
+
+[[prompts]]
+name = "min_1girl"
+category = "minimal"
+seeds = [201, 202, 203]
+prompt = "1girl"
+
+[[prompts]]
+name = "min_anime_girl"
+category = "minimal"
+seeds = [201, 202, 203]
+width = 832
+height = 1216
+prompt = "an anime girl"
+
+[[prompts]]
+name = "min_cat"
+category = "minimal"
+seeds = [201, 202, 203]
+prompt = "a cat"
+
+[[prompts]]
+name = "min_city_night"
+category = "minimal"
+seeds = [201, 202, 203]
+width = 1216
+height = 832
+prompt = "a city at night"
+
+[[prompts]]
+name = "min_zh_girl"
+category = "minimal"
+seeds = [201, 202, 203]
+width = 832
+height = 1216
+prompt = "动漫风格的少女"
+
+# --- format: same subject, three prompt styles ------------------------------
+
+[[prompts]]
+name = "fmt_reading_tags"
+category = "format"
+seed = 211
+width = 832
+height = 1216
+prompt = "1girl, solo, sitting, reading, book, window, sunlight, indoors, short hair, sweater"
+
+[[prompts]]
+name = "fmt_reading_qtags"
+category = "format"
+seed = 211
+width = 832
+height = 1216
+prompt = "best quality, newest, 1girl, solo, sitting, reading, book, window, sunlight, indoors, short hair, sweater"
+
+[[prompts]]
+name = "fmt_reading_nl"
+category = "format"
+seed = 211
+width = 832
+height = 1216
+prompt = "An anime girl with short hair and a loose sweater sits by a window reading a book, afternoon sunlight falling across the pages."
+
+[[prompts]]
+name = "fmt_station_tags"
+category = "format"
+seed = 212
+width = 1216
+height = 832
+prompt = "1boy, 1girl, train station, platform, rain, umbrella, evening, school uniform, standing"
+
+[[prompts]]
+name = "fmt_station_qtags"
+category = "format"
+seed = 212
+width = 1216
+height = 832
+prompt = "best quality, newest, 1boy, 1girl, train station, platform, rain, umbrella, evening, school uniform, standing"
+
+[[prompts]]
+name = "fmt_station_nl"
+category = "format"
+seed = 212
+width = 1216
+height = 832
+prompt = "A high-school boy and girl in uniform stand on a rainy train platform in the evening, sharing one umbrella while the train lights blur behind them."
+
+# --- style: requested looks should survive ----------------------------------
+
+[[prompts]]
+name = "style_90s_cel"
+category = "style"
+seed = 221
+width = 1216
+height = 832
+prompt = "1990s anime screenshot, cel shading, film grain, a girl with a ponytail riding a bicycle along the seaside, summer"
+
+[[prompts]]
+name = "style_flat_vector"
+category = "style"
+seed = 222
+prompt = "flat vector illustration, limited palette, no gradients, a girl walking a dog in a park"
+
+[[prompts]]
+name = "style_pencil_sketch"
+category = "style"
+seed = 223
+width = 832
+height = 1216
+prompt = "rough pencil sketch on paper, construction lines visible, unfinished, a girl in a long coat"
+
+[[prompts]]
+name = "style_oil_impasto"
+category = "style"
+seed = 224
+prompt = "thick impasto oil painting, visible brush strokes, a girl holding sunflowers"
+
+[[prompts]]
+name = "style_ukiyoe"
+category = "style"
+seed = 225
+width = 832
+height = 1216
+prompt = "ukiyo-e woodblock print, a woman in a kimono under a willow tree by a river"
+
+[[prompts]]
+name = "style_thick_paint_game"
+category = "style"
+seed = 226
+width = 832
+height = 1216
+prompt = "semi-realistic game splash art, thick painting, a knight girl in silver armor holding a lance, dramatic sky"
+
+# --- plain: deliberately unpolished -----------------------------------------
+
+[[prompts]]
+name = "plain_crayon"
+category = "plain"
+seed = 231
+prompt = "a child's crayon drawing of a house, a sun and a family of three, on lined paper"
+
+[[prompts]]
+name = "plain_ms_paint"
+category = "plain"
+seed = 232
+prompt = "a crude MS Paint doodle of a cat, jagged mouse lines, white background"
+
+[[prompts]]
+name = "plain_phone_snapshot"
+category = "plain"
+seed = 233
+width = 1216
+height = 832
+prompt = "a blurry, badly framed phone snapshot of a cluttered office desk under fluorescent light"
+
+[[prompts]]
+name = "plain_sticky_note"
+category = "plain"
+seed = 234
+prompt = "a quick ballpoint pen doodle of a smiling anime face on a yellow sticky note"
+
+# --- people: ages, bodies, ordinary faces -----------------------------------
+
+[[prompts]]
+name = "people_old_man"
+category = "people"
+seed = 241
+width = 832
+height = 1216
+prompt = "anime style, an old man with a wrinkled face and a white beard, fishing on a pier"
+
+[[prompts]]
+name = "people_office_worker"
+category = "people"
+seed = 242
+width = 832
+height = 1216
+prompt = "anime style, a tired middle-aged office worker in a wrinkled suit on a late-night train"
+
+[[prompts]]
+name = "people_freckles"
+category = "people"
+seed = 243
+width = 832
+height = 1216
+prompt = "anime style, a plain-looking girl with freckles, round glasses and messy hair, not beautiful, everyday clothes"
+
+[[prompts]]
+name = "people_chubby_boy"
+category = "people"
+seed = 244
+width = 832
+height = 1216
+prompt = "anime style, a chubby boy eating a melon bun after school, happy"
+
+# --- palette: colour restraint ----------------------------------------------
+
+[[prompts]]
+name = "palette_muted"
+category = "palette"
+seed = 251
+width = 1216
+height = 832
+prompt = "muted desaturated colors, overcast day, a girl standing on an empty beach, quiet mood, anime illustration"
+
+[[prompts]]
+name = "palette_monochrome_blue"
+category = "palette"
+seed = 252
+width = 832
+height = 1216
+prompt = "monochrome blue illustration, a girl floating in deep water, anime style"
+
+[[prompts]]
+name = "palette_pastel"
+category = "palette"
+seed = 253
+prompt = "soft pastel colors, a girl in a bakery with strawberry cakes, anime illustration"
+
+[[prompts]]
+name = "palette_two_tone"
+category = "palette"
+seed = 254
+width = 832
+height = 1216
+prompt = "two-tone red and black illustration, a girl with a katana, anime style"
+
+# --- framing: composition choices -------------------------------------------
+
+[[prompts]]
+name = "frame_tiny_figure"
+category = "framing"
+seed = 261
+width = 1216
+height = 832
+prompt = "a tiny figure of a girl standing in a vast snowy field, huge empty sky, lots of negative space, anime background art"
+
+[[prompts]]
+name = "frame_eye_closeup"
+category = "framing"
+seed = 262
+width = 1216
+height = 832
+prompt = "extreme close-up of an anime girl's eye, reflection of fireworks in the iris"
+
+[[prompts]]
+name = "frame_dutch_action"
+category = "framing"
+seed = 263
+width = 1216
+height = 832
+prompt = "dutch angle, dynamic action shot, an anime boy jumping between rooftops, motion blur"
+
+[[prompts]]
+name = "frame_from_above"
+category = "framing"
+seed = 264
+prompt = "view from directly above, an anime girl lying on the grass surrounded by scattered polaroid photos"
+
+# --- general: outside the anime domain --------------------------------------
+
+[[prompts]]
+name = "gen_photo_portrait"
+category = "general"
+seed = 271
+width = 832
+height = 1216
+prompt = "a candid photo of an elderly woman laughing at a market stall, natural light, 35mm"
+
+[[prompts]]
+name = "gen_photo_food"
+category = "general"
+seed = 272
+prompt = "a photo of a bowl of miso soup and rice on a wooden table, home kitchen, morning"
+
+[[prompts]]
+name = "gen_photo_street"
+category = "general"
+seed = 273
+width = 1216
+height = 832
+prompt = "a street photo of a narrow alley in Osaka at dusk, vending machines glowing"
+
+[[prompts]]
+name = "gen_landscape_painting"
+category = "general"
+seed = 274
+width = 1216
+height = 832
+prompt = "a landscape painting of mountains and a lake at dawn, mist over the water"
