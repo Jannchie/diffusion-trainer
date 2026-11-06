@@ -25,7 +25,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 from diffusion_trainer.config import BaseConfig, Lumina2Config, SampleOptions
 from diffusion_trainer.dataset.dataset import DiffusionBatch
 from diffusion_trainer.finetune.base import BaseTuner
-from diffusion_trainer.finetune.objective import DiffusionObjective, FlowMatchObjective
+from diffusion_trainer.finetune.objective import DiffusionObjective, FlowMatchObjective, ddpm_only_settings_in_use
 from diffusion_trainer.finetune.utils import (
     TrainableModel,
     load_lumina2_pipeline,
@@ -71,22 +71,8 @@ class Lumina2Tuner(BaseTuner):
         self._warn_about_ddpm_only_settings()
 
     def _warn_about_ddpm_only_settings(self) -> None:
-        """Flag config knobs that silently do nothing under rectified flow.
-
-        These are all load-bearing in the SD 1.5 lineage, so a config copied
-        from there looks like it configures something when it does not.
-        """
-        ignored = [
-            name
-            for name, active in (
-                ("prediction_type", self.config.prediction_type is not None),
-                ("rescale_betas_zero_snr", self.config.rescale_betas_zero_snr),
-                ("snr_gamma", bool(self.config.snr_gamma)),
-                ("use_debiased_estimation", self.config.use_debiased_estimation),
-                ("timestep_bias_strategy", self.config.timestep_bias_strategy != "uniform"),
-            )
-            if active
-        ]
+        """Flag config knobs that silently do nothing under rectified flow."""
+        ignored = ddpm_only_settings_in_use(self.config)
         if ignored:
             logger.warning(
                 "These settings belong to the DDPM lineage and are IGNORED under rectified flow: %s. Use the flow_match_* options instead.",

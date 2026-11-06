@@ -368,3 +368,48 @@ class Lumina2Config(FlowMatchConfig):
             "2 = penultimate, which is what Lumina 2 was trained with and what the pipeline uses. Change only deliberately.",
         },
     )
+
+
+@dataclass
+class MOSSImageConfig(FlowMatchConfig):
+    """MOSS-Image: 5B DiT + Qwen3.5-9B + FLUX.2 VAE, trained with rectified flow.
+
+    The sampler defaults reproduce the final pretraining interval of the tech
+    report (§A.2, Table 6): logit-normal truncated at 0.95 with a 1% uniform
+    mix and no shift. The report writes it as ``S = 1 - sigmoid(Z)``,
+    ``Z ~ N(-1.09, 0.95)``; in this repo's SD3 convention
+    (``sigma = sigmoid(mean + std * Z)``) that is ``mean = +1.09`` — a
+    noise-heavy density with its median near sigma 0.78.
+    """
+
+    flow_match_timestep_sampling: Literal["logit_normal", "uniform", "mode", "moss"] = field(  # type: ignore[assignment]  # widens the shared Literal
+        default="moss",
+        metadata={
+            "help": "Sigma sampling density. moss is the tech-report sampler: logit-normal truncated at flow_match_cutoff, "
+            "rescaled onto the 1/1000 sigma grid, mixed with flow_match_uniform_mix of uniform.",
+        },
+    )
+    flow_match_logit_mean: float = field(default=1.09, metadata={"help": "Logit-normal mean, SD3 convention (the report's mu = -1.09, S = 1 - sigmoid(Z))."})
+    flow_match_logit_std: float = field(default=0.95, metadata={"help": "Std of the logit-normal sigma distribution."})
+    flow_match_cutoff: float | None = field(
+        default=0.95,
+        metadata={"help": "'moss' sampling only: truncate the logit-normal at this sigma, then stretch [0, cutoff] onto [0, 1]. None = no truncation."},
+    )
+    flow_match_uniform_mix: float = field(
+        default=0.01,
+        metadata={"help": "'moss' sampling only: probability of drawing a uniform grid sigma instead, so no band of the trajectory goes untrained."},
+    )
+    text_encoder_lr: float = field(
+        default=0.0,
+        metadata={"help": "Must stay 0: the MOSS-Image user guide says to keep the Qwen3.5-9B text encoder frozen."},
+    )
+    max_sequence_length: int = field(
+        default=4096,
+        metadata={"help": "Qwen3.5 token budget per prompt, chat template included. 4096 is the pipeline's limit; captions never get close with tags."},
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.text_encoder_lr:
+            msg = "text_encoder_lr must be 0 for MOSS-Image: the official guide says to keep Qwen3.5-9B frozen."
+            raise ValueError(msg)

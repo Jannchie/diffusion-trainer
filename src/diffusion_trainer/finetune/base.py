@@ -16,7 +16,6 @@ import torch.nn.functional as F
 from accelerate import PartialState
 from diffusers.optimization import SchedulerType, get_scheduler
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from diffusers.training_utils import EMAModel, free_memory
@@ -1206,6 +1205,11 @@ class BaseTuner(ABC):
         """Whether the hires-fix img2img pass is available for this architecture."""
         return True
 
+    @property
+    def preview_autocast_dtype(self) -> torch.dtype | None:
+        """Autocast dtype for previews; None keeps torch's device default (fp16 on CUDA)."""
+        return None
+
     @torch.no_grad()
     def _decode_preview_latents(self, latents: torch.Tensor) -> "Image.Image":
         """Decode pipeline latents to PIL in fp32, outside any autocast.
@@ -1284,10 +1288,6 @@ class BaseTuner(ABC):
         # Release memory to ensure sufficient VRAM for preview generation
         free_memory()
 
-        # Simple callback function to meet the pipeline interface requirements
-        def callback_on_step_end(_pipe: StableDiffusionXLPipelineOutput, _step: int, _timestep: int, _kwargs: dict) -> dict:
-            return _kwargs
-
         state = PartialState()
         self.accelerator.wait_for_everyone()
 
@@ -1328,7 +1328,9 @@ class BaseTuner(ABC):
                 generator = torch.Generator(device=self.accelerator.device).manual_seed(sample_option.seed)
 
                 def make_autocast() -> AbstractContextManager[Any]:
-                    return nullcontext() if torch.backends.mps.is_available() else torch.autocast(self.accelerator.device.type)
+                    if torch.backends.mps.is_available():
+                        return nullcontext()
+                    return torch.autocast(self.accelerator.device.type, dtype=self.preview_autocast_dtype)
 
                 with self.use_ema_weights():
                     self.pipeline.to(self.accelerator.device)
@@ -1352,7 +1354,6 @@ class BaseTuner(ABC):
                             **prompt_kwargs,
                             **self.preview_pipeline_kwargs(sample_option),
                             generator=generator,
-                            callback_on_step_end=callback_on_step_end,  # type: ignore
                             output_type="latent",
                         )
                     # Decode in fp32 OUTSIDE autocast: half-precision VAE decode

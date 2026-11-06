@@ -12,6 +12,7 @@ import cv2
 import httpx
 import numpy as np
 import torch
+from diffusers import AutoModel
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from PIL import Image
@@ -145,11 +146,14 @@ class SimpleLatentsProcessor:
             vae = AutoencoderKL.from_single_file(self.model_name_or_path, torch_dtype=self.dtype)
         else:
             logger.info("Loading VAE from folder %s", path)
+            # AutoModel dispatches on the config's _class_name: MOSS-Image ships
+            # the FLUX.2 VAE (AutoencoderKLFlux2), which AutoencoderKL would load
+            # with mismatched weights.
             try:
-                vae = AutoencoderKL.from_pretrained(self.model_name_or_path, torch_dtype=self.dtype)
+                vae = AutoModel.from_pretrained(self.model_name_or_path, torch_dtype=self.dtype)
             except (OSError, ValueError):
                 logger.info("No VAE config at the root of %s; retrying its vae/ subfolder", path)
-                vae = AutoencoderKL.from_pretrained(self.model_name_or_path, subfolder="vae", torch_dtype=self.dtype)
+                vae = AutoModel.from_pretrained(self.model_name_or_path, subfolder="vae", torch_dtype=self.dtype)
 
         vae = vae.to(self.device).eval()  # type: ignore
         logger.info(
@@ -217,6 +221,11 @@ class SimpleLatentsProcessor:
         if not isinstance(vae_out, AutoencoderKLOutput):
             msg = "vae_out is not an instance of AutoencoderKLOutput"
             raise TypeError(msg)
+        # FLUX.2 latents are the posterior mode: that is what Flux2Pipeline and
+        # MOSS-Image encode with, and what the VAE's batch-norm statistics
+        # (which normalize the latents at train time) were measured on.
+        if type(self.vae).__name__ == "AutoencoderKLFlux2":
+            return vae_out.latent_dist.mode()[0]
         return vae_out.latent_dist.sample()[0]
 
     @torch.no_grad()

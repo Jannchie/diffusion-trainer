@@ -22,6 +22,7 @@ from diffusion_trainer.config import SampleOptions
 from diffusion_trainer.utils.dtype import str_to_dtype as str_to_dtype  # re-export
 
 if TYPE_CHECKING:
+    from diffusers import DiffusionPipeline
     from diffusers.pipelines.lumina2.pipeline_lumina2 import Lumina2Pipeline
 
 logger = getLogger("diffusion_trainer")
@@ -400,3 +401,37 @@ def load_lumina2_pipeline(
     # Lumina2Pipeline has no from_single_file, but the check above guarantees
     # load_pipeline takes its from_pretrained branch.
     return load_pipeline(path, dtype, Lumina2Pipeline, enable_flash_attention=False)  # type: ignore[type-var]
+
+
+def load_moss_image_pipeline(path: PathLike | str, dtype: torch.dtype) -> "DiffusionPipeline":
+    """Load MOSS-Image (DiT + Qwen3.5-9B + FLUX.2 VAE) from its HF bundle.
+
+    The DiT, scheduler and pipeline are remote code: ``pipeline_moss_image.py``
+    ships inside the repo, so this loads exactly the way the official
+    ``inference_runtime.load_pipeline`` does. The VAE stays fp32 like there;
+    ``BaseTuner`` recasts it to ``vae_dtype`` around previews.
+
+    Unlike the other loaders, ``progress_bar`` is silenced through the config
+    rather than replaced: MOSS iterates ``self.progress_bar(timesteps)``, which
+    ``DummyProgressBar`` (a context manager taking ``total``) cannot serve.
+    """
+    from diffusers import DiffusionPipeline
+
+    local = Path(path)
+    if local.suffix == ".safetensors":
+        msg = f"MOSS-Image needs its HF bundle (with pipeline_moss_image.py), got a single file: {path}"
+        raise ValueError(msg)
+    if local.is_dir() and not (local / "pipeline_moss_image.py").is_file():
+        msg = f"{path} has no pipeline_moss_image.py; download the full OpenMOSS-Team/MOSS-Image-* repo."
+        raise ValueError(msg)
+
+    logger.info('Loading models from "%s" (%s)', path, dtype)
+    pipe = DiffusionPipeline.from_pretrained(
+        str(path),
+        custom_pipeline="pipeline_moss_image",
+        trust_remote_code=True,
+        torch_dtype={"default": dtype, "vae": torch.float32},
+    )
+    pipe.set_progress_bar_config(disable=True)
+    logger.info("Models loaded successfully.")
+    return pipe

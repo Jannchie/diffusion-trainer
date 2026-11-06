@@ -18,6 +18,7 @@ numerics exactly, so the port must stay behavior-preserving.
 """
 
 import logging
+import math
 from abc import ABC, abstractmethod
 
 import torch
@@ -25,7 +26,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3, compute_snr
 
-from diffusion_trainer.config import BaseConfig, FlowMatchConfig
+from diffusion_trainer.config import BaseConfig, FlowMatchConfig, MOSSImageConfig
 from diffusion_trainer.utils.advanced_noise import smooth_min_snr_weights
 from diffusion_trainer.utils.timestep_weights import logit_timestep_weights
 
@@ -245,6 +246,25 @@ class DDPMObjective(DiffusionObjective):
         logger.info("Training objective: DDPM (%s), %d timesteps", self.prediction_type, self.num_train_timesteps)
 
 
+def ddpm_only_settings_in_use(config: BaseConfig) -> list[str]:
+    """Names of set config knobs that only the DDPM lineage reads; rectified flow ignores them.
+
+    They are load-bearing in SD 1.5 / SDXL, so a config copied from there looks
+    like it configures something when it does not.
+    """
+    return [
+        name
+        for name, active in (
+            ("prediction_type", config.prediction_type is not None),
+            ("rescale_betas_zero_snr", config.rescale_betas_zero_snr),
+            ("snr_gamma", bool(config.snr_gamma)),
+            ("use_debiased_estimation", config.use_debiased_estimation),
+            ("timestep_bias_strategy", config.timestep_bias_strategy != "uniform"),
+        )
+        if active
+    ]
+
+
 class FlowMatchObjective(DiffusionObjective):
     """Rectified-flow objective for Lumina 2 and other flow-matching DiTs.
 
@@ -277,7 +297,13 @@ class FlowMatchObjective(DiffusionObjective):
         # this model operates on; an unset config value follows it so training
         # and inference cannot silently disagree.
         configured_shift = config.flow_match_shift
-        self.shift: float = float(scheduler.config.get("shift", 1.0)) if configured_shift is None else configured_shift
+        self.shift: float = self.default_shift(scheduler) if configured_shift is None else configured_shift
+        self.num_train_timesteps: int = int(scheduler.config.get("num_train_timesteps", 1000))
+
+    @staticmethod
+    def default_shift(scheduler: FlowMatchEulerDiscreteScheduler) -> float:
+        """The shift an unset ``flow_match_shift`` follows: the sampler's own."""
+        return float(scheduler.config.get("shift", 1.0))
 
     def _apply_shift(self, sigmas: torch.Tensor) -> torch.Tensor:
         """Bias sigma toward the noisy end, the training-side mirror of the sampler's shift.
@@ -341,3 +367,66 @@ class FlowMatchObjective(DiffusionObjective):
             "" if self.config.flow_match_shift is not None else " from sampler",
             self.config.flow_match_loss_weighting,
         )
+
+
+class MOSSFlowMatchObjective(FlowMatchObjective):
+    """Rectified flow in MOSS-Image's conventions, which are the plain diffusers ones.
+
+    Same interpolation as Lumina 2 (``x = (1 - sigma) * x0 + sigma * noise``),
+    but the two conventions ``FlowMatchObjective`` flips for Lumina stay put:
+
+    * the network's time input is ``1000 * sigma`` — tech report eq. 3, and what
+      ``MOSSImagePipeline`` feeds it (``scheduler.timesteps``, i.e. sigma * 1000);
+    * the network predicts ``noise - x0`` directly, the velocity
+      ``scheduler.step`` integrates; the pipeline does no negation.
+
+    An unset ``flow_match_shift`` follows the scheduler's ``training_shift``
+    (1.0), NOT its ``shift`` (5.0): MOSS samples at shift 5 but trained its last
+    stage unshifted, and the scheduler config records the two separately.
+    """
+
+    def __init__(self, config: MOSSImageConfig, scheduler: FlowMatchEulerDiscreteScheduler, device: torch.device) -> None:
+        super().__init__(config, scheduler, device)
+        self.config: MOSSImageConfig = config
+
+    @staticmethod
+    def default_shift(scheduler: FlowMatchEulerDiscreteScheduler) -> float:
+        return float(scheduler.config.get("training_shift", 1.0))
+
+    def _sample_moss_sigmas(self, batch_size: int) -> torch.Tensor:
+        """The MOSS-Image tech-report sampler (§A.2, eq. 4), drawn by inverse CDF.
+
+        A logit-normal truncated to ``sigma <= cutoff``, stretched back onto
+        ``[0, 1]`` and rounded UP onto the grid ``{1/T, ..., 1}``, so grid point
+        ``j`` collects the mass of ``(cutoff*(j-1)/T, cutoff*j/T]`` exactly as
+        the report's pmf does; ``uniform_mix`` of the draws are uniform grid points.
+        """
+        mean, std = self.config.flow_match_logit_mean, self.config.flow_match_logit_std
+        cutoff = self.config.flow_match_cutoff or 1.0
+        steps = self.num_train_timesteps
+        # P(sigma <= cutoff) = Phi((logit(cutoff) - mean) / std); u ~ U(0, that) inverts it.
+        mass = 0.5 * math.erfc((mean - math.log(cutoff / (1 - cutoff))) / (std * math.sqrt(2))) if cutoff < 1.0 else 1.0
+        u = (torch.rand(batch_size, device=self.device) * mass).clamp(1e-7, 1 - 1e-7)
+        raw = torch.sigmoid(mean + std * torch.special.ndtri(u))
+        grid = torch.ceil(raw / cutoff * steps).clamp(1, steps)
+        uniform = torch.randint(1, steps + 1, (batch_size,), device=self.device).to(grid.dtype)
+        grid = torch.where(torch.rand(batch_size, device=self.device) < self.config.flow_match_uniform_mix, uniform, grid)
+        return grid / steps
+
+    def sample_timesteps(self, batch_size: int, *, global_step: int) -> torch.Tensor:
+        if self.config.flow_match_timestep_sampling == "moss":
+            return self._apply_shift(self._sample_moss_sigmas(batch_size))
+        return super().sample_timesteps(batch_size, global_step=global_step)
+
+    def model_timesteps(self, timesteps: torch.Tensor) -> torch.Tensor:
+        return timesteps * self.num_train_timesteps
+
+    def target_and_pred(
+        self,
+        latents: torch.Tensor,
+        noise: torch.Tensor,
+        timesteps: torch.Tensor,
+        model_pred: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del timesteps
+        return noise - latents, model_pred

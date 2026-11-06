@@ -51,6 +51,14 @@ UNET_LORA_TARGETS = LoraTargets(
     conv=("ResnetBlock2D", "Downsample2D", "Upsample2D"),
 )
 LUMINA2_LORA_TARGETS = LoraTargets(attention=("Attention",), feedforward=("LuminaFeedForward",))
+# MOSS-Image keeps attention and the SiTU FFN inside one class, ``_Block``,
+# whose linears sit in a plain ModuleDict (proj.q/k/v/o, proj.ffn_up_gate,
+# proj.ffn_down) — there is no FFN class to target separately. Wrapping the
+# block reaches all six: the 42 joint blocks only, which is Kohaku's
+# "attn-mlp" preset; the text refiner (``_TextBlock``) and the modulation
+# heads stay frozen. The cost is that lokr applies its attention factor to the
+# FFN linears too.
+MOSS_IMAGE_LORA_TARGETS = LoraTargets(attention=("_Block",), feedforward=())
 
 
 def apply_lora_config(

@@ -25,7 +25,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
 
     parser.add_argument("--config", type=str, default="configs/sd15.toml", help="Path to the config file.")
-    parser.add_argument("--model_family", type=str, default="sd15", choices=["sd15", "sdxl", "lumina2"])
+    parser.add_argument("--model_family", type=str, default="sd15", choices=["sd15", "sdxl", "lumina2", "moss_image"])
     args = parser.parse_args()
 
     logger.info('Loading config from "%s"', args.config)
@@ -50,4 +50,11 @@ if __name__ == "__main__":
 
         config = Lumina2Config(**config_dict)
         tuner = Lumina2Tuner(config)
+        tuner.train()
+    elif model_family == "moss_image":
+        from diffusion_trainer.config import MOSSImageConfig
+        from diffusion_trainer.finetune.moss_image import MOSSImageTuner
+
+        config = MOSSImageConfig(**config_dict)
+        tuner = MOSSImageTuner(config)
         tuner.train()

@@ -1,0 +1,122 @@
+# Smoke run: configs/moss_image_lora.toml on a tiny dataset (datasets/moss-smoke),
+# 8 epochs, one save/preview at the end. Notes below are the reference recipe's.
+#
+#   uv run python run_train.py --config configs/smoke_moss.toml --model_family moss_image
+#
+# MOSS-Image (OpenMOSS, Apache 2.0) LoRA. 5B DiT + Qwen3.5-9B text encoder +
+# FLUX.2 VAE. LoRA on the 42 joint blocks fits one A100 80GB with the text
+# encoder resident; full finetune is possible but tight (fp32 masters alone are
+# 20 GB next to the 16 GB encoder).
+#
+# BEFORE THE FIRST RUN — encode the dataset with the FLUX.2 VAE. Latents from
+# any other family are unusable (32 channels, batch-norm normalized):
+#
+#   uv run python run_prepare.py \
+#     --image_path <your images> \
+#     --target_path datasets/moss-<name> \
+#     --vae_path OpenMOSS-Team/MOSS-Image-Base \
+#     --base_resolution 1024
+#
+# Which BaseConfig options go DEAD here (the tuner warns if you set them):
+# prediction_type, rescale_betas_zero_snr, snr_gamma, use_debiased_estimation,
+# timestep_bias_strategy, clip_skip, use_enhanced_embeddings.
+
+seed = 47
+
+# Base is what OpenMOSS recommends adapting ("preserves the training
+# information in full and makes it easier for the community to train LoRAs");
+# SFT works too. Either must be the full HF bundle: the DiT, scheduler and
+# pipeline are remote code (pipeline_moss_image.py) inside it.
+model_path = "/mnt/pan/comfyui/ComfyUI/models/moss-image/base"
+model_name = "smoke"
+save_dir = "./out/moss_image"
+
+dataset_path = "datasets/moss-smoke"
+
+vae_dtype = "bf16"
+
+# --- Conditioning -----------------------------------------------------------
+# Qwen3.5-9B, frozen (the official guide: "do not fine-tune it"). MOSS was
+# trained on natural-language captions and JSON layouts; booru tags work but a
+# sidecar .txt caption per image (picked up by run_prepare.py) matches the
+# pretraining distribution better.
+max_sequence_length = 4096
+shuffle_tags = true
+single_tag_dropout = 0.0
+all_tags_dropout = 0.0
+caption_dropout = 0.0
+tag_category_order = ["quality", "year", "artist", "copyright", "character", "general"]
+shuffled_tag_categories = ["general"]
+droppable_tag_categories = ["general"]
+# The empty prompt is the pipeline's default negative; train it so CFG keeps
+# working. 0.1 is what KohakuMoss defaults to (the report gives no rate).
+condition_dropout_prob = 0.1
+
+# --- Rectified flow ---------------------------------------------------------
+# Defaults reproduce the tech report's last pretraining interval (Table 6):
+# logit-normal truncated at 0.95 + 1% uniform, unshifted. The report writes
+# mu = -1.09 for S = 1 - sigmoid(Z); here it is +1.09 in the SD3 convention.
+# Inference samples at shift 5, but an unset flow_match_shift follows the
+# scheduler's training_shift (1.0), which is how the model was trained.
+flow_match_timestep_sampling = "moss"
+flow_match_logit_mean = 1.09
+flow_match_logit_std = 0.95
+flow_match_cutoff = 0.95
+flow_match_uniform_mix = 0.01
+flow_match_loss_weighting = "uniform"
+# flow_match_shift = 1.0
+
+# --- LoRA -------------------------------------------------------------------
+# All six linears of every joint block (q/k/v/o + SiTU FFN), i.e. KohakuMoss's
+# "attn-mlp" preset. Rank 32 / lr 1e-4 is the recipe KohakuMoss and
+# SimpleTuner both ship.
+mode = "lora"
+lora_dim = 32
+lora_alpha = 32
+
+optimizer = "adamW8bit"
+unet_lr = 1e-4
+optimizer_warmup_steps = 100
+optimizer_num_cycles = 1
+max_grad_norm = 1.0
+
+n_epochs = 8
+batch_size = 2
+gradient_accumulation_steps = 2
+dataloader_num_workers = 4
+
+mixed_precision = "bf16"
+weight_dtype = "bf16"
+save_dtype = "bf16"
+gradient_checkpointing = true
+# The DiT runs on torch SDPA; the xformers processor targets UNets only.
+enable_flash_attention = false
+
+use_ema = false
+noise_offset = 0.0
+input_perturbation = 0.0
+
+save_every_n_epochs = 8
+preview_every_n_epochs = 8
+checkpoint_every_n_steps = 500
+
+# Pipeline defaults: CFG 3 with block 22 skipped in the negative branch,
+# empty negative prompt, shift 5. 30 steps is a cheap preview; 50 is the
+# official default.
+[[preview_sample_options]]
+prompt = "best quality, 1girl, solo, looking at viewer, long hair, smile, outdoors, cherry blossoms"
+negative_prompt = ""
+seed = 47
+steps = 30
+width = 1024
+height = 1024
+guidance_scale = 3.0
+
+[[preview_sample_options]]
+prompt = "A quiet mountain lake at sunset, pine forest on the shore, clouds reflected in the still water, anime background art"
+negative_prompt = ""
+seed = 48
+steps = 30
+width = 1152
+height = 896
+guidance_scale = 3.0
