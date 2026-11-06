@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Generator, Mapping, Sequence
@@ -56,7 +57,9 @@ def process_caption(caption: str | None) -> str:
 @dataclass
 class DiffusionTrainingItem:
     npz_path: str
-    caption: str | None
+    # A list holds alternative captions (e.g. long/medium/short recaptions);
+    # loading picks one per draw, so each epoch sees a different one.
+    caption: str | list[str] | None
     tags: list[str] | None
     # Metadata from the parquet manifest (single source of truth). None falls
     # back to legacy NPZ files that embed these fields next to the latents.
@@ -180,7 +183,8 @@ class DiffusionDataset(Dataset):
             buckets[(train_resolution[0], train_resolution[1])].append(
                 DiffusionTrainingItem(
                     npz_path=npz_path.as_posix(),
-                    caption=row.get("caption", ""),  # Use empty string if caption doesn't exist
+                    # A non-empty ``captions`` list (alternatives) wins over the single ``caption``.
+                    caption=DiffusionDataset._row_str_list(row, "captions") or row.get("caption", ""),
                     tags=tags,
                     crop_ltrb=DiffusionDataset._row_int_list(row, "crop_ltrb"),
                     original_size=DiffusionDataset._row_int_list(row, "original_size"),
@@ -230,7 +234,7 @@ class DiffusionDataset(Dataset):
             return {
                 "img_latents": npz["latents"],
                 **meta,
-                "caption": item.caption,
+                "caption": random.choice(item.caption) if isinstance(item.caption, list) else item.caption,
                 "tags": item.tags,
                 "tag_categories": item.tag_categories or [],
             }

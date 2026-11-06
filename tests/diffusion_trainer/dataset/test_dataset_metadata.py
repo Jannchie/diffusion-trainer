@@ -116,6 +116,21 @@ def test_from_parquet_reads_tag_categories(tmp_path: Path) -> None:
     assert loaded["tag_categories"] == ["quality", "artist", "general"]
 
 
+def test_from_parquet_prefers_the_captions_list(tmp_path: Path) -> None:
+    latents_dir = tmp_path / "latents"
+    write_latent_only_npz(latents_dir, KEY_A)
+    write_latents_meta(latents_dir, {KEY_A: META_A})
+    CreateParquetProcessor(tmp_path)(max_workers=2)
+
+    parquet_path = tmp_path / "metadata.parquet"
+    table = pq.read_table(parquet_path)
+    table = table.append_column("captions", pa.array([["long one", "short"]], type=pa.list_(pa.string())))
+    pq.write_table(table, parquet_path)
+
+    dataset = DiffusionDataset.from_parquet(parquet_path)
+    assert {dataset[0]["caption"] for _ in range(50)} == {"long one", "short"}
+
+
 def test_from_parquet_without_tag_categories_yields_empty_list(tmp_path: Path) -> None:
     latents_dir = tmp_path / "latents"
     write_latent_only_npz(latents_dir, KEY_A)
