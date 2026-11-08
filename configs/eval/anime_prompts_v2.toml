@@ -1,0 +1,81 @@
+# Anime eval set v2: v1 (included unchanged, so v1 and v2 renders of a model are
+# comparable prompt by prompt) plus an `artist` group, checking whether a
+# finetune binds a look to an artist in MOSS-Image's USERGUIDE spelling
+# (`@name`, spaces). v1's own prompts keep v1's spelling: `legacy_nichika_tags`
+# still names its artist without `@`.
+
+include = ["anime_prompts_v1.toml"]
+
+[defaults]
+steps = 50
+guidance_scale = 3.0
+negative_prompt = ""
+width = 1024
+height = 1024
+
+# --- artist: the same prompt and seed with each frequent training-set artist ----
+# Entries in each variant differ only in the @artist tag; `artist_none_*` is the
+# control, so a column that changes only by it shows whether the model draws
+# that artist's look. The caption variant (two artists are enough to see the
+# binding survive a leading caption) joins caption and tags as training does:
+# "<caption>, <tags>", hence "desks., best quality".
+
+[[prompts]]
+name = "artist_none_tags"
+category = "artist"
+seed = 101
+prompt = "best quality, newest, original, 1girl, solo, long hair, looking at viewer, smile, upper body, outdoors, sky, wind"
+
+[[prompts]]
+name = "artist_scottie_tags"
+category = "artist"
+seed = 101
+prompt = "best quality, newest, original, @scottie (phantom2), 1girl, solo, long hair, looking at viewer, smile, upper body, outdoors, sky, wind"
+
+[[prompts]]
+name = "artist_maccha_tags"
+category = "artist"
+seed = 101
+prompt = "best quality, newest, original, @maccha (mochancc), 1girl, solo, long hair, looking at viewer, smile, upper body, outdoors, sky, wind"
+
+[[prompts]]
+name = "artist_mika_pikazo_tags"
+category = "artist"
+seed = 101
+prompt = "best quality, newest, original, @mika pikazo, 1girl, solo, long hair, looking at viewer, smile, upper body, outdoors, sky, wind"
+
+[[prompts]]
+name = "artist_kawacy_tags"
+category = "artist"
+seed = 101
+prompt = "best quality, newest, original, @kawacy, 1girl, solo, long hair, looking at viewer, smile, upper body, outdoors, sky, wind"
+
+[[prompts]]
+name = "artist_guweiz_tags"
+category = "artist"
+seed = 101
+prompt = "best quality, newest, original, @guweiz, 1girl, solo, long hair, looking at viewer, smile, upper body, outdoors, sky, wind"
+
+[[prompts]]
+name = "artist_wlop_tags"
+category = "artist"
+seed = 101
+prompt = "best quality, newest, original, @wlop, 1girl, solo, long hair, looking at viewer, smile, upper body, outdoors, sky, wind"
+
+[[prompts]]
+name = "artist_none_caption"
+category = "artist"
+seed = 202
+prompt = "A girl with short black hair in a school uniform sits by a classroom window in the late afternoon, warm sunlight across the desks., best quality, newest, original, 1girl, solo, school uniform, classroom, window, sunlight"
+
+[[prompts]]
+name = "artist_scottie_caption"
+category = "artist"
+seed = 202
+prompt = "A girl with short black hair in a school uniform sits by a classroom window in the late afternoon, warm sunlight across the desks., best quality, newest, original, @scottie (phantom2), 1girl, solo, school uniform, classroom, window, sunlight"
+
+[[prompts]]
+name = "artist_maccha_caption"
+category = "artist"
+seed = 202
+prompt = "A girl with short black hair in a school uniform sits by a classroom window in the late afternoon, warm sunlight across the desks., best quality, newest, original, @maccha (mochancc), 1girl, solo, school uniform, classroom, window, sunlight"

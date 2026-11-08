@@ -93,3 +93,37 @@ def test_repo_prompt_sets_load(name: str) -> None:
     prompts = load_prompt_set(REPO_SET.parent / name)
     assert len(prompts) >= 40
     assert all(p.width % 16 == 0 and p.height % 16 == 0 for p in prompts)
+
+
+EXT = """
+include = ["base.toml"]
+
+[defaults]
+steps = 30
+guidance_scale = 3.0
+negative_prompt = ""
+width = 832
+height = 1216
+
+[[prompts]]
+name = "{name}"
+category = "artist"
+seed = 3
+prompt = "@x"
+"""
+
+
+def test_include_extends_another_set_and_keeps_its_defaults(tmp_path: Path) -> None:
+    (tmp_path / "base.toml").write_text(SET)
+    (tmp_path / "ext.toml").write_text(EXT.format(name="c"))
+    prompts = load_prompt_set(tmp_path / "ext.toml")
+    assert [p.name for p in prompts] == [*(p.name for p in load_prompt_set(tmp_path / "base.toml")), "c"]
+    assert prompts[0].steps == 50  # the included set's own defaults
+    assert prompts[-1].width == 832
+
+
+def test_include_rejects_names_clashing_with_the_included_set(tmp_path: Path) -> None:
+    (tmp_path / "base.toml").write_text(SET)
+    (tmp_path / "ext.toml").write_text(EXT.format(name="a"))
+    with pytest.raises(ValueError, match="Duplicate"):
+        load_prompt_set(tmp_path / "ext.toml")
