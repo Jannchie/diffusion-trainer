@@ -63,6 +63,22 @@ class BaseConfig:
         default_factory=lambda: ["general"],
         metadata={"help": "Categories subject to single_tag_dropout; the rest (quality/artist/...) are never dropped individually."},
     )
+    # Tag spelling. Booru exports keep underscores (``long_hair``); models whose
+    # pretraining prompts use spaces and ``@artist`` (MOSS-Image's USERGUIDE:
+    # "hatsune miku, vocaloid, @foo bar") should be trained in that spelling,
+    # so the prompt reuses what the base already binds to the tag.
+    tag_underscores_to_spaces: bool = field(
+        default=False,
+        metadata={"help": "Write tags with spaces instead of underscores; kaomoji like ^_^ are kept."},
+    )
+    tag_category_prefixes: dict[str, str] = field(
+        default_factory=dict,
+        metadata={"help": 'Prefix per tag category, e.g. {artist = "@"}.'},
+    )
+    tag_category_allowlists: dict[str, list[str]] = field(
+        default_factory=dict,
+        metadata={"help": "Per category, the only tags (dataset spelling) that enter the prompt, e.g. {meta = ['highres']}; unlisted categories keep all."},
+    )
     # Declarative train-time subsetting: one exported dataset can serve many
     # runs (e.g. a best-quality-only experiment) by filtering manifest rows;
     # works for both local parquet and hf:// streaming datasets.

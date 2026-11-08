@@ -25,6 +25,8 @@ from pathlib import Path
 
 import httpx
 
+from diffusion_trainer.dataset.booru_tags import booru_tag_to_text
+
 logger = logging.getLogger("diffusion_trainer.dataset.captioning")
 
 CAPTION_PROMPT = """You are an image recaptioner. Return exactly one JSON object with this schema:
@@ -120,7 +122,7 @@ def build_reference(tags: Sequence[str], categories: Sequence[str] | None = None
         if category in REFERENCE_SKIPPED_CATEGORIES:
             continue
         label = _REFERENCE_LABELS.get(category, "Tags")
-        grouped.setdefault(label, []).append(tag.replace("_", " "))
+        grouped.setdefault(label, []).append(booru_tag_to_text(tag))
     lines = [original_caption.strip()] if original_caption.strip() else []
     lines += [f"{label}: {', '.join(values)}" for label, values in grouped.items()]
     return "\n".join(lines) if lines else "(none)"

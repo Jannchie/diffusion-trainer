@@ -4,9 +4,9 @@ import math
 import random
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,6 +23,7 @@ from PIL import Image
 from torch.utils.data import DataLoader
 
 from diffusion_trainer.config import BaseConfig, SampleOptions
+from diffusion_trainer.dataset.booru_tags import booru_tag_to_text
 from diffusion_trainer.dataset.dataset import BucketBasedBatchSampler, DiffusionBatch, DiffusionDataset, TagFilters
 from diffusion_trainer.dataset.processors.create_parquet_processor import CreateParquetProcessor
 from diffusion_trainer.dataset.processors.latents_generate_processor import LatentsGenerateProcessor
@@ -107,6 +108,15 @@ class TagCompositionRules:
     shuffled_categories: frozenset[str]
     droppable_categories: frozenset[str]
     single_tag_dropout: float
+    underscores_to_spaces: bool = False
+    category_prefixes: Mapping[str, str] = field(default_factory=dict)
+    category_allowlists: Mapping[str, frozenset[str]] = field(default_factory=dict)
+
+    def spell(self, tag: str, category: str) -> str:
+        """``tag`` as written in the prompt: spaces for underscores, then the category prefix."""
+        if self.underscores_to_spaces:
+            tag = booru_tag_to_text(tag)
+        return self.category_prefixes.get(category, "") + tag
 
     @classmethod
     def from_config(cls, config: BaseConfig) -> "TagCompositionRules":
@@ -116,6 +126,9 @@ class TagCompositionRules:
             shuffled_categories=frozenset(config.shuffled_tag_categories) if config.shuffle_tags else frozenset(),
             droppable_categories=frozenset(config.droppable_tag_categories) if config.single_tag_dropout > 0 else frozenset(),
             single_tag_dropout=config.single_tag_dropout,
+            underscores_to_spaces=config.tag_underscores_to_spaces,
+            category_prefixes=dict(config.tag_category_prefixes),
+            category_allowlists={category: frozenset(tags) for category, tags in config.tag_category_allowlists.items()},
         )
 
 
@@ -138,11 +151,14 @@ def compose_prompt_tags(tags: Sequence[str], categories: Sequence[str], rules: T
     result: list[str] = []
     for category in rules.category_order:
         category_tags = grouped.get(category, [])
+        allowed = rules.category_allowlists.get(category)
+        if allowed is not None:
+            category_tags = [tag for tag in category_tags if tag in allowed]
         if category in rules.droppable_categories:
             category_tags = [tag for tag in category_tags if random.random() >= rules.single_tag_dropout]
         if category in rules.shuffled_categories:
             random.shuffle(category_tags)  # per-sample lists built above; mutation is local
-        result.extend(category_tags)
+        result.extend(rules.spell(tag, category) for tag in category_tags)
     return result
 
 

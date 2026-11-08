@@ -1,6 +1,7 @@
 """Category-aware prompt assembly: pinned prefix, shuffled tail, legacy fallback."""
 
 import random
+from dataclasses import replace
 
 from diffusion_trainer.config import BaseConfig
 from diffusion_trainer.finetune.base import TagCompositionRules, compose_prompt_tags
@@ -64,3 +65,29 @@ def test_rules_from_config_fold_global_switches() -> None:
     assert rules.category_order == ("quality", "year", "artist", "copyright", "character", "general")
     assert rules.shuffled_categories == frozenset({"general"})
     assert rules.droppable_categories == frozenset({"general"})
+
+
+def test_spelling_spaces_and_category_prefix() -> None:
+    rules = replace(_rules(), underscores_to_spaces=True, category_prefixes={"artist": "@"})
+    tags = ["good quality", "mika_pikazo", "genshin_impact", "ganyu_(genshin_impact)", "long_hair", "^_^"]
+    categories = ["quality", "artist", "copyright", "character", "general", "general"]
+    assert compose_prompt_tags(tags, categories, rules) == [
+        "good quality",
+        "@mika pikazo",
+        "genshin impact",
+        "ganyu (genshin impact)",
+        "long hair",
+        "^_^",  # kaomoji keep their underscore
+    ]
+
+
+def test_spelling_is_off_by_default() -> None:
+    rules = TagCompositionRules.from_config(BaseConfig(model_path="x", dataset_path="y"))
+    assert compose_prompt_tags(TAGS, CATEGORIES, rules) == TAGS
+
+
+def test_allowlist_keeps_only_listed_tags_of_its_category() -> None:
+    rules = replace(_rules(), category_order=("quality", "meta", "general"), category_allowlists={"meta": frozenset({"highres", "official_art"})})
+    tags = ["best quality", "highres", "commentary_request", "official_art", "bad_id", "1girl"]
+    categories = ["quality", "meta", "meta", "meta", "meta", "general"]
+    assert compose_prompt_tags(tags, categories, rules) == ["best quality", "highres", "official_art", "1girl"]
