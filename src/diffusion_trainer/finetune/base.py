@@ -582,9 +582,12 @@ class BaseTuner(ABC):
         # LoRA wrap one module while EMA shadows another, silently.
         lycoris_model = apply_lora_config(self.config.mode, self.denoiser, self.config, targets=self.lora_targets)
 
-        # Ensure LoRA model dtype matches the weight dtype to prevent dtype mismatch errors
-        lycoris_model.to(dtype=self.weight_dtype)
-        logger.info("LoRA model dtype set to: %s", self.weight_dtype)
+        # The LoRA weights are what the optimizer updates, so they stay fp32 like
+        # any trainable model (see `model_dtype`): in bf16, Adam steps below half
+        # an ULP round away and the LoRA stops learning as its weights grow.
+        # LyCORIS casts its delta to the frozen base weight's dtype in forward.
+        lycoris_model.to(dtype=torch.float32)
+        logger.info("LoRA model dtype set to: %s", torch.float32)
 
         self.trainable_models_with_lr.append(TrainableModel(model=lycoris_model, lr=self.config.unet_lr))
         self.lycoris_model = lycoris_model
